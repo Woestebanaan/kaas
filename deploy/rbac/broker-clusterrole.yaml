@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: skafka-broker
+rules:
+  # Partition leadership via Leases
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update]
+  # Cluster topology
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  # CRD watches — read-only
+  - apiGroups: [skafka.io]
+    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls]
+    verbs: [get, list, watch]
+  # Credentials and TLS secrets — own namespace only (enforced via RoleBinding)
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  # ReadinessGate updates — own pod only
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [get, patch]

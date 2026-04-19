@@ -1,0 +1,28 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: skafka-operator
+rules:
+  # Full CRD management
+  - apiGroups: [skafka.io]
+    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [skafka.io]
+    resources: [kafkatopics/status, kafkausers/status, kafkausergroups/status, kafkaacls/status]
+    verbs: [get, update, patch]
+  # Secrets — own namespace only (enforced via RoleBinding)
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Jobs for topic directory creation and deletion
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  # Inspect partition Leases
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, patch]
+  # cert-manager integration (optional)
+  - apiGroups: [cert-manager.io]
+    resources: [certificaterequests]
+    verbs: [get, list, watch, create, delete]
