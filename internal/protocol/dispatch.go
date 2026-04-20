@@ -32,8 +32,12 @@ type registration struct {
 
 // Dispatcher routes incoming requests to the correct handler by API key.
 type Dispatcher struct {
-	handlers map[int16]registration
+	handlers    map[int16]registration
+	RequireSASL bool // when true, reject non-SASL requests from unauthenticated connections
 }
+
+// preSASLKeys are API keys permitted before SASL authentication completes.
+var preSASLKeys = map[int16]bool{17: true, 18: true, 36: true}
 
 func NewDispatcher() *Dispatcher {
 	return &Dispatcher{handlers: make(map[int16]registration)}
@@ -47,6 +51,11 @@ func (d *Dispatcher) Register(apiKey int16, min, max int16, h Handler) {
 // Dispatch decodes the request header, checks version support, calls the handler,
 // and returns a complete framed response ready to write to the wire.
 func (d *Dispatcher) Dispatch(hdr RequestHeader, body []byte, connState *connstate.ConnState) ([]byte, error) {
+	// Reject pre-auth requests when SASL is required.
+	if d.RequireSASL && !connState.SASLDone && !preSASLKeys[hdr.APIKey] {
+		return errorResponse(hdr, ErrClusterAuthorizationFailed), nil
+	}
+
 	reg, ok := d.handlers[hdr.APIKey]
 	if !ok {
 		return errorResponse(hdr, ErrUnsupportedVersion), nil
@@ -90,6 +99,9 @@ func (d *Dispatcher) SupportedVersions() map[int16][2]int16 {
 
 // ErrUnsupportedVersion is the wire error code for unsupported API version.
 const ErrUnsupportedVersion int16 = 35
+
+// ErrClusterAuthorizationFailed is returned for requests made before SASL completes.
+const ErrClusterAuthorizationFailed int16 = 31
 
 // errorResponse builds a minimal error response for a known API version.
 func errorResponse(hdr RequestHeader, errCode int16) []byte {

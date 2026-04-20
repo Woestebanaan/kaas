@@ -85,6 +85,17 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 		resp.Responses = append(resp.Responses, topicResp)
 	}
 
+	// Quota enforcement: tally bytes returned across all partitions.
+	totalBytes := 0
+	for _, t := range resp.Responses {
+		for _, p := range t.Partitions {
+			totalBytes += len(p.Records)
+		}
+	}
+	if throttleMs := h.auth.CheckFetchQuota(principal, totalBytes); throttleMs > 0 {
+		resp.ThrottleTimeMs = throttleMs
+	}
+
 	w := codec.NewWriter()
 	api.EncodeFetchResponse(w, resp, version)
 	return w.Bytes(), nil

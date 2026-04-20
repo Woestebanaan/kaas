@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
 )
 
@@ -25,6 +26,7 @@ type Config struct {
 type Server struct {
 	cfg        Config
 	dispatcher *Dispatcher
+	authEngine auth.AuthEngine // optional; used for mTLS CN extraction
 	listeners  []net.Listener
 	wg         sync.WaitGroup
 }
@@ -35,6 +37,9 @@ func NewServer(cfg Config, d *Dispatcher) *Server {
 	}
 	return &Server{cfg: cfg, dispatcher: d}
 }
+
+// SetAuthEngine registers an AuthEngine used for mTLS CN extraction on TLS connections.
+func (s *Server) SetAuthEngine(e auth.AuthEngine) { s.authEngine = e }
 
 // Start opens the listener(s) and begins accepting connections.
 // It returns once all listeners are bound (or on error).
@@ -110,6 +115,26 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 	defer c.Close()
 
 	state := &connstate.ConnState{}
+
+	// Mark TLS connections and extract the mTLS principal if a client cert is present.
+	if tlsConn, ok := c.(*tls.Conn); ok {
+		state.IsTLS = true
+		if err := tlsConn.Handshake(); err != nil {
+			slog.Warn("tls handshake failed", "err", err)
+			return
+		}
+		cs := tlsConn.ConnectionState()
+		if len(cs.PeerCertificates) > 0 && s.authEngine != nil {
+			cn := cs.PeerCertificates[0].Subject.CommonName
+			if p, err := s.authEngine.AuthenticateTLS(cn); err == nil {
+				state.Principal = &p
+				state.SASLDone = true
+			} else {
+				slog.Warn("tls: rejected peer cert", "cn", cn, "err", err)
+			}
+		}
+	}
+
 	br := bufio.NewReaderSize(c, 64*1024)
 	bw := bufio.NewWriterSize(c, 64*1024)
 

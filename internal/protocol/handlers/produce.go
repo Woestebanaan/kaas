@@ -39,6 +39,17 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 	principal := principalFrom(conn)
 	resp := &api.ProduceResponse{}
 
+	// Quota enforcement: total bytes across all partitions/topics in this request.
+	totalBytes := 0
+	for _, td := range req.TopicData {
+		for _, pd := range td.PartitionData {
+			totalBytes += len(pd.Records)
+		}
+	}
+	if throttleMs := h.auth.CheckProduceQuota(principal, totalBytes); throttleMs > 0 {
+		resp.ThrottleTime = throttleMs
+	}
+
 	for _, td := range req.TopicData {
 		topicResp := api.ProduceTopicResponse{Name: td.Name}
 

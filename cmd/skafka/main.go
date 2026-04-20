@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	sigs_client "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/broker"
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8spkg "github.com/woestebanaan/skafka/internal/k8s"
@@ -158,20 +159,45 @@ func runBroker(ctx context.Context) {
 		coordMgr = coordinator.NewManager(ctx, localLeases, lookupBroker, offsetStore)
 	}
 
+	// --- Auth engine ---
+	var authEngine auth.AuthEngine = broker.NewAllowAllAuthEngine()
+	if dataDir != "" {
+		real, err := auth.NewRealAuthEngine(dataDir, k8sClient)
+		if err != nil {
+			slog.Warn("auth engine init failed, falling back to AllowAll", "err", err)
+		} else {
+			authEngine = real
+			// Wire ClusterFileWatcher to hot-reload credentials and ACLs.
+			watcher := storage.NewClusterFileWatcher(
+				filepath.Join(dataDir, "__cluster", "acls.json"),
+				filepath.Join(dataDir, "__cluster", "credentials.json"),
+				func(_ string) { real.Reload() },
+				func(_ string) { real.Reload() },
+			)
+			go func() {
+				done := make(chan struct{})
+				go func() { <-ctx.Done(); close(done) }()
+				_ = watcher.Run(done)
+			}()
+		}
+	}
+
 	b := broker.NewWithBrokerSource(
 		broker.Config{BrokerID: brokerID, Host: host, Port: portNum, ClusterID: clusterID},
 		store,
 		leaseManager,
 		partLock,
-		broker.NewAllowAllAuthEngine(),
+		authEngine,
 		brokerSource,
 		coordMgr,
 	)
 
 	d := protocol.NewDispatcher()
+	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
 	b.RegisterHandlers(d)
 
 	srv := protocol.NewServer(protocol.Config{ListenAddr: host + ":" + port}, d)
+	srv.SetAuthEngine(authEngine)
 	if err := srv.Start(ctx); err != nil {
 		slog.Error("start server", "err", err)
 		os.Exit(1)

@@ -13,6 +13,8 @@ import (
 	"github.com/woestebanaan/skafka/internal/storage"
 )
 
+var _ = context.Background // keep context import for lease manager stubs below
+
 // ---- MemoryStorage ---- //
 
 // MemoryStorage is an in-memory StorageEngine for development and testing.
@@ -166,17 +168,31 @@ func (l *LocalPartitionLock) IsLocked(_ string, _ int32) bool { return true }
 // ---- AllowAllAuthEngine ---- //
 
 // AllowAllAuthEngine authenticates every connection as ANONYMOUS and permits all operations.
-// Used in development; replaced by scram.go/tls.go in production (Phase 7).
+// Used in development; replaced by RealAuthEngine in production (Phase 7).
 type AllowAllAuthEngine struct{}
 
 func NewAllowAllAuthEngine() *AllowAllAuthEngine { return &AllowAllAuthEngine{} }
 
-func (a *AllowAllAuthEngine) Authenticate(_ context.Context, _ auth.Credentials) (auth.Principal, error) {
+func (a *AllowAllAuthEngine) NewSASLExchange(_ string) (auth.SASLExchange, error) {
+	return &allowAllExchange{}, nil
+}
+func (a *AllowAllAuthEngine) AuthenticateTLS(_ string) (auth.Principal, error) {
 	return auth.Principal{Name: "ANONYMOUS", Kind: "User"}, nil
 }
-
 func (a *AllowAllAuthEngine) Authorize(_ auth.Principal, _ auth.Resource, _ auth.Operation) bool {
 	return true
+}
+func (a *AllowAllAuthEngine) CheckProduceQuota(_ auth.Principal, _ int) int32 { return 0 }
+func (a *AllowAllAuthEngine) CheckFetchQuota(_ auth.Principal, _ int) int32   { return 0 }
+
+// allowAllExchange completes immediately with an ANONYMOUS principal.
+type allowAllExchange struct{}
+
+func (e *allowAllExchange) Step(_ []byte) ([]byte, bool, error) {
+	return nil, true, nil
+}
+func (e *allowAllExchange) Principal() auth.Principal {
+	return auth.Principal{Name: "ANONYMOUS", Kind: "User"}
 }
 
 // ---- DenyAllAuthEngine ---- //
@@ -186,13 +202,24 @@ type DenyAllAuthEngine struct{}
 
 func NewDenyAllAuthEngine() *DenyAllAuthEngine { return &DenyAllAuthEngine{} }
 
-func (d *DenyAllAuthEngine) Authenticate(_ context.Context, _ auth.Credentials) (auth.Principal, error) {
+func (d *DenyAllAuthEngine) NewSASLExchange(_ string) (auth.SASLExchange, error) {
+	return &denyAllExchange{}, nil
+}
+func (d *DenyAllAuthEngine) AuthenticateTLS(_ string) (auth.Principal, error) {
 	return auth.Principal{}, errors.New("authentication required")
 }
-
 func (d *DenyAllAuthEngine) Authorize(_ auth.Principal, _ auth.Resource, _ auth.Operation) bool {
 	return false
 }
+func (d *DenyAllAuthEngine) CheckProduceQuota(_ auth.Principal, _ int) int32 { return 0 }
+func (d *DenyAllAuthEngine) CheckFetchQuota(_ auth.Principal, _ int) int32   { return 0 }
+
+type denyAllExchange struct{}
+
+func (e *denyAllExchange) Step(_ []byte) ([]byte, bool, error) {
+	return nil, false, errors.New("authentication required")
+}
+func (e *denyAllExchange) Principal() auth.Principal { return auth.Principal{} }
 
 // Verify interfaces at compile time.
 var _ storage.StorageEngine = (*MemoryStorage)(nil)
