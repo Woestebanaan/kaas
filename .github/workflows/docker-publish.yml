@@ -6,10 +6,9 @@ name: release
 #   - pre-release tags (v*-*) publish to separate image names
 #   - all artifacts are cosign-signed with GitHub's OIDC identity
 #
-# Runs on self-hosted ARC runners: QEMU/multi-arch is disabled because
-# tonistiigi/binfmt needs --privileged which ARC pods usually don't have.
-# To publish multi-arch, either run on GitHub-hosted runners (ubuntu-latest)
-# or configure the ARC pod template with a privileged init container.
+# Runs on the Woestebanaan/skafka ARC runner set (apps/arc-runners in the
+# k3s-cluster repo). containerMode=dind provides a privileged Docker daemon
+# which supports QEMU, multi-arch, and GHA cache.
 on:
   push:
     tags:
@@ -27,6 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # binfmt_misc registration for cross-arch builds. DinD is privileged, so
+      # `docker run --privileged tonistiigi/binfmt --install all` succeeds.
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
         with:
           install: true
@@ -41,12 +43,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Detect pre-releases: tags with a hyphen (v1.0.0-rc.1) go to preview images.
+      # GHCR requires lowercase paths. Lowercase the org slug up-front so pre-release
+      # image name computation and the Helm push both use consistent values.
       - name: Compute image names
         id: names
         run: |
           VERSION=${{ github.ref_name }}
-          OWNER=${{ github.repository_owner }}
+          OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
           if [[ "$VERSION" == *-* ]]; then
             echo "broker_image=ghcr.io/${OWNER}/skafka-preview" >> "$GITHUB_OUTPUT"
             echo "operator_image=ghcr.io/${OWNER}/skafka-operator-preview" >> "$GITHUB_OUTPUT"
@@ -64,11 +68,11 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.names.outputs.broker_image }}:${{ github.ref_name }}
-          cache-from: type=inline
-          cache-to: type=inline,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Cosign broker image
         run: |
@@ -82,11 +86,11 @@ jobs:
         with:
           context: .
           file: Dockerfile.operator
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.names.outputs.operator_image }}:${{ github.ref_name }}
-          cache-from: type=inline
-          cache-to: type=inline,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Cosign operator image
         run: |
@@ -102,6 +106,7 @@ jobs:
         id: chart
         env:
           VERSION: ${{ github.ref_name }}
+          OWNER: ${{ steps.names.outputs.owner }}
         run: |
           # Helm chart versions are pure SemVer — strip the leading "v".
           CHART_VERSION=${VERSION#v}
@@ -112,10 +117,10 @@ jobs:
             -u "${{ github.actor }}" \
             -p "${{ secrets.GITHUB_TOKEN }}"
           PUSH_OUT=$(helm push "skafka-${CHART_VERSION}.tgz" \
-            "oci://ghcr.io/${{ github.repository_owner }}/charts" 2>&1)
+            "oci://ghcr.io/${OWNER}/charts" 2>&1)
           echo "$PUSH_OUT"
           DIGEST=$(echo "$PUSH_OUT" | awk '/Digest:/ {print $2}')
-          echo "chart_ref=ghcr.io/${{ github.repository_owner }}/charts/skafka@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "chart_ref=ghcr.io/${OWNER}/charts/skafka@${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Cosign Helm chart
         run: |

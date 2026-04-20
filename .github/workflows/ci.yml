@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-# Explicit least-privilege permissions. Override per-job if a step needs more.
 permissions:
   contents: read
 
@@ -35,8 +34,7 @@ jobs:
       - name: Install controller-gen
         run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
 
-      # Invoke controller-gen directly instead of `make manifests` — `make` is
-      # not guaranteed to be installed on ARC runner images.
+      # Invoke controller-gen directly; `make` is not in the default ARC runner image.
       - name: Check CRD manifests are up to date
         run: |
           "$(go env GOPATH)/bin/controller-gen" \
@@ -48,8 +46,9 @@ jobs:
     runs-on: arc-runner-set
     steps:
       - uses: actions/checkout@v4
-      # docker-container driver pulls a buildkit image; works inside ARC pods
-      # without needing a docker-in-docker sidecar.
+      # ARC runners use containerMode: dind — a privileged DinD sidecar provides
+      # the Docker daemon. The docker-container buildx driver runs buildkit
+      # inside that daemon.
       - uses: docker/setup-buildx-action@v3
         with:
           install: true
@@ -61,10 +60,8 @@ jobs:
           context: .
           file: Dockerfile
           push: false
-          # type=inline embeds the cache manifest in the image; portable and
-          # does not require GHA cache env vars (often absent on ARC).
-          cache-from: type=inline
-          cache-to: type=inline,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build operator image (no push)
         uses: docker/build-push-action@v5
@@ -72,8 +69,8 @@ jobs:
           context: .
           file: Dockerfile.operator
           push: false
-          cache-from: type=inline
-          cache-to: type=inline,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   helm:
     runs-on: arc-runner-set
