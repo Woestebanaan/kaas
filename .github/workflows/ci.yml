@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# Run all Node.js-based actions under Node 24. Several actions we depend on
+# (checkout, setup-go, setup-helm, build-push, setup-buildx) still target
+# Node 20 which the runner will phase out in mid-2026. This env flag opts
+# us into Node 24 now so we don't rely on a deprecated runtime.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   lint-and-test:
     runs-on: arc-runner-set
@@ -37,7 +44,6 @@ jobs:
       # golangci-lint is currently disabled: the latest published golangci-lint
       # is built with Go 1.24 and refuses to load a project whose go.mod targets
       # Go 1.26.1. Re-enable once a golangci-lint release built with Go 1.26 ships.
-      # Tracking: https://github.com/golangci/golangci-lint/releases
 
       - name: go test
         run: go test ./...
@@ -56,9 +62,6 @@ jobs:
     runs-on: arc-runner-set
     steps:
       - name: Wait for Docker daemon (DinD sidecar)
-        # The DinD sidecar takes a few seconds to start. The runner container
-        # can begin executing before dockerd is listening, which makes the
-        # first docker action fail with "Cannot connect to the Docker daemon".
         run: |
           echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
           for i in $(seq 1 30); do
@@ -75,22 +78,21 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # No `install: true`: deprecated. setup-buildx-action creates the builder
+      # and wires it up as the active context automatically.
       - uses: docker/setup-buildx-action@v3
         with:
-          install: true
           driver: docker-container
 
       - name: Build broker image (no push)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           push: false
-          # No cache-to on CI: inline/GHA caches require push:true or env vars
-          # that may not be present. Plain build keeps the dependency minimal.
 
       - name: Build operator image (no push)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.operator
