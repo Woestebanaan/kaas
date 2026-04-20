@@ -1,78 +1,114 @@
-name: Docker publish
+name: release
 
+# Triggered by semver tags. Publishes both container images and the Helm chart
+# to GHCR, signed with keyless cosign. Guardrails:
+#   - environment: release requires manual approval
+#   - pre-release tags (v*-*) publish to separate image names
+#   - all artifacts are cosign-signed with GitHub's OIDC identity
 on:
   push:
     tags:
       - 'v*'
 
-env:
-  REGISTRY: ghcr.io
-  BROKER_IMAGE: ghcr.io/${{ github.repository }}
-  OPERATOR_IMAGE: ghcr.io/${{ github.repository }}-operator
-
 jobs:
-  build-and-push:
+  release:
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
       packages: write
+      id-token: write          # required for keyless cosign
 
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up QEMU (for cross-compilation)
-        uses: docker/setup-qemu-action@v3
+      # Detect pre-releases: tags with a hyphen (v1.0.0-rc.1) go to preview images.
+      - name: Compute image names
+        id: names
+        run: |
+          VERSION=${{ github.ref_name }}
+          OWNER=${{ github.repository_owner }}
+          if [[ "$VERSION" == *-* ]]; then
+            echo "broker_image=ghcr.io/${OWNER}/skafka-preview" >> "$GITHUB_OUTPUT"
+            echo "operator_image=ghcr.io/${OWNER}/skafka-operator-preview" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "broker_image=ghcr.io/${OWNER}/skafka" >> "$GITHUB_OUTPUT"
+            echo "operator_image=ghcr.io/${OWNER}/skafka-operator" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Extract metadata (broker)
-        id: broker-meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.BROKER_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-
-      - name: Build and push broker image
+      # ---- Broker image ----
+      - name: Build + push broker image
+        id: broker
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.broker-meta.outputs.tags }}
-          labels: ${{ steps.broker-meta.outputs.labels }}
+          tags: ${{ steps.names.outputs.broker_image }}:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Extract metadata (operator)
-        id: operator-meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.OPERATOR_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+      - name: Cosign broker image
+        run: |
+          cosign sign --yes \
+            "${{ steps.names.outputs.broker_image }}@${{ steps.broker.outputs.digest }}"
 
-      - name: Build and push operator image
+      # ---- Operator image ----
+      - name: Build + push operator image
+        id: operator
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.operator
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.operator-meta.outputs.tags }}
-          labels: ${{ steps.operator-meta.outputs.labels }}
+          tags: ${{ steps.names.outputs.operator_image }}:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Cosign operator image
+        run: |
+          cosign sign --yes \
+            "${{ steps.names.outputs.operator_image }}@${{ steps.operator.outputs.digest }}"
+
+      # ---- Helm chart (OCI) ----
+      - uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+
+      - name: Package + push Helm chart
+        id: chart
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          # Helm chart versions are pure SemVer — strip the leading "v".
+          CHART_VERSION=${VERSION#v}
+          helm package deploy/helm/skafka \
+            --version "$CHART_VERSION" \
+            --app-version "$CHART_VERSION"
+          helm registry login ghcr.io \
+            -u "${{ github.actor }}" \
+            -p "${{ secrets.GITHUB_TOKEN }}"
+          PUSH_OUT=$(helm push "skafka-${CHART_VERSION}.tgz" \
+            "oci://ghcr.io/${{ github.repository_owner }}/charts" 2>&1)
+          echo "$PUSH_OUT"
+          DIGEST=$(echo "$PUSH_OUT" | awk '/Digest:/ {print $2}')
+          echo "chart_ref=ghcr.io/${{ github.repository_owner }}/charts/skafka@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Cosign Helm chart
+        run: |
+          cosign sign --yes "${{ steps.chart.outputs.chart_ref }}"

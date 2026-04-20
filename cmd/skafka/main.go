@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -203,6 +205,12 @@ func runBroker(ctx context.Context) {
 		os.Exit(1)
 	}
 
+	// Health probe HTTP server (Kubernetes livenessProbe/readinessProbe).
+	healthAddr := envOr("SKAFKA_HEALTH_ADDR", ":8080")
+	startHealthServer(ctx, healthAddr, func() bool {
+		return srv.Addr() != ""
+	})
+
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
 	<-ctx.Done()
 	slog.Info("shutting down")
@@ -303,6 +311,36 @@ func mustRestConfig() *rest.Config {
 		}
 	}
 	return cfg
+}
+
+// startHealthServer runs an HTTP server on addr with /healthz and /readyz endpoints.
+// ready is called on each /readyz hit; it should return true when the broker is
+// accepting client connections.
+func startHealthServer(ctx context.Context, addr string, ready func() bool) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Warn("health server exited", "err", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	slog.Info("health server listening", "addr", addr)
 }
 
 func envOr(key, def string) string {
