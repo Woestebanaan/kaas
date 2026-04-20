@@ -1,0 +1,16 @@
+# Compiled binaries
+skafka
+skafka-router
+skafka-operator
+
+# Go build output
+bin/
+dist/
+
+# Test cache
+*.test
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp

@@ -140,6 +140,7 @@ func NewLocalLeaseManager() *LocalLeaseManager { return &LocalLeaseManager{} }
 func (l *LocalLeaseManager) Acquire(_ context.Context, _ string, _ int32) error { return nil }
 func (l *LocalLeaseManager) Release(_ string, _ int32) error                    { return nil }
 func (l *LocalLeaseManager) IsLeader(_ string, _ int32) bool                   { return true }
+func (l *LocalLeaseManager) LeaderFor(_ string, _ int32) int32                 { return 0 }
 func (l *LocalLeaseManager) WatchLeaders(_ context.Context) (<-chan lease.LeaderChange, error) {
 	return make(chan lease.LeaderChange), nil
 }

@@ -9,6 +9,19 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
 
+// BrokerEndpoint is one broker in the cluster as seen by the Metadata handler.
+type BrokerEndpoint struct {
+	NodeID int32
+	Host   string
+	Port   int32
+}
+
+// BrokerSource provides the live broker list for Metadata responses.
+type BrokerSource interface {
+	Self() BrokerEndpoint
+	All() []BrokerEndpoint
+}
+
 // TopicSource provides the set of known topics and their partition counts.
 type TopicSource interface {
 	Get(name string) (partitions int32, ok bool)
@@ -21,7 +34,8 @@ type TopicEntry struct {
 	Partitions int32
 }
 
-// BrokerInfo is static identity for this broker instance.
+// BrokerInfo is a static single-broker implementation of BrokerSource.
+// Used in local-dev and tests; replaced by a dynamic registry in Kubernetes mode.
 type BrokerInfo struct {
 	NodeID    int32
 	Host      string
@@ -29,14 +43,29 @@ type BrokerInfo struct {
 	ClusterID string
 }
 
+func (b BrokerInfo) Self() BrokerEndpoint { return BrokerEndpoint{NodeID: b.NodeID, Host: b.Host, Port: b.Port} }
+func (b BrokerInfo) All() []BrokerEndpoint { return []BrokerEndpoint{b.Self()} }
+
 type MetadataHandler struct {
-	self   BrokerInfo
-	topics TopicSource
-	leases lease.LeaseManager
+	brokers   BrokerSource
+	clusterID string
+	topics    TopicSource
+	leases    lease.LeaseManager
 }
 
 func NewMetadataHandler(self BrokerInfo, topics TopicSource, leases lease.LeaseManager) *MetadataHandler {
-	return &MetadataHandler{self: self, topics: topics, leases: leases}
+	return &MetadataHandler{
+		brokers:   self,
+		clusterID: self.ClusterID,
+		topics:    topics,
+		leases:    leases,
+	}
+}
+
+// NewMetadataHandlerWithSource creates a MetadataHandler with a dynamic broker source.
+// Used in Kubernetes mode where multiple brokers are known via EndpointSlice.
+func NewMetadataHandlerWithSource(brokers BrokerSource, clusterID string, topics TopicSource, leases lease.LeaseManager) *MetadataHandler {
+	return &MetadataHandler{brokers: brokers, clusterID: clusterID, topics: topics, leases: leases}
 }
 
 func (h *MetadataHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -46,16 +75,17 @@ func (h *MetadataHandler) Handle(_ *connstate.ConnState, version int16, body []b
 		return nil, fmt.Errorf("metadata decode: %w", err)
 	}
 
-	broker := api.MetadataBroker{
-		NodeID: h.self.NodeID,
-		Host:   h.self.Host,
-		Port:   h.self.Port,
-	}
-
+	allBrokers := h.brokers.All()
 	resp := &api.MetadataResponse{
-		Brokers:      []api.MetadataBroker{broker},
-		ClusterID:    h.self.ClusterID,
-		ControllerID: h.self.NodeID,
+		ClusterID:    h.clusterID,
+		ControllerID: h.brokers.Self().NodeID,
+	}
+	for _, b := range allBrokers {
+		resp.Brokers = append(resp.Brokers, api.MetadataBroker{
+			NodeID: b.NodeID,
+			Host:   b.Host,
+			Port:   b.Port,
+		})
 	}
 
 	var entries []TopicEntry
@@ -77,16 +107,13 @@ func (h *MetadataHandler) Handle(_ *connstate.ConnState, version int16, body []b
 	for _, entry := range entries {
 		topic := api.MetadataTopic{Name: entry.Name, ErrorCode: 0}
 		for p := int32(0); p < entry.Partitions; p++ {
-			leaderID := int32(-1)
-			if h.leases.IsLeader(entry.Name, p) {
-				leaderID = h.self.NodeID
-			}
+			leaderID := h.leases.LeaderFor(entry.Name, p)
 			topic.Partitions = append(topic.Partitions, api.MetadataPartition{
 				PartitionIndex:  p,
 				LeaderID:        leaderID,
 				LeaderEpoch:     0,
-				ReplicaNodes:    []int32{h.self.NodeID},
-				IsrNodes:        []int32{h.self.NodeID},
+				ReplicaNodes:    []int32{h.brokers.Self().NodeID},
+				IsrNodes:        []int32{h.brokers.Self().NodeID},
 				OfflineReplicas: []int32{},
 			})
 		}

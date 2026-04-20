@@ -21,6 +21,7 @@ type stubLeaseManager struct{ leader bool }
 func (s *stubLeaseManager) Acquire(_ context.Context, _ string, _ int32) error { return nil }
 func (s *stubLeaseManager) Release(_ string, _ int32) error                    { return nil }
 func (s *stubLeaseManager) IsLeader(_ string, _ int32) bool                   { return s.leader }
+func (s *stubLeaseManager) LeaderFor(_ string, _ int32) int32                 { return 0 }
 func (s *stubLeaseManager) WatchLeaders(_ context.Context) (<-chan lease.LeaderChange, error) {
 	return make(chan lease.LeaderChange), nil
 }

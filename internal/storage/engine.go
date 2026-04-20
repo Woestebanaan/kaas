@@ -346,6 +346,12 @@ func (e *DiskStorageEngine) LogStartOffset(topic string, partition int32) (int64
 	return ls, nil
 }
 
+// RelinquishPartition releases the filesystem lock for a partition. Called when this
+// broker loses the Kubernetes Lease so no further writes are accepted.
+func (e *DiskStorageEngine) RelinquishPartition(topic string, partition int32) {
+	_ = e.locks.Unlock(topic, partition)
+}
+
 // TakeoverPartition is called when this broker becomes leader. It acquires the
 // filesystem lock, validates the log (truncating any partial writes from the
 // previous leader), writes the new epoch, and marks the partition writable.
