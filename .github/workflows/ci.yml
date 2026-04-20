@@ -13,6 +13,17 @@ jobs:
   lint-and-test:
     runs-on: arc-runner-set
     steps:
+      - name: Runner preflight
+        run: |
+          echo "--- uname ---"; uname -a
+          echo "--- user ---"; id
+          echo "--- git ---"; git --version || echo "NO git"
+          echo "--- tools on PATH ---"
+          for t in curl wget tar make gcc go docker helm; do
+            if command -v "$t" >/dev/null; then echo "$t: $(command -v $t)"
+            else echo "$t: MISSING"; fi
+          done
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
@@ -26,7 +37,10 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.64.8
+          # Use latest instead of a pinned version — the previous pin (v1.64.8)
+          # may not exist in the action's version catalog, which silently 404s
+          # and the whole step fails.
+          version: latest
 
       - name: go test
         run: go test ./...
@@ -34,7 +48,6 @@ jobs:
       - name: Install controller-gen
         run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
 
-      # Invoke controller-gen directly; `make` is not in the default ARC runner image.
       - name: Check CRD manifests are up to date
         run: |
           "$(go env GOPATH)/bin/controller-gen" \
@@ -45,10 +58,26 @@ jobs:
   docker:
     runs-on: arc-runner-set
     steps:
+      - name: Wait for Docker daemon (DinD sidecar)
+        # The DinD sidecar takes a few seconds to start. The runner container
+        # can begin executing before dockerd is listening, which makes the
+        # first docker action fail with "Cannot connect to the Docker daemon".
+        run: |
+          echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready after ${i}s"
+              docker version
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "docker daemon did not become ready"
+          docker info || true
+          exit 1
+
       - uses: actions/checkout@v4
-      # ARC runners use containerMode: dind — a privileged DinD sidecar provides
-      # the Docker daemon. The docker-container buildx driver runs buildkit
-      # inside that daemon.
+
       - uses: docker/setup-buildx-action@v3
         with:
           install: true
@@ -60,8 +89,8 @@ jobs:
           context: .
           file: Dockerfile
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache-to on CI: inline/GHA caches require push:true or env vars
+          # that may not be present. Plain build keeps the dependency minimal.
 
       - name: Build operator image (no push)
         uses: docker/build-push-action@v5
@@ -69,8 +98,6 @@ jobs:
           context: .
           file: Dockerfile.operator
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   helm:
     runs-on: arc-runner-set
