@@ -9,13 +9,6 @@ on:
 permissions:
   contents: read
 
-# Run all Node.js-based actions under Node 24. Several actions we depend on
-# (checkout, setup-go, setup-helm, build-push, setup-buildx) still target
-# Node 20 which the runner will phase out in mid-2026. This env flag opts
-# us into Node 24 now so we don't rely on a deprecated runtime.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   lint-and-test:
     runs-on: arc-runner-set
@@ -31,9 +24,9 @@ jobs:
             else echo "$t: MISSING"; fi
           done
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -76,23 +69,21 @@ jobs:
           docker info || true
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      # No `install: true`: deprecated. setup-buildx-action creates the builder
-      # and wires it up as the active context automatically.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
 
       - name: Build broker image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
           push: false
 
       - name: Build operator image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.operator
@@ -101,8 +92,8 @@ jobs:
   helm:
     runs-on: arc-runner-set
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
         with:
           version: 'v3.14.0'
       - name: helm lint
