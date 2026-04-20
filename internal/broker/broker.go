@@ -3,6 +3,7 @@ package broker
 
 import (
 	"github.com/woestebanaan/skafka/internal/auth"
+	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8sbroker "github.com/woestebanaan/skafka/internal/k8s"
 	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/lock"
@@ -13,10 +14,10 @@ import (
 
 // Config holds broker identity and static configuration.
 type Config struct {
-	BrokerID   int32
-	Host       string
-	Port       int32
-	ClusterID  string
+	BrokerID  int32
+	Host      string
+	Port      int32
+	ClusterID string
 }
 
 // Broker holds all runtime dependencies and registers handlers with the dispatcher.
@@ -28,6 +29,7 @@ type Broker struct {
 	auth    auth.AuthEngine
 	topics  *TopicRegistry
 	brokers handlers.BrokerSource
+	coord   *coordinator.Manager // nil in local-dev mode
 }
 
 func New(
@@ -54,8 +56,8 @@ func New(
 	}
 }
 
-// NewWithBrokerSource creates a Broker using a dynamic multi-broker source.
-// Used in Kubernetes mode.
+// NewWithBrokerSource creates a Broker with a dynamic multi-broker source and
+// an optional coordinator (nil disables consumer group coordination).
 func NewWithBrokerSource(
 	cfg Config,
 	store storage.StorageEngine,
@@ -63,6 +65,7 @@ func NewWithBrokerSource(
 	locks lock.PartitionLock,
 	authEng auth.AuthEngine,
 	brokers handlers.BrokerSource,
+	coord *coordinator.Manager,
 ) *Broker {
 	return &Broker{
 		cfg:     cfg,
@@ -72,6 +75,7 @@ func NewWithBrokerSource(
 		auth:    authEng,
 		topics:  NewTopicRegistry(),
 		brokers: brokers,
+		coord:   coord,
 	}
 }
 
@@ -82,21 +86,19 @@ func (b *Broker) AddTopic(name string, partitions int32) {
 
 // RegisterHandlers wires all API key handlers into d and returns d.
 func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
-	// ApiVersions (18) — registered last so it can read the dispatcher's own version table.
-	// Placeholder; re-registered below after all others are added.
 	d.Register(0, 3, 9, handlers.NewProduceHandler(b.store, b.leases, b.locks, b.auth))
-	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.auth)) // v13 switches to UUID topics
+	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.auth))
 	d.Register(2, 1, 7, handlers.NewListOffsetsHandler(b.store, b.leases))
 	d.Register(3, 1, 12, handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, b.leases))
-	d.Register(8, 2, 8, handlers.NewOffsetCommitHandler())
-	d.Register(9, 1, 8, handlers.NewOffsetFetchHandler())
-	d.Register(10, 0, 4, handlers.NewFindCoordinatorHandler())
-	d.Register(11, 2, 9, handlers.NewJoinGroupHandler())
-	d.Register(12, 0, 4, handlers.NewHeartbeatHandler())
-	d.Register(13, 0, 4, handlers.NewLeaveGroupHandler())
-	d.Register(14, 0, 5, handlers.NewSyncGroupHandler())
-	d.Register(15, 0, 5, handlers.NewDescribeGroupsHandler())
-	d.Register(16, 0, 4, handlers.NewListGroupsHandler())
+	d.Register(8, 2, 8, handlers.NewOffsetCommitHandler(b.coord))
+	d.Register(9, 1, 8, handlers.NewOffsetFetchHandler(b.coord))
+	d.Register(10, 0, 4, handlers.NewFindCoordinatorHandler(b.coord))
+	d.Register(11, 2, 9, handlers.NewJoinGroupHandler(b.coord))
+	d.Register(12, 0, 4, handlers.NewHeartbeatHandler(b.coord))
+	d.Register(13, 0, 4, handlers.NewLeaveGroupHandler(b.coord))
+	d.Register(14, 0, 5, handlers.NewSyncGroupHandler(b.coord))
+	d.Register(15, 0, 5, handlers.NewDescribeGroupsHandler(b.coord))
+	d.Register(16, 0, 4, handlers.NewListGroupsHandler(b.coord))
 	d.Register(17, 0, 1, handlers.NewSaslHandshakeHandler())
 	d.Register(19, 0, 7, handlers.NewCreateTopicsHandler(b.topics))
 	d.Register(20, 0, 6, handlers.NewDeleteTopicsHandler(b.topics))
@@ -105,7 +107,6 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())
 	d.Register(36, 0, 2, handlers.NewSaslAuthenticateHandler(b.auth))
 
-	// ApiVersions last — builds version table from all registered handlers.
 	supported := d.SupportedVersions()
 	supported[18] = [2]int16{0, 4}
 	d.Register(18, 0, 4, handlers.NewAPIVersionsHandler(supported))
@@ -114,7 +115,6 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 }
 
 // K8sBrokerSource adapts a *k8s.BrokerRegistry to handlers.BrokerSource.
-// Lives here to avoid import cycles between k8s ↔ handlers.
 type K8sBrokerSource struct {
 	reg *k8sbroker.BrokerRegistry
 }

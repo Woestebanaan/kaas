@@ -16,6 +16,7 @@ import (
 	sigs_client "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/woestebanaan/skafka/internal/broker"
+	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8spkg "github.com/woestebanaan/skafka/internal/k8s"
 	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/lock"
@@ -55,6 +56,7 @@ func runBroker(ctx context.Context) {
 		brokerID     int32
 		k8sClient    kubernetes.Interface
 		brokerReg    *k8spkg.BrokerRegistry
+		coordMgr     *coordinator.Manager
 	)
 
 	k8sMode := os.Getenv("MY_POD_NAME") != ""
@@ -123,11 +125,37 @@ func runBroker(ctx context.Context) {
 			acquireK8sPartitions(ctx, k8sClient, namespace, leaseManager, engine, brokerID, numBrokers)
 		}
 
+		// Build coordinator manager.
+		if k8sMode {
+			lookupBroker := func(ordinal int32) (string, int32, bool) {
+				for _, ep := range brokerReg.All() {
+					if ep.NodeID == ordinal {
+						return ep.Host, ep.Port, true
+					}
+				}
+				return "", 0, false
+			}
+			offsetStore := coordinator.NewOffsetStore(dataDir)
+			coordMgr = coordinator.NewManager(ctx, leaseManager.(*lease.KubernetesLeaseManager), lookupBroker, offsetStore)
+		} else {
+			// Local-dev: single broker is always coordinator.
+			localLeases := leaseManager.(*broker.LocalLeaseManager)
+			lookupBroker := func(_ int32) (string, int32, bool) { return host, portNum, true }
+			offsetStore := coordinator.NewOffsetStore(dataDir)
+			coordMgr = coordinator.NewManager(ctx, localLeases, lookupBroker, offsetStore)
+		}
+
 		store = engine
 		slog.Info("using disk storage", "dir", dataDir)
 	} else {
 		store = broker.NewMemoryStorage()
 		slog.Info("using in-memory storage")
+
+		// In-memory mode: wire coordinator with local leases (local-dev only).
+		localLeases := leaseManager.(*broker.LocalLeaseManager)
+		lookupBroker := func(_ int32) (string, int32, bool) { return host, portNum, true }
+		offsetStore := coordinator.NewOffsetStore("")
+		coordMgr = coordinator.NewManager(ctx, localLeases, lookupBroker, offsetStore)
 	}
 
 	b := broker.NewWithBrokerSource(
@@ -137,6 +165,7 @@ func runBroker(ctx context.Context) {
 		partLock,
 		broker.NewAllowAllAuthEngine(),
 		brokerSource,
+		coordMgr,
 	)
 
 	d := protocol.NewDispatcher()
