@@ -8,7 +8,9 @@ import (
 	"syscall"
 
 	"github.com/woestebanaan/skafka/internal/broker"
+	"github.com/woestebanaan/skafka/internal/lock"
 	"github.com/woestebanaan/skafka/internal/protocol"
+	"github.com/woestebanaan/skafka/internal/storage"
 )
 
 func main() {
@@ -18,6 +20,24 @@ func main() {
 	host := envOr("SKAFKA_HOST", "0.0.0.0")
 	port := envOr("SKAFKA_PORT", "9092")
 	clusterID := envOr("SKAFKA_CLUSTER_ID", "skafka-local")
+	dataDir := os.Getenv("SKAFKA_DATA_DIR")
+
+	leases := broker.NewLocalLeaseManager()
+	locks := broker.NewLocalPartitionLock()
+
+	var store storage.StorageEngine
+	if dataDir != "" {
+		engine, err := storage.NewDiskStorageEngine(dataDir, leases, lock.NewFlockLock(dataDir), storage.DefaultConfig())
+		if err != nil {
+			slog.Error("failed to open disk storage", "dir", dataDir, "err", err)
+			os.Exit(1)
+		}
+		store = engine
+		slog.Info("using disk storage", "dir", dataDir)
+	} else {
+		store = broker.NewMemoryStorage()
+		slog.Info("using in-memory storage (data will be lost on restart)")
+	}
 
 	b := broker.New(
 		broker.Config{
@@ -26,9 +46,9 @@ func main() {
 			Port:      9092,
 			ClusterID: clusterID,
 		},
-		broker.NewMemoryStorage(),
-		broker.NewLocalLeaseManager(),
-		broker.NewLocalPartitionLock(),
+		store,
+		leases,
+		locks,
 		broker.NewAllowAllAuthEngine(),
 	)
 

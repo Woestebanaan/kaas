@@ -38,11 +38,11 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 		if !h.auth.Authorize(principal, auth.Resource{Type: "topic", Name: topic.Name, PatternType: "literal"}, auth.OpRead) {
 			for _, p := range topic.Partitions {
 				topicResp.Partitions = append(topicResp.Partitions, api.FetchPartitionResponse{
-					PartitionIndex:   p.PartitionIndex,
-					ErrorCode:        int16(codec.ErrTopicAuthorizationFailed),
-					HighWatermark:    -1,
-					LastStableOffset: -1,
-					LogStartOffset:   -1,
+					PartitionIndex:      p.PartitionIndex,
+					ErrorCode:           int16(codec.ErrTopicAuthorizationFailed),
+					HighWatermark:       -1,
+					LastStableOffset:    -1,
+					LogStartOffset:      -1,
 					PreferredReadReplica: -1,
 				})
 			}
@@ -52,8 +52,8 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 
 		for _, p := range topic.Partitions {
 			pr := api.FetchPartitionResponse{
-				PartitionIndex:   p.PartitionIndex,
-				LastStableOffset: -1,
+				PartitionIndex:      p.PartitionIndex,
+				LastStableOffset:    -1,
 				PreferredReadReplica: -1,
 			}
 
@@ -75,10 +75,10 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 			pr.LastStableOffset = hwm
 			pr.LogStartOffset, _ = h.store.LogStartOffset(topic.Name, p.PartitionIndex)
 
-			records, err := h.store.Read(context.Background(), topic.Name, p.PartitionIndex,
+			raw, err := h.store.Read(context.Background(), topic.Name, p.PartitionIndex,
 				p.FetchOffset, int(p.PartitionMaxBytes))
-			if err == nil && len(records) > 0 {
-				pr.Records = encodeRecords(records, p.FetchOffset)
+			if err == nil {
+				pr.Records = raw
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 		}
@@ -88,27 +88,4 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 	w := codec.NewWriter()
 	api.EncodeFetchResponse(w, resp, version)
 	return w.Bytes(), nil
-}
-
-// encodeRecords serialises storage.Records into a single RecordBatch byte slice.
-func encodeRecords(records []storage.Record, baseOffset int64) []byte {
-	batch := &codec.RecordBatch{
-		BaseOffset:    baseOffset,
-		ProducerID:    -1,
-		ProducerEpoch: -1,
-		BaseSequence:  -1,
-	}
-	for i, rec := range records {
-		batch.Records = append(batch.Records, codec.Record{
-			TimestampDelta: rec.Timestamp - batch.BaseTimestamp,
-			OffsetDelta:    int32(i),
-			Key:            rec.Key,
-			Value:          rec.Value,
-		})
-	}
-	if len(records) > 0 {
-		batch.LastOffsetDelta = int32(len(records) - 1)
-		batch.MaxTimestamp = records[len(records)-1].Timestamp
-	}
-	return codec.EncodeRecordBatch(nil, batch)
 }

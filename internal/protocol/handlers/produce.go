@@ -71,16 +71,7 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 				continue
 			}
 
-			// Decode the raw RecordBatch bytes into storage.Records.
-			records, err := decodeRecords(pd.Records)
-			if err != nil {
-				pr.ErrorCode = int16(codec.ErrCorruptMessage)
-				pr.BaseOffset = -1
-				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
-				continue
-			}
-
-			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, records)
+			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, pd.Records)
 			if err != nil {
 				pr.ErrorCode = int16(codec.ErrUnknownServerError)
 				pr.BaseOffset = -1
@@ -95,28 +86,4 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 	w := codec.NewWriter()
 	api.EncodeProduceResponse(w, resp, version)
 	return w.Bytes(), nil
-}
-
-// decodeRecords turns raw RecordBatch bytes into []storage.Record.
-// Returns an empty slice (not an error) if the input is nil/empty — acks=0 producers
-// may send empty batches.
-func decodeRecords(raw []byte) ([]storage.Record, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	r := codec.NewReader(raw)
-	batch, err := codec.DecodeRecordBatch(r)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]storage.Record, 0, len(batch.Records))
-	for _, rec := range batch.Records {
-		out = append(out, storage.Record{
-			Offset:    batch.BaseOffset + int64(rec.OffsetDelta),
-			Timestamp: batch.BaseTimestamp + rec.TimestampDelta,
-			Key:       rec.Key,
-			Value:     rec.Value,
-		})
-	}
-	return out, nil
 }

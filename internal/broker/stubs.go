@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -14,48 +15,87 @@ import (
 
 // ---- MemoryStorage ---- //
 
-// MemoryStorage is an in-memory StorageEngine used for development and testing.
-// It is NOT safe for production — data is lost on restart.
+// MemoryStorage is an in-memory StorageEngine for development and testing.
+// It stores raw RecordBatch bytes and is NOT safe for production — data is lost on restart.
 type MemoryStorage struct {
 	mu         sync.RWMutex
-	partitions map[string][]storage.Record // key: "topic/partition"
+	partitions map[string]*memPartition
+}
+
+type memPartition struct {
+	batches   []memBatch
+	highWater int64
+}
+
+type memBatch struct {
+	baseOffset      int64
+	lastOffsetDelta int32
+	raw             []byte
 }
 
 func NewMemoryStorage() *MemoryStorage {
-	return &MemoryStorage{partitions: make(map[string][]storage.Record)}
+	return &MemoryStorage{partitions: make(map[string]*memPartition)}
 }
 
 func (m *MemoryStorage) key(topic string, partition int32) string {
 	return fmt.Sprintf("%s/%d", topic, partition)
 }
 
-func (m *MemoryStorage) Append(_ context.Context, topic string, partition int32, records []storage.Record) (int64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (m *MemoryStorage) getOrCreate(topic string, partition int32) *memPartition {
 	k := m.key(topic, partition)
-	base := int64(len(m.partitions[k]))
-	for i, r := range records {
-		r.Offset = base + int64(i)
-		m.partitions[k] = append(m.partitions[k], r)
+	p := m.partitions[k]
+	if p == nil {
+		p = &memPartition{}
+		m.partitions[k] = p
 	}
-	return base, nil
+	return p
 }
 
-func (m *MemoryStorage) Read(_ context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]storage.Record, error) {
+func (m *MemoryStorage) Append(_ context.Context, topic string, partition int32, rawBatch []byte) (int64, error) {
+	if len(rawBatch) == 0 {
+		m.mu.RLock()
+		p := m.partitions[m.key(topic, partition)]
+		m.mu.RUnlock()
+		if p == nil {
+			return 0, nil
+		}
+		return p.highWater, nil
+	}
+	if len(rawBatch) < 27 {
+		return -1, fmt.Errorf("memory storage: batch too short: %d bytes", len(rawBatch))
+	}
+
+	baseOffset := int64(binary.BigEndian.Uint64(rawBatch[0:8]))
+	lastOffsetDelta := int32(binary.BigEndian.Uint32(rawBatch[23:27]))
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.getOrCreate(topic, partition)
+	p.batches = append(p.batches, memBatch{
+		baseOffset:      baseOffset,
+		lastOffsetDelta: lastOffsetDelta,
+		raw:             rawBatch,
+	})
+	p.highWater = baseOffset + int64(lastOffsetDelta) + 1
+	return baseOffset, nil
+}
+
+func (m *MemoryStorage) Read(_ context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	k := m.key(topic, partition)
-	all := m.partitions[k]
-	if startOffset >= int64(len(all)) {
+
+	p := m.partitions[m.key(topic, partition)]
+	if p == nil {
 		return nil, nil
 	}
-	out := all[startOffset:]
-	// Rough byte cap.
-	total := 0
-	for i, r := range out {
-		total += len(r.Key) + len(r.Value) + 64
-		if total > maxBytes && i > 0 {
-			out = out[:i]
+
+	var out []byte
+	for _, b := range p.batches {
+		if b.baseOffset+int64(b.lastOffsetDelta) < startOffset {
+			continue
+		}
+		out = append(out, b.raw...)
+		if len(out) >= maxBytes {
 			break
 		}
 	}
@@ -65,17 +105,21 @@ func (m *MemoryStorage) Read(_ context.Context, topic string, partition int32, s
 func (m *MemoryStorage) HighWatermark(topic string, partition int32) (int64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return int64(len(m.partitions[m.key(topic, partition)])), nil
+	p := m.partitions[m.key(topic, partition)]
+	if p == nil {
+		return 0, nil
+	}
+	return p.highWater, nil
 }
 
-func (m *MemoryStorage) LogStartOffset(topic string, partition int32) (int64, error) {
+func (m *MemoryStorage) LogStartOffset(_ string, _ int32) (int64, error) {
 	return 0, nil
 }
 
 func (m *MemoryStorage) CreatePartition(topic string, partition int32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.partitions[m.key(topic, partition)] = nil
+	m.getOrCreate(topic, partition)
 	return nil
 }
 
@@ -107,8 +151,8 @@ type LocalPartitionLock struct{}
 
 func NewLocalPartitionLock() *LocalPartitionLock { return &LocalPartitionLock{} }
 
-func (l *LocalPartitionLock) Lock(_ string, _ int32) error   { return nil }
-func (l *LocalPartitionLock) Unlock(_ string, _ int32) error { return nil }
+func (l *LocalPartitionLock) Lock(_ string, _ int32) error    { return nil }
+func (l *LocalPartitionLock) Unlock(_ string, _ int32) error  { return nil }
 func (l *LocalPartitionLock) IsLocked(_ string, _ int32) bool { return true }
 
 // ---- AllowAllAuthEngine ---- //

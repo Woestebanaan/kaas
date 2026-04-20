@@ -1,5 +1,5 @@
 # SharedKafka (skafka): Kafka on Shared Storage — Claude Code Implementation Plan
-# Version 2.2 — Kubernetes-Native Architecture, Hand-Rolled Protocol Codec, v2 Roadmap
+# Version 2.4 — Kubernetes-Native, Hand-Rolled Codec, Stateless Router, v2 Roadmap
 
 ## Project Overview
 
@@ -44,6 +44,10 @@ This plan covers two release milestones:
 5. **Declarative everything.** Topics, users, ACLs are all Kubernetes resources.
    No shell scripts, no custom admin APIs.
 
+6. **Single endpoint for clients.** Clients connect to one address and never
+   know about individual brokers. The stateless router tier absorbs all
+   topology complexity. No TLS SNI tricks, no per-broker ports required.
+
 ---
 
 ## Architecture
@@ -61,40 +65,57 @@ This plan covers two release milestones:
 │                                                                   │
 │  ┌────────────────────┐   ┌──────────────────────────────────┐   │
 │  │  CRDs              │   │  Kubernetes Secrets              │   │
-│  │  KafkaTopic        │   │  (credentials, TLS certs)        │   │
-│  │  KafkaUser         │   └──────────────────────────────────┘   │
-│  │  KafkaUserGroup    │                                           │
-│  │  KafkaAcl          │   ┌──────────────────────────────────┐   │
-│  └────────────────────┘   │  EndpointSlices (broker list)    │   │
-│                            └──────────────────────────────────┘   │
+│  │  KafkaCluster      │   │  (credentials, TLS certs)        │   │
+│  │  KafkaTopic        │   └──────────────────────────────────┘   │
+│  │  KafkaUser         │                                           │
+│  │  KafkaUserGroup    │   ┌──────────────────────────────────┐   │
+│  │  KafkaAcl          │   │  EndpointSlices (broker list)    │   │
+│  └────────────────────┘   └──────────────────────────────────┘   │
 │                                                                   │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
-│  │  broker-0    │  │  broker-1    │  │  broker-2    │           │
-│  │  (StatefulSet│  │  (StatefulSet│  │  (StatefulSet│           │
-│  │   ordinal 0) │  │   ordinal 1) │  │   ordinal 2) │           │
-│  │              │  │              │  │              │           │
-│  │  watches     │  │  watches     │  │  watches     │           │
-│  │  Leases +    │  │  Leases +    │  │  Leases +    │           │
-│  │  CRDs        │  │  CRDs        │  │  CRDs        │           │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
-│         └─────────────────┴─────────────────┘                    │
-│                            │                                      │
-│               ┌────────────────────────┐                         │
-│               │  Single ReadWriteMany  │                         │
-│               │  PVC (CephFS)          │                         │
-│               │                        │                         │
-│               │  /data/                │                         │
-│               │    __cluster/          │                         │
-│               │      acls.json         │                         │
-│               │      credentials.json  │                         │
-│               │    topic-A/            │                         │
-│               │      partition-0/      │                         │
-│               │      partition-1/      │                         │
-│               │    topic-B/            │                         │
-│               │      partition-0/      │                         │
-│               └────────────────────────┘                         │
+│  External clients                                                 │
+│  kafka.example.com:9092                                           │
+│         │                                                         │
+│  ┌──────▼──────────────────────────────────────────────────────┐ │
+│  │  LoadBalancer Service  (single IP, single port)             │ │
+│  └──────┬──────────────────────────────────────────────────────┘ │
+│         │                                                         │
+│  ┌──────┴──────────────────────────────────────────────────────┐ │
+│  │  skafka-router (Deployment, 3 replicas, stateless)          │ │
+│  │                                                             │ │
+│  │  - Watches Lease map (live k8s watch, no polling)           │ │
+│  │  - Routes Produce → partition Lease holder                  │ │
+│  │  - Routes Fetch → any available broker (load balanced)      │ │
+│  │  - Routes group requests → coordinator Lease holder         │ │
+│  │  - Rewrites Metadata responses: all broker addrs → self     │ │
+│  │  - Retries transparently on NOT_LEADER_FOR_PARTITION        │ │
+│  └──────┬──────────────────────────────────────────────────────┘ │
+│         │  (internal cluster network only)                        │
+│  ┌──────┴──────────────────────────────────────────────────────┐ │
+│  │  skafka-headless (ClusterIP: None)                          │ │
+│  └──────┬──────────────────────────────────────────────────────┘ │
+│         │                                                         │
+│  ┌──────┴──────┐  ┌────────────┐  ┌────────────┐                │
+│  │  broker-0   │  │  broker-1  │  │  broker-2  │                │
+│  │  StatefulSet│  │ StatefulSet│  │ StatefulSet│                │
+│  └──────┬──────┘  └─────┬──────┘  └─────┬──────┘                │
+│         └───────────────┴───────────────┘                        │
+│                          │                                        │
+│               ┌──────────────────────┐                           │
+│               │  Single ReadWriteMany│                           │
+│               │  PVC (CephFS)        │                           │
+│               │  /data/              │                           │
+│               │    __cluster/        │                           │
+│               │    topic-A/          │                           │
+│               │    topic-B/  ...     │                           │
+│               └──────────────────────┘                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+**Key property:** The router makes skafka's topology completely invisible to
+clients. A client connects to one address, sends all requests there, and never
+learns that brokers exist. This is only possible because all brokers share the
+same PVC — no broker owns data exclusively, so the router can redirect any
+request to any broker without data movement.
 
 ---
 
@@ -244,9 +265,11 @@ status:
 | ReadinessGates                 | Custom broker warmup / readiness logic        |
 | Init containers                | Partition directory initialization            |
 | Projected volumes              | Config + secret injection                     |
-| CRDs (4x)                      | Admin API, topic/user/ACL management          |
+| CRDs (5x)                      | Admin API, topic/user/ACL/cluster management  |
 | Kubernetes Secrets             | Credential storage                            |
 | HPA + custom metrics           | Manual cluster scaling                        |
+| Deployment (router)            | Per-broker external addressability + SNI/TLS  |
+| LoadBalancer Service (router)  | Per-broker Gateway routes / NodePorts         |
 
 ---
 
@@ -256,6 +279,7 @@ status:
 skafka/
 ├── cmd/
 │   ├── skafka/              # Broker binary
+│   ├── skafka-router/       # Router binary (stateless, Deployment)
 │   └── skafka-operator/     # Operator binary
 ├── internal/
 │   ├── protocol/            # Kafka wire protocol — fully hand-rolled
@@ -293,6 +317,14 @@ skafka/
 │   │       ├── metadata.go
 │   │       ├── consumer_group.go
 │   │       └── admin.go
+│   ├── router/              # Stateless protocol-aware routing layer
+│   │   ├── router.go        # TCP server + connection lifecycle
+│   │   ├── table.go         # Lease watch → routing table
+│   │   │                    #   topic+partition → broker pod address
+│   │   │                    #   group_id → coordinator address
+│   │   ├── proxy.go         # Per-connection request forwarding
+│   │   ├── rewrite.go       # Metadata response rewrite (broker addrs → self)
+│   │   └── retry.go         # NOT_LEADER_FOR_PARTITION transparent retry
 │   ├── storage/             # Shared filesystem engine
 │   │   ├── engine.go        # StorageEngine interface + impl
 │   │   ├── segment.go       # Segment read/write
@@ -317,6 +349,7 @@ skafka/
 │       └── metadata.go      # CRD watch → in-memory state
 ├── operator/
 │   ├── controllers/
+│   │   ├── kafkacluster_controller.go  # Owns StatefulSet, router Deployment
 │   │   ├── kafkatopic_controller.go
 │   │   ├── kafkauser_controller.go
 │   │   ├── kafkausergroup_controller.go
@@ -328,13 +361,14 @@ skafka/
 ├── deploy/
 │   ├── helm/                # Helm chart
 │   ├── crds/                # CRD YAML manifests
-│   ├── rbac/                # ClusterRole for broker + operator
+│   ├── rbac/                # ClusterRole for broker, router + operator
 │   └── grafana/             # Dashboard JSON
 ├── tests/
 │   ├── unit/
 │   ├── integration/         # Requires k8s + CephFS
 │   └── kafka-compat/        # Real Kafka client tests
 ├── Dockerfile               # Broker image
+├── Dockerfile.router        # Router image (separate — smaller, no storage deps)
 ├── Dockerfile.operator      # Operator image
 └── Makefile
 ```
@@ -996,7 +1030,237 @@ Target: ~400-600 lines of Go total across all four controllers.
 
 ---
 
-## Phase 9: Observability (Week 8–9)
+## Phase 9: Stateless Router (Week 8–9)
+
+**Goal:** A Kafka-protocol-aware routing layer that gives clients a single
+endpoint, eliminates per-broker addressability, and requires no TLS or SNI.
+Runs as a Kubernetes Deployment (3+ replicas) behind a single LoadBalancer
+Service. Completely stateless — holds only a cached Lease watch that rebuilds
+in seconds on restart.
+
+### Why This Is Possible Here But Not in Strimzi
+
+In standard Kafka each broker owns its partition data on local disk. Clients
+MUST connect directly to the leader broker because only that broker has the
+data. The entire SNI/TLS/port-per-broker complexity exists to satisfy this
+physical constraint.
+
+In skafka all brokers share the same PVC. Any broker can read any partition.
+The router can therefore accept every request, decide which broker to forward
+to, and return the result — without any data movement. Clients never need to
+know brokers exist.
+
+```
+1. Routing table (internal/router/table.go)
+
+   The routing table is a live in-memory map rebuilt from Kubernetes Leases.
+   The router watches the Lease API using a shared informer — the same
+   mechanism brokers use. No polling.
+
+   RoutingTable:
+     produce:      topic+partition → broker pod DNS name
+     coordinator:  group_id       → coordinator pod DNS name
+     fetch:        topic+partition → any available broker (round-robin)
+
+   Update triggers:
+   - Lease acquisition: new leader for partition → update produce route
+   - Lease expiry/release: old leader gone → temporarily route to any
+     broker (broker will return NOT_LEADER, router will retry after
+     table refreshes — see retry.go)
+   - EndpointSlice change: broker pod added/removed → update fetch pool
+
+   Table refresh latency: <500ms after Lease change
+   (Kubernetes informer cache sync interval)
+
+2. Per-connection proxy (internal/router/proxy.go)
+
+   One goroutine per client connection. The proxy:
+   a. Reads the request frame header: api_key, api_version, correlation_id
+   b. Reads the minimal request body fields needed for routing:
+      - Produce (0):          topics[].partitions[].partition
+      - Fetch (1):            topics[].partitions[].partition
+      - ListOffsets (2):      topics[].partitions[].partition
+      - FindCoordinator (10): key (group_id)
+      - JoinGroup (11):       group_id
+      - SyncGroup (14):       group_id
+      - Heartbeat (12):       group_id
+      - LeaveGroup (13):      group_id
+      - OffsetCommit (8):     group_id
+      - OffsetFetch (9):      group_id
+      - Metadata (3):         forward to any broker, then rewrite response
+      - All others:           forward to any broker unchanged
+   c. Looks up target broker in routing table
+   d. Opens (or reuses from pool) a connection to that broker
+   e. Forwards the FULL original request bytes unchanged — the router
+      does not re-encode requests, it passes them through verbatim
+   f. Reads response from broker
+   g. Rewrites response if needed (Metadata only — see rewrite.go)
+   h. Returns response to client
+
+   The router is a pass-through proxy for 99% of the protocol. It only
+   needs to READ enough of each request to make a routing decision.
+   It never needs to fully decode the request body.
+
+3. Metadata response rewrite (internal/router/rewrite.go)
+
+   This is the only place the router modifies protocol content.
+
+   Standard broker Metadata response:
+     brokers:
+       - id: 0, host: skafka-0.skafka-headless.kafka.svc, port: 9092
+       - id: 1, host: skafka-1.skafka-headless.kafka.svc, port: 9092
+       - id: 2, host: skafka-2.skafka-headless.kafka.svc, port: 9092
+
+   Router rewrites to:
+     brokers:
+       - id: 0, host: kafka.example.com, port: 9092
+       - id: 1, host: kafka.example.com, port: 9092
+       - id: 2, host: kafka.example.com, port: 9092
+
+   All broker entries point to the router's own external address.
+   The client still sees distinct broker IDs (for its internal tracking)
+   but all addresses resolve to the same LoadBalancer → router pool.
+   The router uses the broker ID in subsequent requests to route to the
+   correct broker internally.
+
+   The router address is injected via env var ROUTER_ADVERTISED_HOST
+   and ROUTER_ADVERTISED_PORT at pod startup (set by the operator from
+   the LoadBalancer Service's external IP/hostname).
+
+4. Transparent retry (internal/router/retry.go)
+
+   Race condition: routing table lags ~500ms behind actual Lease changes.
+   A produce request may be routed to a broker that just lost its Lease.
+   The broker returns NOT_LEADER_FOR_PARTITION.
+
+   On receiving NOT_LEADER_FOR_PARTITION from a broker:
+   a. Trigger immediate routing table refresh (re-read Lease from API)
+   b. Wait up to 1s for table to update
+   c. Retry the request to the new leader
+   d. If still fails after 3 retries: return the error to the client
+      (client will handle it — Kafka clients have their own retry logic)
+
+   This retry is transparent — the client sees a slightly increased
+   latency (~1-2ms) but never sees the error code.
+
+5. Connection pooling (internal/router/proxy.go)
+
+   The router maintains a pool of persistent TCP connections to each
+   broker pod. Opening a new TCP connection per request would add ~1ms
+   of TCP handshake overhead.
+
+   Pool: map[broker_pod_address] → []net.Conn
+   - Max pool size per broker: 50 connections (configurable)
+   - Idle timeout: 60s
+   - Health check: TCP keepalive
+
+   Each client connection gets a dedicated connection from the pool to
+   its target broker for the duration of a pipelined request sequence.
+   Pool connections are returned after each complete request/response.
+
+6. High availability — NOT a single point of failure
+
+   The router is a Deployment, not a StatefulSet. It holds no state
+   that cannot be instantly rebuilt from Kubernetes Leases.
+
+   spec:
+     replicas: 3                    # minimum recommended
+     strategy:
+       type: RollingUpdate
+       rollingUpdate:
+         maxUnavailable: 1          # always 2+ routers healthy during update
+         maxSurge: 1
+
+   PodDisruptionBudget for router:
+     minAvailable: 2                # Kubernetes never evicts below 2 routers
+
+   Readiness probe: /healthz returns 200 only when:
+   - Lease watch is connected and table is populated
+   - At least one broker EndpointSlice entry is Ready
+   - Connection pool has at least one healthy connection
+
+   If a router pod dies:
+   - Kubernetes stops routing to it within ~2s (endpoint propagation)
+   - Other routers continue serving unaffected
+   - Clients with connections to the dead router reconnect (Kafka
+     clients have built-in reconnect with backoff)
+   - New router pod starts, rebuilds Lease table in <1s, becomes ready
+
+   minReadySeconds: 5   ← new router must be stable 5s before old
+                           router is removed during rolling updates
+
+7. RBAC for router ServiceAccount:
+   - get/list/watch: Leases (routing table)
+   - get/list/watch: EndpointSlices (broker pool)
+   - No write permissions needed — router is purely read-only from k8s
+
+8. Router Dockerfile (Dockerfile.router):
+   FROM golang:1.22-alpine AS builder
+   RUN CGO_ENABLED=0 go build -o /skafka-router ./cmd/skafka-router
+   FROM gcr.io/distroless/static-debian12
+   COPY --from=builder /skafka-router /skafka-router
+   ENTRYPOINT ["/skafka-router"]
+   Target size: <10MB (no storage engine, no CephFS dependencies)
+
+9. Helm values for router:
+
+   router:
+     enabled: true
+     replicas: 3
+     advertisedHost: kafka.example.com   # set to LoadBalancer external IP/DNS
+     advertisedPort: 9092
+     resources:
+       requests:
+         cpu: 200m
+         memory: 128Mi
+       limits:
+         cpu: 1
+         memory: 512Mi
+     autoscaling:
+       enabled: true
+       minReplicas: 3
+       maxReplicas: 10
+       targetCPUUtilizationPercentage: 60
+     connectionPool:
+       maxPerBroker: 50
+       idleTimeoutSeconds: 60
+
+   # External access: single LoadBalancer Service in front of router
+   service:
+     type: LoadBalancer
+     port: 9092
+     annotations: {}    # cloud-specific annotations (e.g. AWS NLB)
+
+10. Backward compatibility — per-broker modes still available
+
+    For users migrating from Strimzi who need the same TLSRoute/TCPRoute
+    setup during a transition period, the operator still supports Mode B
+    (TLSRoute) and Mode C (NodePort) from the previous design. These are
+    configured via KafkaCluster.spec.listeners.legacyMode and generate
+    per-broker resources exactly as before. Document these as deprecated
+    in favor of the router.
+
+11. Testing the router:
+
+    Unit tests:
+    - Routing table: Lease watch updates → correct broker lookup
+    - Metadata rewrite: broker addresses replaced with router address
+    - Retry logic: NOT_LEADER triggers table refresh and retry
+    - Connection pool: idle connections recycled, dead connections detected
+
+    Integration tests:
+    - Deploy 3-broker skafka + 3-replica router in kind
+    - Client connects to LoadBalancer Service (single address)
+    - Produce 10,000 records, consume all, verify order
+    - Kill router-0: verify client reconnects, no data loss
+    - Kill broker-1: verify router re-routes to new leader transparently
+    - Scale brokers from 3→5: verify client sees no disruption
+    - Verify Metadata response contains only router address (not broker addrs)
+```
+
+---
+
+## Phase 10: Observability (Week 9–10)
 
 ```
 1. Prometheus metrics (port 9090/metrics):
@@ -1030,6 +1294,19 @@ Target: ~400-600 lines of Go total across all four controllers.
    skafka_auth_failure_total{mechanism, reason}
    skafka_acl_deny_total{principal, resource_type}
    skafka_quota_throttle_total{principal}
+
+   # External access
+   skafka_external_connections_total{mode, broker_id}
+   skafka_external_connection_errors_total{mode, broker_id, reason}
+
+   # Router (skafka-router pods, separate metrics port)
+   skafka_router_requests_total{api_key, routed_to_broker}
+   skafka_router_request_latency_seconds{api_key}   (histogram)
+   skafka_router_metadata_rewrites_total
+   skafka_router_not_leader_retries_total{topic, partition}
+   skafka_router_routing_table_age_seconds          (gauge — how stale is the table)
+   skafka_router_broker_pool_connections{broker}    (gauge)
+   skafka_router_broker_pool_errors_total{broker, reason}
 
 2. Structured logging (log/slog, JSON in production):
    - Request log: principal, api_key, topic, partition, latency, error
@@ -1098,6 +1375,25 @@ Target: ~400-600 lines of Go total across all four controllers.
 8. **Never cache Metadata beyond one Lease renewal interval.**
    Maintain a live Lease watch. Stale leader info causes client errors.
 
+9. **Router must never modify request bytes — only response bytes.**
+   The router reads just enough of each request to make a routing
+   decision, then passes the original bytes verbatim to the broker.
+   The ONLY exception is the Metadata response rewrite. Any other
+   response modification is a bug.
+
+10. **Router readiness gate: table must be populated before serving.**
+    A router pod that starts accepting connections before its Lease watch
+    is populated will route everything to random brokers. The readiness
+    probe must verify the routing table has at least one entry before
+    the pod joins the LoadBalancer Service endpoints.
+
+11. **Router graceful shutdown on SIGTERM:**
+    1. Stop accepting new connections
+    2. Allow in-flight request/response pairs to complete (drain, 30s timeout)
+    3. Close all broker pool connections cleanly
+    4. Exit 0
+    No data to flush, no locks to release — shutdown is fast.
+
 ---
 
 ## Testing Strategy
@@ -1117,12 +1413,20 @@ Unit tests (go test ./...):
   - Leader epoch: partial write detection and truncation on takeover
   - KafkaUser controller: SCRAM hash computation, Secret creation
   - KafkaAcl controller: acls.json merge, atomic write
+  - Router routing table: Lease watch → correct broker lookup
+  - Router Metadata rewrite: all broker addresses replaced with router addr
+  - Router retry: NOT_LEADER triggers table refresh + retry to new leader
+  - Router connection pool: idle connection reuse, dead connection detection
 
 Integration tests (kind + Rook-Ceph in CI):
   - Single broker: produce 10,000 records, consume all, verify order
   - Three brokers: produce to partition leaders, consume all
   - Leader failover: SIGKILL broker-1, verify new leader within
     leaseDurationSeconds, verify no data loss, consumer continues
+  - Router failover: SIGKILL router-1, verify client reconnects to
+    router-0 or router-2, verify no data loss, no manual intervention
+  - Router routing: verify Metadata response contains only router
+    address, never individual broker addresses
   - Consumer group: 3 consumers, 9 partitions, verify even distribution
   - Consumer group rebalance: add consumer mid-stream
   - ACL: user without Write ACL gets TOPIC_AUTHORIZATION_FAILED
@@ -1132,6 +1436,9 @@ Integration tests (kind + Rook-Ceph in CI):
   - Large message: single 10MB record, produce + consume
   - Retention: produce beyond retentionMs, verify old segments deleted
   - PodDisruptionBudget: verify kubectl drain respects maxUnavailable
+  - Scale brokers 3→5: verify client sees no disruption, partitions
+    rebalance to new brokers automatically via Lease redistribution
+  - Router autoscaling: verify HPA scales router replicas under load
 
 Kafka compatibility tests (franz-go and kafka-go used as TEST CLIENTS only
 — imported in tests/, never in internal/):
@@ -1147,19 +1454,25 @@ Kafka compatibility tests (franz-go and kafka-go used as TEST CLIENTS only
 
 ## MVP Definition (What "Done" Looks Like)
 
-- [ ] kafka-console-producer produces to skafka successfully
-- [ ] kafka-console-consumer consumes all messages in order
+- [ ] kafka-console-producer produces to skafka using a SINGLE bootstrap address
+- [ ] kafka-console-consumer consumes all messages in order from same address
+- [ ] Metadata response contains only the router address — no broker addresses
 - [ ] 3-broker cluster survives kubectl delete pod broker-1 with no data loss
+- [ ] 3-router cluster survives kubectl delete pod router-1 with no disruption
+- [ ] Client reconnects to a healthy router transparently after router pod death
 - [ ] Consumer group rebalances correctly when a consumer is killed
+- [ ] KafkaCluster CRD deploys StatefulSet, router Deployment, PVC, LB Service
 - [ ] KafkaTopic CRD creates topic and partition directories on PVC
 - [ ] KafkaUser (SCRAM) CRD: authenticated client can produce/consume
 - [ ] KafkaUser (k8s SA) CRD: pod with SA can produce without credentials
 - [ ] KafkaAcl CRD denies unauthorized access with correct error code
 - [ ] KafkaUserGroup applies shared ACLs to all members
+- [ ] Router autoscales independently of broker count via HPA
 - [ ] Helm chart deploys on Rook-Ceph cluster in one command
-- [ ] Prometheus metrics endpoint returns data
-- [ ] Grafana dashboard shows throughput and consumer lag
-- [ ] README documents architecture, NFS limitations, CephFS requirement
+- [ ] Prometheus metrics endpoint returns data for both brokers and router pods
+- [ ] Grafana dashboard shows throughput, consumer lag, and router latency p99
+- [ ] README documents architecture, NFS limitations, CephFS requirement,
+      and explains why no per-broker addressing is needed
 
 ---
 
@@ -1201,6 +1514,43 @@ Kafka compatibility tests (franz-go and kafka-go used as TEST CLIENTS only
    with their default settings — both will negotiate the highest mutually
    supported version automatically via ApiVersions.
 
+7. **Router partial request reads and multi-partition produce.**
+   A single Produce request can target multiple topic-partitions in one
+   batch (e.g. produce to topic-A/0 and topic-A/1 in one request).
+   If those partitions have different leaders, the router cannot split
+   the request — it must pick one broker to forward to, and that broker
+   will return NOT_LEADER for the partitions it doesn't lead.
+   Options:
+   (a) Forward to the leader of the first partition in the request
+       and let NOT_LEADER retry handle the rest — simple but adds latency
+       for multi-partition batches
+   (b) Split multi-partition produce requests into per-partition requests,
+       forward each to its leader, merge responses — correct and fast but
+       complex to implement, requires full request decode
+   Recommend (a) for MVP. Multi-partition produce is less common in
+   practice than single-partition. Document the latency tradeoff.
+
+8. **Router and SASL authentication.**
+   The router is a pass-through proxy — it does not authenticate clients
+   itself. SASL negotiation (SaslHandshake + SaslAuthenticate) happens
+   between the client and the router's TCP connection, then the router
+   forwards subsequent requests to brokers.
+   Two options:
+   (a) Router establishes its own authenticated connection to each broker
+       (using a dedicated skafka-router service account credential), and
+       forwards client requests over that pre-authenticated channel
+   (b) Router passes the raw SASL bytes through to the broker, establishing
+       a fully transparent proxy per connection
+   Option (a) is simpler operationally but means the broker sees the router
+   as the client — ACLs are enforced against the router's identity, not
+   the end client's. This breaks per-user ACLs.
+   Option (b) preserves end-to-end client identity but requires the router
+   to establish a new broker connection per client (can't reuse pool across
+   different client identities).
+   Recommend (b) for correctness. Per-user ACLs are a first-class feature
+   and must not be broken by the routing layer. Document that connection
+   pooling is per-client-identity, not global.
+
 ---
 
 ## v2 Roadmap: Kafka Streams Compatibility
@@ -1238,7 +1588,7 @@ Kafka Streams relies on four capabilities not present in v1:
 
 ---
 
-### v2 Phase 10: Transaction Coordinator (Week 10–13)
+### v2 Phase 11: Transaction Coordinator (Week 11–14)
 
 **Goal:** Implement the full Kafka transaction protocol, including producer
 epoch management, fencing, two-phase commit, and transaction markers.
@@ -1321,7 +1671,7 @@ epoch management, fencing, two-phase commit, and transaction markers.
 
 ---
 
-### v2 Phase 11: Transaction-Aware Fetch (Week 13–14)
+### v2 Phase 12: Transaction-Aware Fetch (Week 14–15)
 
 **Goal:** Fetch responses respect transaction isolation level. Consumers
 using read_committed do not see records from open or aborted transactions.
@@ -1360,7 +1710,7 @@ using read_committed do not see records from open or aborted transactions.
 
 ---
 
-### v2 Phase 12: Log Compaction (Week 14–17)
+### v2 Phase 13: Log Compaction (Week 15–18)
 
 **Goal:** Support cleanup.policy=compact topics, required for Kafka Streams
 changelog topics that back KTables and aggregations.
@@ -1417,7 +1767,7 @@ changelog topics that back KTables and aggregations.
 
 ---
 
-### v2 Phase 13: Remaining API Keys for Streams (Week 17–18)
+### v2 Phase 14: Remaining API Keys for Streams (Week 18–19)
 
 **Goal:** Implement the API keys Kafka Streams uses for administration,
 monitoring, and internal topic management.
@@ -1447,7 +1797,7 @@ Internal topic auto-creation:
 
 ---
 
-### v2 Phase 14: Streams Integration Testing (Week 18–20)
+### v2 Phase 15: Streams Integration Testing (Week 19–21)
 
 **Goal:** Validate that real Kafka Streams applications work end-to-end
 against skafka without modification.
@@ -1537,6 +1887,145 @@ new file: transaction_index.go
 
 ---
 
+### v2 Phase 16: Single-Endpoint Proxy (Week 21–23)
+
+**Goal:** Exploit the shared-storage architecture to expose a single external
+address for the entire cluster — no per-broker ports, no TLS required, no SNI
+tricks. This is a genuine differentiator over Strimzi and standard Kafka, which
+cannot do this because data is physically local to each broker.
+
+```
+Why this is only possible with shared storage:
+
+In standard Kafka, a produce request MUST reach the partition leader because
+that broker is the only one with write access to that partition's local disk.
+Reads typically go to the leader too (or a configured follower replica).
+This is why clients need to know which broker leads which partition.
+
+In skafka, all brokers share the same CephFS PVC. Any broker can read any
+partition at any time. Only writes need to go to the Lease holder — but a
+proxy that understands the Kafka protocol can look up the Lease holder and
+forward the request, transparent to the client.
+
+Result: clients see one address, proxy handles routing internally.
+
+Architecture:
+
+  External clients
+        │
+        ▼
+  ┌─────────────────────┐
+  │  skafka-proxy        │  ← new lightweight sidecar or standalone pod
+  │  (Kafka-protocol     │    understands Produce/Fetch/Metadata API keys
+  │   aware proxy)       │    watches Kubernetes Leases for routing table
+  └──────────┬──────────┘
+             │  internal cluster DNS
+    ┌─────────┼─────────┐
+    ▼         ▼         ▼
+  broker-0  broker-1  broker-2
+  (shared CephFS PVC)
+
+1. Proxy responsibilities:
+
+   On Metadata request:
+   - Return the proxy's own address as the "leader" for every partition
+   - Client connects to proxy for all subsequent requests
+   - Proxy is transparent — client never knows about individual brokers
+
+   On Produce request (topic + partition in request):
+   - Look up current Lease holder for that partition
+   - Forward request to that broker via internal DNS
+   - Return broker's response to client
+
+   On Fetch request (topic + partition in request):
+   - ANY broker can serve this (shared storage advantage)
+   - Route to least-loaded broker or round-robin
+   - No need to route to Lease holder for reads
+
+   On consumer group requests (FindCoordinator, JoinGroup, etc.):
+   - Look up coordinator Lease for the group
+   - Forward to Lease holder
+   - Return response
+
+2. Implementation approach:
+
+   The proxy is NOT a general TCP proxy — it must understand the Kafka
+   protocol to inspect topic+partition fields and route accordingly.
+
+   Build as internal/proxy/ package, reusing the codec layer from Phase 2.
+   The proxy reads the incoming request, decodes enough to determine the
+   routing key (topic + partition, or group ID), looks up the target
+   broker from the in-memory Lease watch, and forwards the full raw
+   request bytes to the target broker's internal address.
+
+   This is a "smart forwarder" not a full broker — it decodes just enough
+   to route, then forwards the original bytes. It does NOT re-encode.
+   This keeps it simple and ensures full protocol compatibility.
+
+3. Deployment options:
+
+   Option A — Standalone proxy Deployment (recommended):
+   - 2-3 replicas for HA
+   - Exposed via single LoadBalancer or Gateway TCPRoute on port 9092
+   - No TLS required on the external listener
+   - Clients configure: bootstrap.servers=kafka.example.com:9092
+
+   Option B — Sidecar per broker pod:
+   - Each broker pod has a proxy container on a second port (9093)
+   - LoadBalancer routes to any broker's sidecar port
+   - Simpler networking, but proxy scales with broker count
+
+   Recommend Option A for cleaner separation of concerns.
+
+4. Lease watch in proxy:
+
+   Proxy watches coordination.k8s.io/v1 Leases for all partitions.
+   Maintains in-memory routing table: (topic, partition) → broker pod DNS.
+   On Lease change (leader election, broker failure): routing table updated
+   within the Lease watch latency (~100ms).
+
+   During the transition window between old leader losing Lease and new
+   leader winning it, the proxy receives NOT_LEADER_FOR_PARTITION from
+   the old leader. It retries on a different broker after a short backoff
+   (same as a Kafka client would). Client is unaffected — it just sees
+   slightly higher latency during failover.
+
+5. New Helm values for proxy mode:
+
+   proxy:
+     enabled: false             # opt-in
+     replicas: 2
+     service:
+       type: LoadBalancer       # or TCPRoute via Gateway API
+       port: 9092
+     resources:
+       requests:
+         cpu: 100m
+         memory: 128Mi
+
+   When proxy.enabled=true:
+   - Proxy Deployment is created
+   - LoadBalancer Service is created
+   - KafkaCluster .status.bootstrapServers points to proxy address
+   - Per-broker external access resources (TCPRoutes etc.) are NOT created
+     (they're unnecessary when proxy handles routing)
+
+6. What proxy mode means for clients:
+
+   bootstrap.servers: kafka.example.com:9092
+   # Nothing else needed — no TLS, no per-broker config, no SNI
+   # Works with any standard Kafka client library unchanged
+
+7. Proxy metrics:
+
+   skafka_proxy_requests_total{api_key, routed_to_broker}
+   skafka_proxy_route_latency_seconds (histogram)
+   skafka_proxy_routing_errors_total{reason}
+   skafka_proxy_lease_staleness_seconds  ← time since last Lease watch event
+```
+
+---
+
 ### v2 Definition of Done
 
 - [ ] Kafka Streams word count example runs successfully end-to-end
@@ -1548,4 +2037,355 @@ new file: transaction_index.go
 - [ ] Streams internal topics created automatically without CRD intervention
 - [ ] Broker crash mid-transaction: new leader correctly identifies and fences
 - [ ] read_committed fetch does not return records from open transactions
+- [ ] Proxy mode: single external address, no TLS, client produces/consumes correctly
+- [ ] Proxy mode: broker failover transparent to client during Lease transition
+- [ ] Proxy mode: Fetch requests load-balanced across brokers
 - [ ] All v1 MVP checklist items still pass (no regressions)
+
+---
+
+## Local Development Setup (for Claude Code)
+
+**Goal:** Get a working skafka cluster running locally in under 10 minutes,
+without needing a full CephFS cluster. Used for all development and unit
+testing.
+
+```
+1. Prerequisites:
+   - Docker Desktop or Colima (for kind)
+   - kind v0.23+
+   - kubectl, helm, go 1.22+
+
+2. Local cluster with simulated shared storage:
+
+   # Create kind cluster
+   kind create cluster --config=hack/kind-config.yaml
+
+   # kind-config.yaml mounts a host directory into all nodes,
+   # simulating shared storage without CephFS:
+   kind: Cluster
+   apiVersion: kind.x-k8s.io/v1alpha4
+   nodes:
+   - role: control-plane
+   - role: worker
+     extraMounts:
+     - hostPath: /tmp/skafka-data
+       containerPath: /mnt/skafka-data
+   - role: worker
+     extraMounts:
+     - hostPath: /tmp/skafka-data
+       containerPath: /mnt/skafka-data
+   - role: worker
+     extraMounts:
+     - hostPath: /tmp/skafka-data
+       containerPath: /mnt/skafka-data
+
+   # All three worker nodes mount the SAME host path.
+   # This simulates a shared ReadWriteMany filesystem for local dev.
+   # NOTE: host filesystem flock() semantics apply — not CephFS.
+   # This is sufficient for protocol and logic testing but does NOT
+   # test CephFS-specific flock behaviour.
+
+3. Deploy skafka locally:
+   make build-images          # builds broker + operator images
+   kind load docker-image ... # load into kind
+   make deploy-local          # applies CRDs, RBAC, KafkaCluster CR
+
+   # deploy-local uses a local-dev overlay that:
+   # - Uses hostPath PV instead of CephFS StorageClass
+   # - Sets replicaCount: 1 for faster iteration
+   # - Disables external access (internal only)
+   # - Sets log level DEBUG
+
+4. Makefile targets for Claude Code to use:
+
+   make test-unit              # go test ./... (no cluster needed)
+   make test-integration       # requires kind cluster
+   make test-compat            # kafka client compatibility tests
+   make lint                   # golangci-lint
+   make generate               # controller-gen CRD manifests + deepcopy
+   make build                  # compile broker + operator binaries
+   make build-images           # docker buildx build
+   make deploy-local           # deploy to kind
+   make destroy-local          # tear down kind cluster
+   make port-forward           # kubectl port-forward broker-0 9092:9092
+
+5. Hot reload for broker development:
+   # Build and reload broker binary without rebuilding image:
+   make build && kubectl cp ./bin/skafka kafka/skafka-0:/skafka \
+     && kubectl exec kafka/skafka-0 -- kill -SIGTERM 1
+   # Pod restarts with new binary from shared filesystem
+   # Useful for fast iteration on protocol handlers
+
+6. Running a single integration test:
+   go test ./tests/integration/... -run TestLeaderFailover -v \
+     -kubeconfig ~/.kube/config -namespace kafka
+
+7. Local Kafka client testing (no cluster needed for protocol unit tests):
+   # Start broker in standalone mode (no Kubernetes, no CephFS):
+   ./bin/skafka --standalone --data-dir /tmp/skafka-standalone
+   # Broker runs with in-memory lock and local filesystem
+   # Useful for rapid protocol iteration
+
+   # Then test with kcat:
+   kcat -b localhost:9092 -t test -P <<< "hello world"
+   kcat -b localhost:9092 -t test -C -e
+```
+
+---
+
+## Migration Guide: Strimzi → skafka
+
+**Who this is for:** Teams currently running Strimzi who want to evaluate or
+migrate to skafka. This is a full data migration — plan for a maintenance
+window or use a parallel-run approach.
+
+```
+Prerequisites:
+- skafka deployed and healthy (all brokers in Ready state)
+- MirrorMaker 2 or kcat available for data migration
+- Both clusters accessible from the same network
+
+Migration strategy: parallel run with MirrorMaker 2
+
+This is the lowest-risk approach. Strimzi and skafka run simultaneously.
+MirrorMaker 2 replicates topics from Strimzi to skafka. You switch producers
+first, then consumers, then decommission Strimzi.
+
+Step 1 — Deploy skafka alongside Strimzi:
+  - Use a different namespace (e.g., kafka-new)
+  - Create matching KafkaTopic CRDs for each Strimzi topic
+  - Verify skafka is healthy before proceeding
+
+Step 2 — Start MirrorMaker 2 replication:
+  Deploy MirrorMaker 2 pointed at Strimzi (source) → skafka (target).
+  MirrorMaker 2 replicates all topics including __consumer_offsets,
+  which carries committed consumer offsets across.
+
+  Key MirrorMaker 2 config:
+    source.cluster.alias: strimzi
+    target.cluster.alias: skafka
+    topics: .*                         # replicate all topics
+    groups: .*                         # replicate all consumer groups
+    sync.topic.configs.enabled: true   # sync topic retention settings
+    replication.factor: 1              # RF=1 on skafka (shared storage)
+
+Step 3 — Verify replication lag:
+  Monitor consumer lag on the MirrorMaker 2 consumer group.
+  Wait until lag is consistently near zero before proceeding.
+  Use: kafka-consumer-groups.sh --bootstrap-server skafka:9092 --describe
+
+Step 4 — Recreate users and ACLs:
+  For each Strimzi KafkaUser, create a matching skafka KafkaUser CRD.
+  For each Strimzi KafkaUser ACL, create a matching skafka KafkaAcl CRD.
+  Credentials will differ (different secrets) — update application config.
+
+Step 5 — Switch producers:
+  Update producer bootstrap.servers to point to skafka.
+  Roll producers one deployment at a time.
+  Monitor skafka produce metrics to verify traffic is flowing.
+  Keep MirrorMaker 2 running to catch any in-flight messages.
+
+Step 6 — Switch consumers:
+  Update consumer bootstrap.servers to point to skafka.
+  Because __consumer_offsets was mirrored, consumers resume from
+  their last committed offset on skafka — no data is reprocessed.
+  Roll consumers one deployment at a time.
+
+Step 7 — Decommission MirrorMaker 2 and Strimzi:
+  Once all producers and consumers are on skafka and stable for
+  at least 24 hours, stop MirrorMaker 2.
+  Delete the Strimzi Kafka CR and clean up its PVCs.
+
+Notable differences to communicate to application teams:
+  - bootstrap.servers changes (new hostname/port)
+  - Credentials change (new Secrets from KafkaUser CRD)
+  - replication.factor must be 1 (RF>1 is silently accepted but wastes space)
+  - kafka.consumer.group.id prefix: MirrorMaker 2 adds cluster alias prefix
+    to mirrored group IDs. Adjust consumer group names if needed.
+  - TLS: if switching from TLSRoute to TCPRoute, clients drop TLS config
+
+Topic naming with MirrorMaker 2:
+  By default MirrorMaker 2 renames topics: source.topic → strimzi.topic
+  To avoid renaming, set: replication.policy.class=IdentityReplicationPolicy
+  This keeps topic names identical on both clusters.
+```
+
+---
+
+## Security Hardening
+
+**Goal:** Production-ready security posture. All items below should be
+completed before deploying skafka in a production environment.
+
+```
+1. Kubernetes NetworkPolicy:
+
+   Deny all ingress/egress by default, then allow explicitly:
+
+   # Allow producers/consumers → brokers on 9092
+   apiVersion: networking.k8s.io/v1
+   kind: NetworkPolicy
+   metadata:
+     name: skafka-broker-ingress
+     namespace: kafka
+   spec:
+     podSelector:
+       matchLabels:
+         app: skafka
+     policyTypes: [Ingress]
+     ingress:
+     - ports:
+       - port: 9092   # Kafka protocol (internal)
+       - port: 9093   # Kafka protocol (TLS, if enabled)
+       - port: 8080   # healthz
+       - port: 9090   # metrics
+
+   # Allow broker → Kubernetes API server (for Lease operations)
+   # Allow broker → CephFS MDS (metadata server)
+   # Allow operator → Kubernetes API server
+   # Deny all other ingress/egress
+
+   Implement as Helm templates, off by default, enabled with:
+     networkPolicy.enabled: true
+
+2. Pod Security Standards:
+   Apply restricted PSS to the kafka namespace:
+     labels:
+       pod-security.kubernetes.io/enforce: restricted
+       pod-security.kubernetes.io/audit: restricted
+
+   Broker pod must comply:
+   - runAsNonRoot: true
+   - runAsUser: 1000
+   - readOnlyRootFilesystem: true (except /data mount and /tmp)
+   - allowPrivilegeEscalation: false
+   - drop ALL capabilities
+   - seccompProfile: RuntimeDefault
+
+3. Secret rotation:
+   KafkaUser SCRAM credentials: operator regenerates SCRAM hashes when
+   the referenced Secret changes. Applications rotate by updating the
+   Secret — no broker restart needed (credentials.json reloaded via inotify).
+
+   TLS certificates via cert-manager: automatic rotation before expiry.
+   Broker reloads TLS config on cert renewal — no restart needed.
+
+4. Audit logging:
+   All authenticated Kafka API requests logged at INFO with:
+   - principal, client_id, api_key, topic/group, source IP, result
+   - Denied ACL checks logged at WARN
+   Forward audit logs to your SIEM via standard log aggregation.
+
+5. Encryption at rest:
+   CephFS supports encryption at rest via dm-crypt / LUKS on OSDs.
+   Enable in Rook-Ceph configuration — transparent to skafka.
+   For NFS: use encrypted NFS (NFSv4 with Kerberos) or encrypt at the
+   storage layer.
+
+6. mTLS for internal broker communication:
+   In v1, internal broker-to-broker communication uses plaintext
+   (there is no replication traffic, only Lease-watch API calls).
+   For organizations requiring encryption in transit everywhere, enable
+   TLS on the internal listener and use cert-manager to issue internal
+   certificates signed by a cluster CA.
+
+7. RBAC least privilege — verify with audit:
+   Run kubectl auth can-i --list --as=system:serviceaccount:kafka:skafka
+   Verify broker SA cannot: create/delete Secrets outside kafka namespace,
+   read other namespaces' resources, access node-level APIs.
+
+8. Image supply chain:
+   - Pin all image digests in Helm chart (not just tags)
+   - Sign images with cosign in CI pipeline
+   - Scan images with Trivy in CI — block on CRITICAL CVEs
+   - Use distroless base image (already in Dockerfile)
+   - Enable Kubernetes image pull policy: Always in production
+```
+
+---
+
+## Disaster Recovery and Backup
+
+**Goal:** Define recovery procedures for the most likely failure scenarios.
+CephFS provides storage-layer redundancy, but operational mistakes and
+catastrophic failures still need a recovery path.
+
+```
+Failure scenarios and recovery procedures:
+
+1. Single broker pod failure (most common):
+   Recovery: automatic. Kubernetes reschedules the pod. New pod acquires
+   Leases via the lease/manager.go re-election loop. Clients experience
+   failover latency equal to leaseDurationSeconds.
+   No operator action required. Monitor skafka_lease_acquisition_total.
+
+2. All broker pods down simultaneously (e.g., node drain, rolling update):
+   Recovery: automatic on pod restart. Because all data is on the shared
+   PVC, brokers restart clean with no catch-up needed.
+   Rolling restart: use kubectl rollout restart statefulset/skafka.
+   PodDisruptionBudget prevents >1 pod going down during voluntary disruption.
+
+3. Single CephFS OSD failure:
+   Recovery: handled by Ceph automatically (replication factor ≥ 2 on OSDs).
+   Ceph backfills the failed OSD's data to surviving OSDs.
+   skafka is unaffected during this process — reads/writes continue.
+   Monitor Ceph health: ceph status.
+
+4. CephFS MDS (metadata server) failure:
+   Recovery: Ceph automatically promotes standby MDS.
+   skafka may experience a brief pause (~5-30s) while MDS failover completes.
+   Produce requests time out and are retried by clients. No data loss.
+
+5. Complete CephFS cluster failure (catastrophic):
+   This is the most serious scenario — all skafka data is inaccessible.
+   Recovery depends on backup strategy (see below).
+   Until CephFS recovers, skafka is fully unavailable.
+
+6. Accidental topic deletion:
+   The KafkaTopic controller creates a deletion Job when a KafkaTopic CRD
+   is deleted. To prevent accidental deletion, add a Kubernetes finalizer
+   to the KafkaTopic CRD — deletion requires explicitly removing the
+   finalizer first.
+   Enable with: kafkaTopic.deletionProtection: true in Helm values.
+
+Backup strategy:
+
+Option A — CephFS snapshots (recommended):
+   Rook-Ceph supports VolumeSnapshots of CephFS volumes.
+   Schedule snapshots via a VolumeSnapshotSchedule (Rook-Ceph feature)
+   or a Kubernetes CronJob that creates VolumeSnapshot objects.
+
+   Snapshot frequency recommendation:
+   - Every 6 hours for active clusters
+   - Retain 7 daily snapshots, 4 weekly snapshots
+
+   Restore procedure:
+   a. Scale skafka StatefulSet to 0 replicas
+   b. Delete PVC skafka-shared-data
+   c. Create new PVC from snapshot:
+      kubectl apply -f pvc-from-snapshot.yaml
+   d. Scale StatefulSet back to 3 replicas
+   e. Verify: produce and consume a test message
+
+   Recovery time: minutes (snapshot restore is near-instant on CephFS)
+   Recovery point: last snapshot (up to 6 hours of data loss)
+
+Option B — MirrorMaker 2 to a second cluster:
+   Run a second skafka cluster (or any Kafka-compatible broker) as a
+   standby. MirrorMaker 2 replicates all topics continuously.
+   On primary failure: redirect producers/consumers to standby.
+   Recovery point: near-zero (MirrorMaker 2 lag, typically seconds)
+   Recovery time: minutes (DNS/config change)
+   Cost: 2x infrastructure
+
+Option C — Topic-level backup with kafka-backup tools:
+   Use kafka-backup or similar tooling to export topic data to object
+   storage (S3/MinIO) on a schedule. Restore individual topics from backup.
+   Useful for compliance/audit requirements or accidental deletion recovery.
+   Not suitable as primary DR strategy (too slow for full cluster recovery).
+
+Backup testing:
+   Restore procedure must be tested quarterly. Add a quarterly reminder
+   to the project's issue tracker. An untested backup is not a backup.
+```
