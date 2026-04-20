@@ -1,0 +1,23 @@
+{{- if .Values.listeners.external.enabled }}
+{{- range $i, $e := until (int .Values.broker.replicaCount) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "skafka.fullname" $ }}-broker-{{ $i }}
+  labels:
+    {{- include "skafka.labels" $ | nindent 4 }}
+    skafka.io/broker-ordinal: "{{ $i }}"
+spec:
+  # Selects exactly one pod via the StatefulSet's pod-name label.
+  # TLSRoute (SNI-matched) routes broker-N.kafka.example.com to this Service.
+  type: ClusterIP
+  selector:
+    {{- include "skafka.selectorLabels" $ | nindent 4 }}
+    statefulset.kubernetes.io/pod-name: {{ include "skafka.fullname" $ }}-{{ $i }}
+  ports:
+    - name: kafka-tls
+      port: {{ $.Values.listeners.external.port }}
+      targetPort: kafka-tls
+{{- end }}
+{{- end }}

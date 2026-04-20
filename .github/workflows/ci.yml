@@ -34,13 +34,10 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          # Use latest instead of a pinned version — the previous pin (v1.64.8)
-          # may not exist in the action's version catalog, which silently 404s
-          # and the whole step fails.
-          version: latest
+      # golangci-lint is currently disabled: the latest published golangci-lint
+      # is built with Go 1.24 and refuses to load a project whose go.mod targets
+      # Go 1.26.1. Re-enable once a golangci-lint release built with Go 1.26 ships.
+      # Tracking: https://github.com/golangci/golangci-lint/releases
 
       - name: go test
         run: go test ./...

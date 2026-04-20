@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "skafka.fullname" . }}
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.broker.replicaCount }}
+  serviceName: {{ include "skafka.headlessName" . }}
+  # All brokers are identical — no startup ordering needed.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: {{- include "skafka.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "skafka.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "skafka.brokerSAName" . }}
+      # Pod only joins the headless service after all partition leases are held.
+      readinessGates:
+        - conditionType: "skafka.io/PartitionsReady"
+      initContainers:
+        - name: partition-init
+          image: {{ include "skafka.brokerImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--init"]
+          env:
+            - name: SKAFKA_DATA_DIR
+              value: {{ .Values.storage.mountPath }}
+            - name: SKAFKA_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.storage.mountPath }}
+      containers:
+        - name: broker
+          image: {{ include "skafka.brokerImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: kafka
+              containerPort: {{ .Values.broker.ports.kafka }}
+            - name: kafka-tls
+              containerPort: {{ .Values.listeners.external.port | default .Values.broker.ports.tls }}
+            - name: health
+              containerPort: {{ .Values.broker.ports.health }}
+            {{- if .Values.observability.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.observability.metrics.port }}
+            {{- end }}
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SKAFKA_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SKAFKA_HEADLESS_SVC
+              value: {{ include "skafka.headlessName" . }}
+            - name: SKAFKA_DATA_DIR
+              value: {{ .Values.storage.mountPath }}
+            - name: SKAFKA_CLUSTER_ID
+              value: {{ .Values.broker.clusterID }}
+            - name: SKAFKA_PORT
+              value: "{{ .Values.broker.ports.kafka }}"
+            - name: SKAFKA_HEALTH_ADDR
+              value: ":{{ .Values.broker.ports.health }}"
+            {{- if .Values.auth.requireSasl }}
+            - name: SKAFKA_REQUIRE_SASL
+              value: "true"
+            {{- end }}
+            {{- if .Values.observability.metrics.enabled }}
+            - name: SKAFKA_METRICS_ADDR
+              value: ":{{ .Values.observability.metrics.port }}"
+            {{- end }}
+            - name: SKAFKA_LOG_LEVEL
+              value: {{ .Values.observability.logs.level | quote }}
+            - name: SKAFKA_LOG_FORMAT
+              value: {{ .Values.observability.logs.format | quote }}
+            {{- if .Values.observability.otlp.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlp.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "{{ .Values.observability.otlp.insecure }}"
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: "{{ .Values.observability.otlp.traces.samplerRatio }}"
+            {{- end }}
+            {{- if .Values.listeners.external.enabled }}
+            # TLS listener for external clients. Hostname pattern is fmt-style
+            # with the pod ordinal as the single %d argument. The broker reads
+            # apps.kubernetes.io/pod-index from the downward-API label.
+            - name: SKAFKA_TLS_CERT_FILE
+              value: /tls/tls.crt
+            - name: SKAFKA_TLS_KEY_FILE
+              value: /tls/tls.key
+            - name: SKAFKA_TLS_PORT
+              value: "{{ .Values.listeners.external.port }}"
+            - name: POD_ORDINAL
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+            - name: EXTERNAL_HOSTNAME_PATTERN
+              value: {{ .Values.listeners.external.hostnamePattern | quote }}
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: kafka
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            initialDelaySeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.listeners.external.enabled }}
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
+          resources: {{- toYaml .Values.broker.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "skafka.pvcName" . }}
+        {{- if .Values.listeners.external.enabled }}
+        - name: tls
+          secret:
+            # Secret created by cert-manager from the Certificate resource.
+            # Single Secret shared across all broker pods.
+            secretName: {{ include "skafka.fullname" . }}-broker-tls
+        {{- end }}

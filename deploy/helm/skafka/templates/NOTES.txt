@@ -1,0 +1,44 @@
+skafka {{ .Chart.AppVersion }} has been installed as {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Broker StatefulSet: {{ include "skafka.fullname" . }} ({{ .Values.broker.replicaCount }} replicas)
+Shared PVC:         {{ include "skafka.pvcName" . }} ({{ .Values.storage.size }} on {{ .Values.storage.className }})
+{{- if .Values.operator.enabled }}
+Operator:           {{ include "skafka.fullname" . }}-operator
+{{- end }}
+
+{{- if .Values.listeners.external.enabled }}
+
+External access is enabled with end-to-end TLS.
+Wait for the cert-manager Certificate to be ready:
+
+  kubectl get certificate {{ include "skafka.fullname" . }}-broker-tls -n {{ .Release.Namespace }}
+
+Configure your Kafka clients with any one of the bootstrap servers:
+  {{- range $i, $e := until (int .Values.broker.replicaCount) }}
+  {{ printf $.Values.listeners.external.hostnamePattern $i }}:{{ $.Values.listeners.external.port }}
+  {{- end }}
+
+Each address resolves to its own broker pod via SNI. Clients learn the full list
+from Metadata and use the Kafka protocol's standard retry behaviour for leader
+changes — no special client configuration needed.
+{{- else }}
+
+External access is disabled. In-cluster clients connect directly to:
+  {{- range $i, $e := until (int .Values.broker.replicaCount) }}
+  {{ include "skafka.fullname" $ }}-{{ $i }}.{{ include "skafka.headlessName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.listeners.internal.port }}
+  {{- end }}
+
+To enable external access, set listeners.external.enabled=true and configure
+listeners.external.hostnamePattern with your DNS pattern.
+{{- end }}
+
+To create a topic:
+  kubectl apply -f - <<EOF
+  apiVersion: skafka.io/v1alpha1
+  kind: KafkaTopic
+  metadata:
+    name: my-topic
+    namespace: {{ .Release.Namespace }}
+  spec:
+    partitions: 3
+  EOF

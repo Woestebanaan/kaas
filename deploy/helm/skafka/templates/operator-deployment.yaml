@@ -1,0 +1,49 @@
+{{- if .Values.operator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "skafka.fullname" . }}-operator
+  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "skafka.operatorSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "skafka.operatorSelectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "skafka.operatorSAName" . }}
+      containers:
+        - name: operator
+          image: {{ include "skafka.operatorImage" . }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          env:
+            - name: SKAFKA_DATA_DIR
+              value: {{ .Values.storage.mountPath }}
+            - name: SKAFKA_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.storage.mountPath }}
+          resources: {{- toYaml .Values.operator.resources | nindent 12 }}
+      volumes:
+        # Operator mounts the SAME PVC as the brokers.
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "skafka.pvcName" . }}
+{{- end }}

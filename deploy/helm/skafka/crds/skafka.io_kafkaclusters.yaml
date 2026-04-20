@@ -1,0 +1,127 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkaclusters.skafka.io
+spec:
+  group: skafka.io
+  names:
+    kind: KafkaCluster
+    listKind: KafkaClusterList
+    plural: kafkaclusters
+    singular: kafkacluster
+    shortNames: [kc]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: External
+          type: boolean
+          jsonPath: .spec.listeners.external.enabled
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=='Ready')].status
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [replicas]
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+                storage:
+                  type: object
+                  properties:
+                    className:
+                      type: string
+                    size:
+                      type: string
+                listeners:
+                  type: object
+                  properties:
+                    internal:
+                      type: object
+                      properties:
+                        port:
+                          type: integer
+                          default: 9092
+                    external:
+                      type: object
+                      required: [enabled]
+                      properties:
+                        enabled:
+                          type: boolean
+                        port:
+                          type: integer
+                          default: 9093
+                        hostnamePattern:
+                          type: string
+                        bootstrapHostname:
+                          type: string
+                        tls:
+                          type: object
+                          properties:
+                            certManager:
+                              type: object
+                              required: [enabled]
+                              properties:
+                                enabled:
+                                  type: boolean
+                                issuerRef:
+                                  type: object
+                                  required: [name, kind]
+                                  properties:
+                                    name:
+                                      type: string
+                                    kind:
+                                      type: string
+                                      enum: [ClusterIssuer, Issuer]
+                        gateway:
+                          type: object
+                          required: [enabled]
+                          properties:
+                            enabled:
+                              type: boolean
+                            gatewayRef:
+                              type: object
+                              required: [name]
+                              properties:
+                                name:
+                                  type: string
+                                namespace:
+                                  type: string
+                        service:
+                          type: object
+                          properties:
+                            annotations:
+                              type: object
+                              additionalProperties:
+                                type: string
+            status:
+              type: object
+              properties:
+                bootstrapServers:
+                  type: array
+                  items:
+                    type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason, message]
+                    properties:
+                      type: {type: string}
+                      status: {type: string, enum: [True, False, Unknown]}
+                      lastTransitionTime: {type: string, format: date-time}
+                      reason: {type: string}
+                      message: {type: string}
+                      observedGeneration: {type: integer}

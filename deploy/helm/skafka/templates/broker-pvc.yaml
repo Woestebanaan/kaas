@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "skafka.pvcName" . }}
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+  annotations:
+    # Never auto-delete on helm uninstall — this volume holds cluster data.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ .Values.storage.accessMode }}
+  storageClassName: {{ .Values.storage.className }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.size }}

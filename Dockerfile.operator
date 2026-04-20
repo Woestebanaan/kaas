@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Operator image. Multi-stage, distroless, target size <20MB.
 
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /src
 
 COPY go.mod go.sum ./

@@ -1,0 +1,22 @@
+{{- if and .Values.listeners.external.enabled .Values.listeners.external.tls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "skafka.fullname" . }}-broker-tls
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+spec:
+  # All broker pods mount this single Secret; the certificate covers every
+  # per-broker SAN and the optional bootstrap hostname. cert-manager rotates
+  # it; the broker fsnotify-watches the mount and hot-reloads on change.
+  secretName: {{ include "skafka.fullname" . }}-broker-tls
+  dnsNames:
+    {{- range $i, $e := until (int .Values.broker.replicaCount) }}
+    - {{ printf $.Values.listeners.external.hostnamePattern $i | quote }}
+    {{- end }}
+    {{- with .Values.listeners.external.bootstrapHostname }}
+    - {{ . | quote }}
+    {{- end }}
+  issuerRef:
+    name: {{ .Values.listeners.external.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.listeners.external.tls.certManager.issuerRef.kind }}
+{{- end }}

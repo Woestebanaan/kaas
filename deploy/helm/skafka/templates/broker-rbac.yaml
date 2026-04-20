@@ -1,0 +1,73 @@
+{{- if .Values.serviceAccount.broker.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "skafka.brokerSAName" . }}
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "skafka.fullname" . }}-broker
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+rules:
+  # Partition leadership via Leases.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update]
+  # Cluster topology.
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  # CRD watches — read-only.
+  - apiGroups: [skafka.io]
+    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls]
+    verbs: [get, list, watch]
+  # Kubernetes ServiceAccount JWT validation (SASL PLAIN).
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "skafka.fullname" . }}-broker
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "skafka.fullname" . }}-broker
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "skafka.brokerSAName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Own-namespace Role: Secrets + pods/status.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "skafka.fullname" . }}-broker
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  # ReadinessGate updates — own pod only (k8s scopes automatically).
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "skafka.fullname" . }}-broker
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "skafka.fullname" . }}-broker
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "skafka.brokerSAName" . }}
+    namespace: {{ .Release.Namespace }}

@@ -1,0 +1,84 @@
+{{- if and .Values.operator.enabled .Values.serviceAccount.operator.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "skafka.operatorSAName" . }}
+  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+{{- end }}
+{{- if .Values.operator.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "skafka.fullname" . }}-operator
+  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [skafka.io]
+    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls, kafkaclusters]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [skafka.io]
+    resources:
+      - kafkatopics/status
+      - kafkausers/status
+      - kafkausergroups/status
+      - kafkaacls/status
+      - kafkaclusters/status
+      - kafkatopics/finalizers
+      - kafkausers/finalizers
+      - kafkausergroups/finalizers
+      - kafkaacls/finalizers
+      - kafkaclusters/finalizers
+    verbs: [get, update, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, patch]
+  # KafkaCluster controller reconciles Services and Gateway API / cert-manager resources.
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [tlsroutes]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "skafka.fullname" . }}-operator
+  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "skafka.fullname" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "skafka.operatorSAName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Own-namespace Role: Secrets CRUD for output credentials.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "skafka.fullname" . }}-operator
+  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "skafka.fullname" . }}-operator
+  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "skafka.fullname" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "skafka.operatorSAName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

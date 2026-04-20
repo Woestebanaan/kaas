@@ -1,0 +1,14 @@
+apiVersion: v2
+name: skafka
+description: Kafka-protocol-compatible broker on shared storage with Kubernetes-native coordination
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - kafka
+  - streaming
+  - messaging
+home: https://github.com/woestebanaan/skafka
+sources:
+  - https://github.com/woestebanaan/skafka

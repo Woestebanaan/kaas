@@ -1,7 +1,9 @@
-# Compiled binaries
-skafka
-skafka-router
-skafka-operator
+# Compiled binaries at repo root. The leading slash anchors these to the
+# repository root so they do NOT match directories named `skafka` elsewhere
+# (e.g. deploy/helm/skafka/, operator/api/v1alpha1/... etc).
+/skafka
+/skafka-router
+/skafka-operator
 
 # Go build output
 bin/
