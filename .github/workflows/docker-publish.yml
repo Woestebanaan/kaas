@@ -46,8 +46,17 @@ jobs:
         with:
           driver: docker-container
 
-      # sigstore/cosign-installer has no floating `v4` major-version tag; pin explicitly.
-      - uses: sigstore/cosign-installer@v4.1.1
+      # Install cosign directly. sigstore/cosign-installer@v4.x needs `envsubst`
+      # (gettext) which isn't in the ARC runner image. Direct download sidesteps
+      # that dependency and works on any runner with curl.
+      - name: Install cosign
+        env:
+          COSIGN_VERSION: v2.4.1
+        run: |
+          curl -sSL -o /tmp/cosign \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          cosign version
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
