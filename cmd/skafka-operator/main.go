@@ -56,6 +56,10 @@ func main() {
 		ctrl.Log.Error(err, "unable to set up KafkaUserGroup controller")
 		os.Exit(1)
 	}
+	if err := controllers.NewKafkaClusterReconciler(mgr.GetClient(), namespace).SetupWithManager(mgr); err != nil {
+		ctrl.Log.Error(err, "unable to set up KafkaCluster controller")
+		os.Exit(1)
+	}
 	if err := controllers.NewKafkaAclReconciler(mgr.GetClient(), dataDir, namespace).SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up KafkaAcl controller")
 		os.Exit(1)

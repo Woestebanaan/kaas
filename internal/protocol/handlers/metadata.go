@@ -10,10 +10,23 @@ import (
 )
 
 // BrokerEndpoint is one broker in the cluster as seen by the Metadata handler.
+// Host/Port are the internal (in-cluster) address. ExternalHost/ExternalPort are
+// the externally-routable address used for the TLS listener; if ExternalHost is
+// empty, the internal Host is used instead.
 type BrokerEndpoint struct {
-	NodeID int32
-	Host   string
-	Port   int32
+	NodeID       int32
+	Host         string
+	Port         int32
+	ExternalHost string // per-broker external hostname (empty if no external listener)
+	ExternalPort int32
+}
+
+// addressFor returns the host/port to advertise for the given listener.
+func (b BrokerEndpoint) addressFor(listener connstate.ListenerName) (string, int32) {
+	if listener == connstate.ListenerExternal && b.ExternalHost != "" {
+		return b.ExternalHost, b.ExternalPort
+	}
+	return b.Host, b.Port
 }
 
 // BrokerSource provides the live broker list for Metadata responses.
@@ -37,13 +50,23 @@ type TopicEntry struct {
 // BrokerInfo is a static single-broker implementation of BrokerSource.
 // Used in local-dev and tests; replaced by a dynamic registry in Kubernetes mode.
 type BrokerInfo struct {
-	NodeID    int32
-	Host      string
-	Port      int32
-	ClusterID string
+	NodeID       int32
+	Host         string
+	Port         int32
+	ClusterID    string
+	ExternalHost string // advertised on the TLS listener; empty = reuse Host
+	ExternalPort int32
 }
 
-func (b BrokerInfo) Self() BrokerEndpoint { return BrokerEndpoint{NodeID: b.NodeID, Host: b.Host, Port: b.Port} }
+func (b BrokerInfo) Self() BrokerEndpoint {
+	return BrokerEndpoint{
+		NodeID:       b.NodeID,
+		Host:         b.Host,
+		Port:         b.Port,
+		ExternalHost: b.ExternalHost,
+		ExternalPort: b.ExternalPort,
+	}
+}
 func (b BrokerInfo) All() []BrokerEndpoint { return []BrokerEndpoint{b.Self()} }
 
 type MetadataHandler struct {
@@ -68,11 +91,18 @@ func NewMetadataHandlerWithSource(brokers BrokerSource, clusterID string, topics
 	return &MetadataHandler{brokers: brokers, clusterID: clusterID, topics: topics, leases: leases}
 }
 
-func (h *MetadataHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
 	r := codec.NewReader(body)
 	req, err := api.DecodeMetadataRequest(r, version)
 	if err != nil {
 		return nil, fmt.Errorf("metadata decode: %w", err)
+	}
+
+	// Pick per-listener advertised host. External listener uses per-broker
+	// hostnames so clients can route directly to the correct leader on retry.
+	listener := connstate.ListenerInternal
+	if conn != nil && conn.Listener != "" {
+		listener = conn.Listener
 	}
 
 	allBrokers := h.brokers.All()
@@ -81,10 +111,11 @@ func (h *MetadataHandler) Handle(_ *connstate.ConnState, version int16, body []b
 		ControllerID: h.brokers.Self().NodeID,
 	}
 	for _, b := range allBrokers {
+		host, port := b.addressFor(listener)
 		resp.Brokers = append(resp.Brokers, api.MetadataBroker{
 			NodeID: b.NodeID,
-			Host:   b.Host,
-			Port:   b.Port,
+			Host:   host,
+			Port:   port,
 		})
 	}
 

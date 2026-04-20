@@ -257,3 +257,214 @@ func EncodeMetadataResponse(w *codec.Writer, resp *MetadataResponse, version int
 		w.WriteEmptyTaggedFields()
 	}
 }
+
+// DecodeMetadataResponse is the symmetric partner of EncodeMetadataResponse.
+// Used by tests and by any future caller that needs to inspect a Metadata response
+// (for example, operator-side validation). Handles all supported versions 1–12.
+func DecodeMetadataResponse(r *codec.Reader, version int16) (*MetadataResponse, error) {
+	resp := &MetadataResponse{}
+	flexible := version >= 9
+
+	var err error
+	if version >= 3 {
+		if resp.ThrottleTimeMs, err = r.ReadInt32(); err != nil {
+			return nil, err
+		}
+	}
+
+	readBrokers := func() error {
+		var b MetadataBroker
+		if b.NodeID, err = r.ReadInt32(); err != nil {
+			return err
+		}
+		if flexible {
+			if b.Host, err = r.ReadCompactString(); err != nil {
+				return err
+			}
+		} else {
+			if b.Host, err = r.ReadString(); err != nil {
+				return err
+			}
+		}
+		if b.Port, err = r.ReadInt32(); err != nil {
+			return err
+		}
+		if version >= 1 {
+			var null bool
+			if flexible {
+				b.Rack, null, err = r.ReadCompactNullableString()
+			} else {
+				b.Rack, null, err = r.ReadNullableString()
+			}
+			if err != nil {
+				return err
+			}
+			if null {
+				b.Rack = ""
+			}
+		}
+		if flexible {
+			if err := r.ReadTaggedFields(); err != nil {
+				return err
+			}
+		}
+		resp.Brokers = append(resp.Brokers, b)
+		return nil
+	}
+	if flexible {
+		if err := r.ReadCompactArray(readBrokers); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := r.ReadArray(readBrokers); err != nil {
+			return nil, err
+		}
+	}
+
+	if version >= 2 {
+		var null bool
+		if flexible {
+			resp.ClusterID, null, err = r.ReadCompactNullableString()
+		} else {
+			resp.ClusterID, null, err = r.ReadNullableString()
+		}
+		if err != nil {
+			return nil, err
+		}
+		if null {
+			resp.ClusterID = ""
+		}
+	}
+	if version >= 1 {
+		if resp.ControllerID, err = r.ReadInt32(); err != nil {
+			return nil, err
+		}
+	}
+
+	readTopics := func() error {
+		var t MetadataTopic
+		if t.ErrorCode, err = r.ReadInt16(); err != nil {
+			return err
+		}
+		if flexible && version >= 12 {
+			var null bool
+			t.Name, null, err = r.ReadCompactNullableString()
+			if null {
+				t.Name = ""
+			}
+		} else if flexible {
+			t.Name, err = r.ReadCompactString()
+		} else {
+			t.Name, err = r.ReadString()
+		}
+		if err != nil {
+			return err
+		}
+		if version >= 10 {
+			// Skip the 16-byte TopicID UUID.
+			if _, err := r.ReadRaw(16); err != nil {
+				return err
+			}
+		}
+		if version >= 1 {
+			v, err := r.ReadInt8()
+			if err != nil {
+				return err
+			}
+			t.IsInternal = v != 0
+		}
+
+		readPartitions := func() error {
+			var p MetadataPartition
+			if p.ErrorCode, err = r.ReadInt16(); err != nil {
+				return err
+			}
+			if p.PartitionIndex, err = r.ReadInt32(); err != nil {
+				return err
+			}
+			if p.LeaderID, err = r.ReadInt32(); err != nil {
+				return err
+			}
+			if version >= 7 {
+				if p.LeaderEpoch, err = r.ReadInt32(); err != nil {
+					return err
+				}
+			}
+			readInt32Slice := func(dst *[]int32) error {
+				reader := func() error {
+					v, err := r.ReadInt32()
+					if err != nil {
+						return err
+					}
+					*dst = append(*dst, v)
+					return nil
+				}
+				if flexible {
+					return r.ReadCompactArray(reader)
+				}
+				return r.ReadArray(reader)
+			}
+			if err := readInt32Slice(&p.ReplicaNodes); err != nil {
+				return err
+			}
+			if err := readInt32Slice(&p.IsrNodes); err != nil {
+				return err
+			}
+			if version >= 5 {
+				if err := readInt32Slice(&p.OfflineReplicas); err != nil {
+					return err
+				}
+			}
+			if flexible {
+				if err := r.ReadTaggedFields(); err != nil {
+					return err
+				}
+			}
+			t.Partitions = append(t.Partitions, p)
+			return nil
+		}
+		if flexible {
+			if err := r.ReadCompactArray(readPartitions); err != nil {
+				return err
+			}
+		} else {
+			if err := r.ReadArray(readPartitions); err != nil {
+				return err
+			}
+		}
+
+		if version >= 8 {
+			if t.TopicAuthorizedOperations, err = r.ReadInt32(); err != nil {
+				return err
+			}
+		}
+		if flexible {
+			if err := r.ReadTaggedFields(); err != nil {
+				return err
+			}
+		}
+		resp.Topics = append(resp.Topics, t)
+		return nil
+	}
+	if flexible {
+		if err := r.ReadCompactArray(readTopics); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := r.ReadArray(readTopics); err != nil {
+			return nil, err
+		}
+	}
+
+	if version >= 8 && version <= 10 {
+		if resp.ClusterAuthorizedOperations, err = r.ReadInt32(); err != nil {
+			return nil, err
+		}
+	}
+	if flexible {
+		if err := r.ReadTaggedFields(); err != nil {
+			return nil, err
+		}
+	}
+	return resp, nil
+}

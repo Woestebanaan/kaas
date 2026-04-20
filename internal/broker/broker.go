@@ -2,6 +2,8 @@
 package broker
 
 import (
+	"fmt"
+
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8sbroker "github.com/woestebanaan/skafka/internal/k8s"
@@ -11,6 +13,10 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	"github.com/woestebanaan/skafka/internal/storage"
 )
+
+func sprintfOrdinal(pattern string, ordinal int32) string {
+	return fmt.Sprintf(pattern, ordinal)
+}
 
 // Config holds broker identity and static configuration.
 type Config struct {
@@ -115,8 +121,12 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 }
 
 // K8sBrokerSource adapts a *k8s.BrokerRegistry to handlers.BrokerSource.
+// ExtHostPattern + ExtPort optionally add per-broker external hostnames
+// (broker-{ordinal}.kafka.example.com:9093) to each BrokerEndpoint.
 type K8sBrokerSource struct {
-	reg *k8sbroker.BrokerRegistry
+	reg            *k8sbroker.BrokerRegistry
+	ExtHostPattern string // fmt-style pattern, e.g. "broker-%d.kafka.example.com"
+	ExtPort        int32
 }
 
 func NewK8sBrokerSource(reg *k8sbroker.BrokerRegistry) *K8sBrokerSource {
@@ -125,16 +135,34 @@ func NewK8sBrokerSource(reg *k8sbroker.BrokerRegistry) *K8sBrokerSource {
 
 func (a *K8sBrokerSource) Self() handlers.BrokerEndpoint {
 	e := a.reg.Self()
-	return handlers.BrokerEndpoint{NodeID: e.NodeID, Host: e.Host, Port: e.Port}
+	ep := handlers.BrokerEndpoint{NodeID: e.NodeID, Host: e.Host, Port: e.Port}
+	a.fillExternal(&ep)
+	return ep
 }
 
 func (a *K8sBrokerSource) All() []handlers.BrokerEndpoint {
 	all := a.reg.All()
 	out := make([]handlers.BrokerEndpoint, 0, len(all))
 	for _, e := range all {
-		out = append(out, handlers.BrokerEndpoint{NodeID: e.NodeID, Host: e.Host, Port: e.Port})
+		ep := handlers.BrokerEndpoint{NodeID: e.NodeID, Host: e.Host, Port: e.Port}
+		a.fillExternal(&ep)
+		out = append(out, ep)
 	}
 	return out
+}
+
+func (a *K8sBrokerSource) fillExternal(ep *handlers.BrokerEndpoint) {
+	if a.ExtHostPattern == "" {
+		return
+	}
+	ep.ExternalHost = fmtExternalHost(a.ExtHostPattern, ep.NodeID)
+	ep.ExternalPort = a.ExtPort
+}
+
+// fmtExternalHost substitutes the broker ordinal into the fmt-style hostname pattern.
+func fmtExternalHost(pattern string, ordinal int32) string {
+	// Use Sprintf so the caller can use %d or other verbs.
+	return sprintfOrdinal(pattern, ordinal)
 }
 
 var _ handlers.BrokerSource = (*K8sBrokerSource)(nil)

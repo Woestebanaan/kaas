@@ -85,7 +85,16 @@ func runBroker(ctx context.Context) {
 				slog.Error("endpoint watcher stopped", "err", err)
 			}
 		}()
-		brokerSource = broker.NewK8sBrokerSource(brokerReg)
+		src := broker.NewK8sBrokerSource(brokerReg)
+		if pattern := os.Getenv("EXTERNAL_HOSTNAME_PATTERN"); pattern != "" {
+			src.ExtHostPattern = pattern
+			extPort := int32(9093)
+			if p, err := strconv.Atoi(envOr("SKAFKA_TLS_PORT", "9093")); err == nil {
+				extPort = int32(p)
+			}
+			src.ExtPort = extPort
+		}
+		brokerSource = src
 		partLock = lock.NewFlockLock(dataDir)
 
 		// Callbacks are wired after DiskStorageEngine is created; use placeholders for now.
@@ -198,7 +207,20 @@ func runBroker(ctx context.Context) {
 	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
 	b.RegisterHandlers(d)
 
-	srv := protocol.NewServer(protocol.Config{ListenAddr: host + ":" + port}, d)
+	srvCfg := protocol.Config{ListenAddr: host + ":" + port}
+	if certFile := os.Getenv("SKAFKA_TLS_CERT_FILE"); certFile != "" {
+		keyFile := os.Getenv("SKAFKA_TLS_KEY_FILE")
+		tlsPort := envOr("SKAFKA_TLS_PORT", "9093")
+		tlsCfg, err := protocol.WatchingCertificate(certFile, keyFile)
+		if err != nil {
+			slog.Error("load TLS cert", "err", err)
+			os.Exit(1)
+		}
+		srvCfg.TLSListenAddr = host + ":" + tlsPort
+		srvCfg.TLSConfig = tlsCfg
+		slog.Info("TLS listener configured", "addr", srvCfg.TLSListenAddr, "cert", certFile)
+	}
+	srv := protocol.NewServer(srvCfg, d)
 	srv.SetAuthEngine(authEngine)
 	if err := srv.Start(ctx); err != nil {
 		slog.Error("start server", "err", err)

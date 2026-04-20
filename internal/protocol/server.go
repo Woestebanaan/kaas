@@ -114,11 +114,12 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 	defer s.wg.Done()
 	defer c.Close()
 
-	state := &connstate.ConnState{}
+	state := &connstate.ConnState{Listener: connstate.ListenerInternal}
 
 	// Mark TLS connections and extract the mTLS principal if a client cert is present.
 	if tlsConn, ok := c.(*tls.Conn); ok {
 		state.IsTLS = true
+		state.Listener = connstate.ListenerExternal
 		if err := tlsConn.Handshake(); err != nil {
 			slog.Warn("tls handshake failed", "err", err)
 			return
