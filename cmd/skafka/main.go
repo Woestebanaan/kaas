@@ -25,6 +25,7 @@ import (
 	"github.com/woestebanaan/skafka/internal/lock"
 	"github.com/woestebanaan/skafka/internal/protocol"
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/storage"
 	operatorv1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
@@ -33,10 +34,23 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	observability.InstallLogger()
+
 	if len(os.Args) > 1 && os.Args[1] == "--init" {
 		runInit(ctx)
 		return
 	}
+
+	obs, err := observability.Bootstrap(ctx, "skafka")
+	if err != nil {
+		slog.Error("observability bootstrap", "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = obs.Shutdown(shutdownCtx)
+	}()
 	runBroker(ctx)
 }
 

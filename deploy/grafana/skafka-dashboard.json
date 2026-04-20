@@ -1,0 +1,114 @@
+{
+  "title": "skafka",
+  "uid": "skafka-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "tags": ["kafka", "skafka"],
+  "timezone": "browser",
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "query": "label_values(skafka_produce_records_total, cluster)",
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Produce throughput (bytes/s) by topic",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (topic) (rate(skafka_produce_bytes_total[5m]))", "legendFormat": "{{topic}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Fetch throughput (bytes/s) by topic",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (topic) (rate(skafka_fetch_bytes_total[5m]))", "legendFormat": "{{topic}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Request latency p99 by api_key",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (api_key, le) (rate(skafka_request_latency_seconds_bucket[5m])))", "legendFormat": "api_key={{api_key}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Storage write latency p50 / p99",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_storage_write_latency_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_storage_write_latency_seconds_bucket[5m])))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "TLS handshake success rate (5m)",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(rate(skafka_tls_handshakes_total{result=\"ok\"}[5m])) / sum(rate(skafka_tls_handshakes_total[5m]))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}}
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Auth failure rate (5m)",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(rate(skafka_auth_failure_total[5m]))"}
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "ACL denies (5m)",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(rate(skafka_acl_deny_total[5m]))"}
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Lease events",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(increase(skafka_lease_acquired_total[1m]))", "legendFormat": "acquired"},
+        {"expr": "sum(increase(skafka_lease_lost_total[1m]))", "legendFormat": "lost"}
+      ]
+    }
+  ],
+  "__inputs": [
+    {"name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus"}
+  ]
+}

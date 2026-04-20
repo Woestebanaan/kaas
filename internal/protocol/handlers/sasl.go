@@ -1,10 +1,15 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
@@ -96,6 +101,11 @@ func (h *SaslAuthenticateHandler) Handle(conn *connstate.ConnState, version int1
 	if conn != nil && conn.SASLState != nil {
 		serverMsg, done, err = conn.SASLState.Step(req.AuthBytes)
 		if err != nil {
+			observability.Global().AuthFailure.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attribute.String("mechanism", conn.SASLMechanism),
+					attribute.String("reason", "step_error"),
+				))
 			resp := &api.SaslAuthenticateResponse{
 				ErrorCode:    int16(codec.ErrNetworkException),
 				ErrorMessage: err.Error(),
@@ -108,6 +118,8 @@ func (h *SaslAuthenticateHandler) Handle(conn *connstate.ConnState, version int1
 			p := conn.SASLState.Principal()
 			conn.Principal = &p
 			conn.SASLDone = true
+			observability.Global().AuthSuccess.Add(context.Background(), 1,
+				metric.WithAttributes(attribute.String("mechanism", conn.SASLMechanism)))
 		}
 	}
 

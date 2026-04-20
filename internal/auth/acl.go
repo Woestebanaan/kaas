@@ -1,12 +1,18 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	otelattribute "go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
+
+	"github.com/woestebanaan/skafka/internal/observability"
 )
 
 // aclFile mirrors the JSON structure written by the operator.
@@ -124,6 +130,11 @@ func (e *ACLEngine) Authorize(principal Principal, resource Resource, op Operati
 	allowed := e.evaluate(principal, resource, op)
 
 	if !allowed {
+		observability.Global().ACLDeny.Add(context.Background(), 1,
+			otelmetric.WithAttributes(
+				otelattribute.String("principal", principal.Name),
+				otelattribute.String("resource_type", resource.Type),
+			))
 		slog.Warn("acl: denied",
 			"principal", principal.Name,
 			"resource", resource.Type+"/"+resource.Name,

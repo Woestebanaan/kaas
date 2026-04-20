@@ -3,11 +3,16 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/lock"
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 	"github.com/woestebanaan/skafka/internal/storage"
@@ -30,6 +35,16 @@ func NewProduceHandler(
 }
 
 func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	start := time.Now()
+	mx := observability.Global()
+	defer func() {
+		mx.RequestLatency.Record(context.Background(), time.Since(start).Seconds(),
+			metric.WithAttributes(
+				attribute.Int("api_key", 0),
+				attribute.Int("version", int(version)),
+			))
+	}()
+
 	r := codec.NewReader(body)
 	req, err := api.DecodeProduceRequest(r, version)
 	if err != nil {
@@ -82,11 +97,20 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 				continue
 			}
 
+			appendStart := time.Now()
 			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, pd.Records)
+			mx.WriteLatency.Record(context.Background(), time.Since(appendStart).Seconds(),
+				metric.WithAttributes(attribute.String("topic", td.Name)))
 			if err != nil {
 				pr.ErrorCode = int16(codec.ErrUnknownServerError)
 				pr.BaseOffset = -1
 			} else {
+				topicAttr := metric.WithAttributes(attribute.String("topic", td.Name))
+				mx.ProduceBytes.Add(context.Background(), int64(len(pd.Records)), topicAttr)
+				// Best-effort record count from batch header.
+				if cnt := recordCountFromBatch(pd.Records); cnt > 0 {
+					mx.ProduceRecords.Add(context.Background(), int64(cnt), topicAttr)
+				}
 				pr.BaseOffset = baseOffset
 			}
 			topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
@@ -97,4 +121,20 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 	w := codec.NewWriter()
 	api.EncodeProduceResponse(w, resp, version)
 	return w.Bytes(), nil
+}
+
+// recordCountFromBatch extracts numRecords from the RecordBatch header bytes.
+// Layout (from codec/types.go): [baseOffset:8][batchLength:4][ple:4][magic:1]
+// [crc:4][attrs:2][lastOffsetDelta:4][baseTimestamp:8][maxTimestamp:8]
+// [producerId:8][producerEpoch:2][baseSequence:4][numRecords:4].
+// numRecords starts at byte 57 (big-endian int32). Returns 0 when raw is shorter.
+func recordCountFromBatch(raw []byte) int {
+	const numRecordsOffset = 57
+	if len(raw) < numRecordsOffset+4 {
+		return 0
+	}
+	return int(int32(raw[numRecordsOffset])<<24 |
+		int32(raw[numRecordsOffset+1])<<16 |
+		int32(raw[numRecordsOffset+2])<<8 |
+		int32(raw[numRecordsOffset+3]))
 }

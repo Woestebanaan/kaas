@@ -3,10 +3,15 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/lease"
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 	"github.com/woestebanaan/skafka/internal/storage"
@@ -23,6 +28,16 @@ func NewFetchHandler(store storage.StorageEngine, leases lease.LeaseManager, aut
 }
 
 func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	start := time.Now()
+	mx := observability.Global()
+	defer func() {
+		mx.RequestLatency.Record(context.Background(), time.Since(start).Seconds(),
+			metric.WithAttributes(
+				attribute.Int("api_key", 1),
+				attribute.Int("version", int(version)),
+			))
+	}()
+
 	r := codec.NewReader(body)
 	req, err := api.DecodeFetchRequest(r, version)
 	if err != nil {
@@ -75,10 +90,18 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 			pr.LastStableOffset = hwm
 			pr.LogStartOffset, _ = h.store.LogStartOffset(topic.Name, p.PartitionIndex)
 
+			readStart := time.Now()
 			raw, err := h.store.Read(context.Background(), topic.Name, p.PartitionIndex,
 				p.FetchOffset, int(p.PartitionMaxBytes))
+			mx.ReadLatency.Record(context.Background(), time.Since(readStart).Seconds(),
+				metric.WithAttributes(attribute.String("topic", topic.Name)))
 			if err == nil {
 				pr.Records = raw
+				topicAttr := metric.WithAttributes(attribute.String("topic", topic.Name))
+				mx.FetchBytes.Add(context.Background(), int64(len(raw)), topicAttr)
+				if cnt := recordCountFromBatch(raw); cnt > 0 {
+					mx.FetchRecords.Add(context.Background(), int64(cnt), topicAttr)
+				}
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 		}

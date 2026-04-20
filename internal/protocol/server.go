@@ -11,8 +11,12 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
+	"github.com/woestebanaan/skafka/internal/observability"
 )
 
 // Config holds TCP server configuration.
@@ -105,6 +109,12 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 			}
 			continue
 		}
+		listenerName := "internal"
+		if _, isTLS := conn.(*tls.Conn); isTLS {
+			listenerName = "external"
+		}
+		observability.Global().Connections.Add(context.Background(), 1,
+			metric.WithAttributes(attribute.String("listener", listenerName)))
 		s.wg.Add(1)
 		go s.serveConn(ctx, conn)
 	}
@@ -115,15 +125,20 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 	defer c.Close()
 
 	state := &connstate.ConnState{Listener: connstate.ListenerInternal}
+	mx := observability.Global()
 
 	// Mark TLS connections and extract the mTLS principal if a client cert is present.
 	if tlsConn, ok := c.(*tls.Conn); ok {
 		state.IsTLS = true
 		state.Listener = connstate.ListenerExternal
 		if err := tlsConn.Handshake(); err != nil {
+			mx.TLSHandshakes.Add(context.Background(), 1,
+				metric.WithAttributes(attribute.String("result", "error")))
 			slog.Warn("tls handshake failed", "err", err)
 			return
 		}
+		mx.TLSHandshakes.Add(context.Background(), 1,
+			metric.WithAttributes(attribute.String("result", "ok")))
 		cs := tlsConn.ConnectionState()
 		if len(cs.PeerCertificates) > 0 && s.authEngine != nil {
 			cn := cs.PeerCertificates[0].Subject.CommonName

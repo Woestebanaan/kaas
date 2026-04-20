@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/woestebanaan/skafka/internal/observability"
 )
 
 // WatchingCertificate loads a TLS key pair from disk and reloads it whenever the
@@ -67,6 +70,7 @@ func watchLoop(w *fsnotify.Watcher, certFile, keyFile string, current *atomic.Po
 			return
 		}
 		current.Store(&kp)
+		observability.Global().CertReloads.Add(context.Background(), 1)
 		slog.Info("tls: certificate reloaded", "cert", certFile)
 	}
 

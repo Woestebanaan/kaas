@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -11,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 	"github.com/woestebanaan/skafka/operator/controllers"
 )
@@ -30,6 +33,20 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	observability.InstallLogger()
+
+	bootstrapCtx, bootstrapCancel := context.WithCancel(context.Background())
+	defer bootstrapCancel()
+	obs, err := observability.Bootstrap(bootstrapCtx, "skafka-operator")
+	if err != nil {
+		ctrl.Log.Error(err, "observability bootstrap failed")
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = obs.Shutdown(shutdownCtx)
+	}()
 
 	dataDir := envOr("SKAFKA_DATA_DIR", "/data")
 	namespace := envOr("SKAFKA_NAMESPACE", "default")
