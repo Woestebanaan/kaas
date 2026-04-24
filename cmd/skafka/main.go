@@ -74,6 +74,7 @@ func runBroker(ctx context.Context) {
 		k8sClient    kubernetes.Interface
 		brokerReg    *k8spkg.BrokerRegistry
 		coordMgr     *coordinator.Manager
+		k8sTopics    []topicSpec
 	)
 
 	k8sMode := os.Getenv("MY_POD_NAME") != ""
@@ -148,7 +149,7 @@ func runBroker(ctx context.Context) {
 
 		if k8sMode {
 			numBrokers := brokerReg.Count()
-			acquireK8sPartitions(ctx, k8sClient, namespace, leaseManager, engine, brokerID, numBrokers)
+			k8sTopics = acquireK8sPartitions(ctx, k8sClient, namespace, leaseManager, engine, brokerID, numBrokers)
 
 			// Satisfy the StatefulSet's skafka.io/PartitionsReady gate now that the
 			// initial partition acquisition pass has run. Without this patch the
@@ -226,6 +227,13 @@ func runBroker(ctx context.Context) {
 		coordMgr,
 	)
 
+	// Register topics discovered during k8s startup so Metadata responses and
+	// produce/fetch dispatch resolve them. (No watch on KafkaTopic CRs yet —
+	// topics created after startup require a broker restart to become visible.)
+	for _, t := range k8sTopics {
+		b.AddTopic(t.Name, t.Partitions)
+	}
+
 	d := protocol.NewDispatcher()
 	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
 	b.RegisterHandlers(d)
@@ -262,25 +270,33 @@ func runBroker(ctx context.Context) {
 	srv.Wait()
 }
 
-// acquireK8sPartitions enumerates KafkaTopic CRDs and starts Lease acquisition for each partition.
+// topicSpec is a minimal projection of operatorv1.KafkaTopic for in-process passing.
+type topicSpec struct {
+	Name       string
+	Partitions int32
+}
+
+// acquireK8sPartitions enumerates KafkaTopic CRDs, creates partition dirs, kicks off
+// Lease acquisition, and returns the discovered topics so callers can register them
+// with the in-memory TopicRegistry.
 func acquireK8sPartitions(ctx context.Context, k8sClient kubernetes.Interface, namespace string,
-	lm lease.LeaseManager, engine *storage.DiskStorageEngine, selfOrdinal int32, numBrokers int) {
+	lm lease.LeaseManager, engine *storage.DiskStorageEngine, selfOrdinal int32, numBrokers int) []topicSpec {
 
 	scheme := runtime.NewScheme()
 	if err := operatorv1.AddToScheme(scheme); err != nil {
 		slog.Warn("acquireK8sPartitions: register scheme", "err", err)
-		return
+		return nil
 	}
 	crClient, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: scheme})
 	if err != nil {
 		slog.Warn("acquireK8sPartitions: build CRD client", "err", err)
-		return
+		return nil
 	}
 
 	var topicList operatorv1.KafkaTopicList
 	if err := crClient.List(ctx, &topicList, &sigs_client.ListOptions{Namespace: namespace}); err != nil {
 		slog.Warn("acquireK8sPartitions: list KafkaTopics", "err", err)
-		return
+		return nil
 	}
 
 	for _, topic := range topicList.Items {
@@ -299,6 +315,12 @@ func acquireK8sPartitions(ctx context.Context, k8sClient kubernetes.Interface, n
 			}
 		}
 	}
+
+	out := make([]topicSpec, 0, len(topicList.Items))
+	for _, topic := range topicList.Items {
+		out = append(out, topicSpec{Name: topic.Name, Partitions: topic.Spec.Partitions})
+	}
+	return out
 }
 
 // runInit creates partition directories for all KafkaTopics on the PVC and exits.
