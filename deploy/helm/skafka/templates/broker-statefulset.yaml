@@ -73,6 +73,10 @@ spec:
             - name: SKAFKA_REQUIRE_SASL
               value: "true"
             {{- end }}
+            {{- if not .Values.auth.enabled }}
+            - name: SKAFKA_AUTH_DISABLED
+              value: "true"
+            {{- end }}
             {{- if .Values.observability.metrics.enabled }}
             - name: SKAFKA_METRICS_ADDR
               value: ":{{ .Values.observability.metrics.port }}"

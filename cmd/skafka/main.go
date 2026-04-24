@@ -196,7 +196,8 @@ func runBroker(ctx context.Context) {
 
 	// --- Auth engine ---
 	var authEngine auth.AuthEngine = broker.NewAllowAllAuthEngine()
-	if dataDir != "" {
+	authDisabled := os.Getenv("SKAFKA_AUTH_DISABLED") == "true"
+	if dataDir != "" && !authDisabled {
 		real, err := auth.NewRealAuthEngine(dataDir, k8sClient)
 		if err != nil {
 			slog.Warn("auth engine init failed, falling back to AllowAll", "err", err)
