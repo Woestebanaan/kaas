@@ -56,7 +56,9 @@ jobs:
         run: |
           VERSION=${{ github.ref_name }}
           OWNER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
+          IMAGE_TAG=${VERSION#v}
           echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           if [[ "$VERSION" == *-* ]]; then
             echo "broker_image=ghcr.io/${OWNER}/skafka-preview" >> "$GITHUB_OUTPUT"
             echo "operator_image=ghcr.io/${OWNER}/skafka-operator-preview" >> "$GITHUB_OUTPUT"
@@ -74,7 +76,7 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.names.outputs.broker_image }}:${{ github.ref_name }}
+          tags: ${{ steps.names.outputs.broker_image }}:${{ steps.names.outputs.image_tag }}
 
       - name: Build + push operator image
         uses: docker/build-push-action@v7
@@ -83,7 +85,7 @@ jobs:
           file: Dockerfile.operator
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.names.outputs.operator_image }}:${{ github.ref_name }}
+          tags: ${{ steps.names.outputs.operator_image }}:${{ steps.names.outputs.image_tag }}
 
       - uses: azure/setup-helm@v5
         with:
