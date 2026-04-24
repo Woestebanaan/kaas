@@ -119,9 +119,12 @@ func (r *BrokerRegistry) consumeWatch(ctx context.Context, w watch.Interface) er
 }
 
 func (r *BrokerRegistry) applySlice(es *discoveryv1.EndpointSlice) {
-	port := int32(9092)
+	// Select the Kafka port explicitly. The headless Service may expose other
+	// ports (metrics, health) that come first in the EndpointSlice; without an
+	// explicit lookup we'd advertise the wrong port to clients.
+	port := r.self.Port
 	for _, p := range es.Ports {
-		if p.Port != nil {
+		if p.Name != nil && *p.Name == "kafka" && p.Port != nil {
 			port = *p.Port
 			break
 		}
