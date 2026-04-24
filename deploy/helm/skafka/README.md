@@ -13,15 +13,18 @@ shared ReadWriteMany PersistentVolumeClaim.
 
 The chart is published as an OCI artifact to GHCR. No `helm repo add` needed.
 
-```bash
-# Install the CRDs (Helm installs them automatically on first install,
-# but for helm upgrade you must re-apply them explicitly):
-kubectl apply -f https://raw.githubusercontent.com/woestebanaan/skafka/main/deploy/crds/
+The chart bundles its CRDs under `crds/`, so Helm installs them automatically on
+first install. The chart is always pushed under the name `skafka` (from
+`Chart.yaml`); pre-release tags (`vX.Y.Z-*`) only rename the *images* to their
+`*-preview` variants. Only `v0.1.0-preview` has been tagged so far, so the
+install command below uses that:
 
-# Install the chart:
+```bash
 helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
-  --version 0.1.0 \
+  --version 0.1.0-preview \
   --namespace kafka --create-namespace \
+  --set image.repository=ghcr.io/woestebanaan/skafka-preview \
+  --set operator.image.repository=ghcr.io/woestebanaan/skafka-operator-preview \
   --set storage.className=ceph-filesystem \
   --set broker.replicaCount=3
 ```
@@ -29,17 +32,30 @@ helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
 See available versions:
 
 ```bash
-helm show all oci://ghcr.io/woestebanaan/charts/skafka --version 0.1.0
+helm show all oci://ghcr.io/woestebanaan/charts/skafka --version 0.1.0-preview
 ```
 
-## Verify artifact signatures
+### CRDs on upgrade
 
-Every published image and chart is signed keylessly with cosign via GitHub OIDC.
+Helm [deliberately does not upgrade CRDs](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/)
+that it installed from the chart's `crds/` directory. When a release upgrades
+CRDs, apply them explicitly before `helm upgrade`:
 
 ```bash
-cosign verify ghcr.io/woestebanaan/skafka:v0.1.0 \
-  --certificate-identity-regexp "https://github.com/woestebanaan/skafka/.+" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+# Pull the new chart version locally, then apply the CRDs it ships:
+helm pull oci://ghcr.io/woestebanaan/charts/skafka --version 0.1.0-preview --untar
+kubectl apply -f skafka/crds/
+
+# Or apply them straight from the repo at a specific ref:
+REF=v0.1.0-preview
+BASE=https://raw.githubusercontent.com/Woestebanaan/skafka/${REF}/deploy/crds
+for f in skafka.io_kafkaclusters.yaml \
+         skafka.io_kafkatopics.yaml \
+         skafka.io_kafkausers.yaml \
+         skafka.io_kafkausergroups.yaml \
+         skafka.io_kafkaacls.yaml; do
+  kubectl apply -f "${BASE}/${f}"
+done
 ```
 
 ## StorageClass guidance
@@ -78,8 +94,8 @@ See `values.yaml` for the full set of tunables. Common overrides:
 ## Smoke test
 
 ```bash
-# Port-forward to the client Service:
-kubectl -n kafka port-forward svc/my-skafka 9092:9092 &
+# Port-forward to the client Service (release name + "-skafka"):
+kubectl -n kafka port-forward svc/my-skafka-skafka 9092:9092 &
 
 # Create a topic:
 cat <<EOF | kubectl apply -f -
