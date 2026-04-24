@@ -149,6 +149,15 @@ func runBroker(ctx context.Context) {
 		if k8sMode {
 			numBrokers := brokerReg.Count()
 			acquireK8sPartitions(ctx, k8sClient, namespace, leaseManager, engine, brokerID, numBrokers)
+
+			// Satisfy the StatefulSet's skafka.io/PartitionsReady gate now that the
+			// initial partition acquisition pass has run. Without this patch the
+			// pod's Ready condition stays False forever and it never joins the
+			// headless service.
+			ru := k8spkg.NewReadinessUpdater(k8sClient, os.Getenv("MY_POD_NAME"), namespace)
+			if err := ru.SetReady(ctx, true); err != nil {
+				slog.Warn("readiness gate patch failed", "err", err)
+			}
 		}
 
 		// Build coordinator manager.
