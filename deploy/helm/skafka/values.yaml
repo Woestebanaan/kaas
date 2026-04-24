@@ -40,6 +40,12 @@ broker:
     durationSeconds: 15
     renewDeadlineSeconds: 10
     retryPeriodSeconds: 2
+  readinessGate:
+    # Adds the skafka.io/PartitionsReady readinessGate to broker pods. Required
+    # whenever the broker's ReadinessUpdater is expected to gate Endpoints
+    # membership on initial partition acquisition. Disable for bare-bones smoke
+    # tests where you just want the pod Ready as soon as the listener is up.
+    enabled: true
 
 storage:
   className: ceph-filesystem    # or nfs-csi
