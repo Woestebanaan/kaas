@@ -143,16 +143,32 @@ topic's `retention.ms` from kafbat-ui and expects it to stick.
 
 ## 7. DescribeCluster (60)
 
-Newer cluster info API. Modern clients fall back to Metadata when it's
-missing, so the practical impact is low. Adding it is cheap (one handler,
-~30 lines) and would flip kafbat's "Controller Type: ZooKeeper" label to
-something honest. Defer until item-1 (transactions) lands; not worth a
-release on its own.
+Modern Java AdminClient prefers DescribeCluster over Metadata for
+`describeCluster()` calls; without it the client falls back to Metadata,
+which has known cross-version encoder bugs around
+`IncludeClusterAuthorizedOperations` (the field exists in v8–v10, was
+removed in v11+, but the client doesn't always pick a compatible version
+for itself).
+
+**Live workaround**: skafka caps its advertised Metadata max version at
+v10 (see `internal/broker/broker.go`, comment on `d.Register(3, 1, 10, …)`).
+This unblocks kafbat-ui's brokers page but costs us v11/v12 — we lose
+nothing real today, but if topic-ID UUIDs become useful we'll have to
+implement DescribeCluster to remove the cap.
+
+Implementation cost is small — one codec, one handler reusing the existing
+`BrokerSource` and `TopicSource`. Bumped from cosmetic to "real next
+candidate after item 1" because removing the workaround is the natural
+trigger.
 
 ### Surfaced via
 
-`kafbat-ui` brokers page shows `Controller Type: ZooKeeper` (kafbat default
-when DescribeCluster is unavailable). Cosmetic.
+- `kafbat-ui` brokers page hit
+  `UnsupportedVersionException: Attempted to write a non-default
+  includeClusterAuthorizedOperations at version 12` against Metadata v12.
+  Mitigated by the v10 cap.
+- `kafbat-ui` brokers page also shows `Controller Type: ZooKeeper`
+  (kafbat default when DescribeCluster is unavailable). Cosmetic.
 
 ---
 
