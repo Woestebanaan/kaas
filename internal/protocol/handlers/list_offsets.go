@@ -41,11 +41,19 @@ func (h *ListOffsetsHandler) Handle(_ *connstate.ConnState, version int16, body 
 			}
 
 			var offset int64
-			switch p.Timestamp {
-			case -2: // earliest
+			switch {
+			case p.Timestamp == -2: // earliest
 				offset, err = h.store.LogStartOffset(topic.Name, p.PartitionIndex)
-			default: // -1 = latest, or specific timestamp (use latest for now)
+			case p.Timestamp == -1: // latest
 				offset, err = h.store.HighWatermark(topic.Name, p.PartitionIndex)
+			default:
+				// Real-timestamp lookup (search for first record with ts >= p.Timestamp).
+				// Skafka does not index records by timestamp yet, so we cannot honour
+				// this query. Per the Kafka spec, "no matching record" is signalled by
+				// returning (offset=-1, timestamp=-1); returning a real offset with
+				// timestamp=-1 makes the Java client throw IllegalArgumentException in
+				// OffsetAndTimestamp's ctor (caught e.g. by kafbat's Messages page).
+				offset = -1
 			}
 
 			if err != nil {
