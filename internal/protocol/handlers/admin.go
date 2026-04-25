@@ -204,6 +204,8 @@ func brokerConfigs(brokers BrokerSource) []api.DescribeConfigsEntry {
 		readOnlyEntry("listeners", fmt.Sprintf("PLAINTEXT://%s:%d", self.Host, self.Port)),
 		readOnlyEntry("auto.create.topics.enable", "false"),
 		readOnlyEntry("num.partitions", "1"),
+		// Always 1: skafka delegates durability to the CSI layer (CephFS/RBD),
+		// not to Kafka-level replication. This is an architectural invariant.
 		readOnlyEntry("default.replication.factor", "1"),
 	}
 }
