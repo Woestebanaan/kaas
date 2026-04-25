@@ -328,6 +328,34 @@ func TestSegmentRollAndRead(t *testing.T) {
 	}
 }
 
+// TestPartitionSizeReflectsAppends verifies the engine reports increasing
+// disk usage as records are appended. Backs the DescribeLogDirs handler.
+func TestPartitionSizeReflectsAppends(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	engine := newEngine(t, dir)
+	if err := engine.CreatePartition("topic", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	before := engine.PartitionSize("topic", 0)
+	if _, err := engine.Append(ctx, "topic", 0, makeBatch(0, 10)); err != nil {
+		t.Fatal(err)
+	}
+	after := engine.PartitionSize("topic", 0)
+	if after <= before {
+		t.Errorf("size did not grow after Append: before=%d after=%d", before, after)
+	}
+
+	if got := engine.PartitionSize("missing", 0); got != 0 {
+		t.Errorf("unknown partition: got %d, want 0", got)
+	}
+
+	if engine.DataDir() != dir {
+		t.Errorf("DataDir=%q, want %q", engine.DataDir(), dir)
+	}
+}
+
 // TestAppendAssignsOffsets verifies the engine rewrites the producer-supplied
 // baseOffset (always 0 on the wire) to the partition's high watermark, so
 // offsets advance monotonically across batches.

@@ -30,6 +30,13 @@ type StorageEngine interface {
 	LogStartOffset(topic string, partition int32) (int64, error)
 	CreatePartition(topic string, partition int32) error
 	DeletePartition(topic string, partition int32) error
+	// PartitionSize returns the total bytes occupied by the partition's segment
+	// files (logs + indexes). Returns 0 for unknown partitions rather than an
+	// error so callers can iterate TopicSource without filtering.
+	PartitionSize(topic string, partition int32) int64
+	// DataDir returns the broker's data directory (advertised as the "log dir"
+	// in DescribeLogDirs).
+	DataDir() string
 }
 
 // Config holds tunable parameters for DiskStorageEngine.
@@ -340,6 +347,35 @@ func (e *DiskStorageEngine) HighWatermark(topic string, partition int32) (int64,
 	ps.mu.Unlock()
 	return hwm, nil
 }
+
+// PartitionSize sums the sizes of all files in the partition directory
+// (log + index + timeindex + leader-epoch + lock). Used by DescribeLogDirs.
+func (e *DiskStorageEngine) PartitionSize(topic string, partition int32) int64 {
+	ps, ok := e.getPartition(topic, partition)
+	if !ok {
+		return 0
+	}
+	ps.mu.Lock()
+	dir := ps.dir
+	ps.mu.Unlock()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, ent := range entries {
+		info, err := ent.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	return total
+}
+
+// DataDir returns the broker's root data directory.
+func (e *DiskStorageEngine) DataDir() string { return e.dataDir }
 
 func (e *DiskStorageEngine) LogStartOffset(topic string, partition int32) (int64, error) {
 	ps, ok := e.getPartition(topic, partition)

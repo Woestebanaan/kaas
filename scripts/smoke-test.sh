@@ -70,6 +70,19 @@ if ! kafka-configs.sh \
     fail "describe-configs failed"
 fi
 
+# --- 3b. describe-log-dirs --------------------------------------------------
+# Exercises DescribeLogDirs (API key 35). kafbat-ui shows partition disk
+# usage from this; without it, sizes render as "0 Bytes / N/A segment(s)".
+log "describe-log-dirs: kafka-log-dirs.sh --describe"
+if ! kafka-log-dirs.sh \
+        --bootstrap-server "${BOOTSTRAP}" \
+        --topic-list "${TOPIC}" \
+        --describe \
+        >"${TMP}/logdirs.out" 2>"${TMP}/logdirs.err"; then
+    cat "${TMP}/logdirs.err" >&2
+    fail "describe-log-dirs failed"
+fi
+
 # --- 4. verify -------------------------------------------------------------
 if ! grep -Fxq -- "${MESSAGE}" "${TMP}/consume.out"; then
     {

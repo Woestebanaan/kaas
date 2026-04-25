@@ -122,6 +122,12 @@ func (m *MemoryStorage) LogStartOffset(_ string, _ int32) (int64, error) {
 	return 0, nil
 }
 
+// PartitionSize is always 0 in memory storage; there are no segment files.
+func (m *MemoryStorage) PartitionSize(_ string, _ int32) int64 { return 0 }
+
+// DataDir returns a sentinel path so DescribeLogDirs can still answer.
+func (m *MemoryStorage) DataDir() string { return "memory://" }
+
 func (m *MemoryStorage) CreatePartition(topic string, partition int32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

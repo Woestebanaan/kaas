@@ -375,6 +375,65 @@ func TestOffsetFetchResponseVersions(t *testing.T) {
 	}
 }
 
+// ---- DescribeLogDirs ----
+
+func TestDescribeLogDirsRequestNullTopics(t *testing.T) {
+	w := codec.NewWriter()
+	w.WriteInt32(-1) // Topics = null → "describe everything"
+	r := codec.NewReader(w.Bytes())
+	req, err := DecodeDescribeLogDirsRequest(r, 1)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !req.TopicNull {
+		t.Errorf("TopicNull=false on null array")
+	}
+}
+
+func TestDescribeLogDirsRequestExplicit(t *testing.T) {
+	w := codec.NewWriter()
+	w.WriteArray(1, func() {
+		w.WriteString("smoke")
+		w.WriteArray(2, func() {
+			w.WriteInt32(0)
+			w.WriteInt32(2)
+		})
+	})
+	r := codec.NewReader(w.Bytes())
+	req, err := DecodeDescribeLogDirsRequest(r, 1)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if req.TopicNull || len(req.Topics) != 1 {
+		t.Fatalf("got %+v", req)
+	}
+	if req.Topics[0].Name != "smoke" || len(req.Topics[0].Partitions) != 2 ||
+		req.Topics[0].Partitions[0] != 0 || req.Topics[0].Partitions[1] != 2 {
+		t.Errorf("partitions: %+v", req.Topics[0])
+	}
+}
+
+func TestDescribeLogDirsResponseEncode(t *testing.T) {
+	resp := &DescribeLogDirsResponse{
+		Results: []DescribeLogDirsResult{{
+			LogDir: "/data",
+			Topics: []DescribeLogDirsResponseTopic{{
+				Name: "smoke",
+				Partitions: []DescribeLogDirsResponsePartition{
+					{PartitionIndex: 0, PartitionSize: 1024},
+				},
+			}},
+		}},
+	}
+	for _, v := range []int16{0, 1} {
+		w := codec.NewWriter()
+		EncodeDescribeLogDirsResponse(w, resp, v)
+		if len(w.Bytes()) == 0 {
+			t.Errorf("v%d: empty response", v)
+		}
+	}
+}
+
 // ---- DescribeGroups ----
 
 func TestDescribeGroupsRoundTripV0(t *testing.T) {

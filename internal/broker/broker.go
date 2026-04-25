@@ -112,6 +112,7 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())
 	d.Register(32, 0, 3, handlers.NewDescribeConfigsHandler(b.topics, b.brokers))
+	d.Register(35, 0, 1, handlers.NewDescribeLogDirsHandler(b.store, b.topics))
 	d.Register(36, 0, 2, handlers.NewSaslAuthenticateHandler(b.auth))
 
 	supported := d.SupportedVersions()

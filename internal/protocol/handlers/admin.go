@@ -11,6 +11,7 @@ import (
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
+	"github.com/woestebanaan/skafka/internal/storage"
 )
 
 // TopicWriter is the write side of TopicRegistry (subset needed by admin handlers).
@@ -207,6 +208,11 @@ func brokerConfigs(brokers BrokerSource) []api.DescribeConfigsEntry {
 		// Always 1: skafka delegates durability to the CSI layer (CephFS/RBD),
 		// not to Kafka-level replication. This is an architectural invariant.
 		readOnlyEntry("default.replication.factor", "1"),
+		// Surfaces a non-empty value on kafbat's broker page (otherwise
+		// "Version: Unknown"). The number is the Apache Kafka version whose
+		// protocol surface skafka most closely matches today.
+		readOnlyEntry("inter.broker.protocol.version", "3.6"),
+		readOnlyEntry("kafka.version", "3.6.0"),
 	}
 }
 
@@ -238,6 +244,96 @@ func filterConfigs(all []api.DescribeConfigsEntry, names []string, allRequested 
 		if _, ok := want[e.Name]; ok {
 			out = append(out, e)
 		}
+	}
+	return out
+}
+
+// ---- DescribeLogDirs ----
+//
+// Reports the byte size of every (topic, partition) on disk. Single-broker
+// skafka has exactly one log dir (the configured data directory); offset lag
+// is always 0 (no replicas) and isFutureKey is always false (no in-progress
+// reassignments).
+
+type DescribeLogDirsHandler struct {
+	store  storage.StorageEngine
+	topics TopicSource
+}
+
+func NewDescribeLogDirsHandler(store storage.StorageEngine, topics TopicSource) *DescribeLogDirsHandler {
+	return &DescribeLogDirsHandler{store: store, topics: topics}
+}
+
+func (h *DescribeLogDirsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	r := codec.NewReader(body)
+	req, err := api.DecodeDescribeLogDirsRequest(r, version)
+	if err != nil {
+		return nil, fmt.Errorf("describe_log_dirs decode: %w", err)
+	}
+
+	// Build the response: one Result for our single log dir, one Topic entry
+	// per requested topic (or all known topics if the request had a null filter).
+	result := api.DescribeLogDirsResult{LogDir: h.store.DataDir()}
+
+	wanted := buildTopicFilter(h.topics, req)
+	for _, te := range wanted {
+		topicResp := api.DescribeLogDirsResponseTopic{Name: te.Name}
+		for _, p := range te.Partitions {
+			topicResp.Partitions = append(topicResp.Partitions, api.DescribeLogDirsResponsePartition{
+				PartitionIndex: p,
+				PartitionSize:  h.store.PartitionSize(te.Name, p),
+			})
+		}
+		result.Topics = append(result.Topics, topicResp)
+	}
+
+	resp := &api.DescribeLogDirsResponse{Results: []api.DescribeLogDirsResult{result}}
+
+	w := codec.NewWriter()
+	api.EncodeDescribeLogDirsResponse(w, resp, version)
+	return w.Bytes(), nil
+}
+
+// describeLogDirsTopic is the in-memory shape we hand to the response builder:
+// a topic name plus the list of partition indices the client wants reported.
+type describeLogDirsTopic struct {
+	Name       string
+	Partitions []int32
+}
+
+// buildTopicFilter resolves the request's topic/partition filter against the
+// broker's known topics. A null Topics array means "every known topic, every
+// partition"; an explicit list with empty Partitions means "every partition
+// of that named topic"; otherwise the literal list is used.
+func buildTopicFilter(topics TopicSource, req *api.DescribeLogDirsRequest) []describeLogDirsTopic {
+	if req.TopicNull {
+		all := topics.All()
+		out := make([]describeLogDirsTopic, 0, len(all))
+		for _, t := range all {
+			out = append(out, describeLogDirsTopic{Name: t.Name, Partitions: rangeInt32(t.Partitions)})
+		}
+		return out
+	}
+
+	out := make([]describeLogDirsTopic, 0, len(req.Topics))
+	for _, t := range req.Topics {
+		known, ok := topics.Get(t.Name)
+		if !ok {
+			continue
+		}
+		parts := t.Partitions
+		if len(parts) == 0 {
+			parts = rangeInt32(known)
+		}
+		out = append(out, describeLogDirsTopic{Name: t.Name, Partitions: parts})
+	}
+	return out
+}
+
+func rangeInt32(n int32) []int32 {
+	out := make([]int32, n)
+	for i := int32(0); i < n; i++ {
+		out[i] = i
 	}
 	return out
 }

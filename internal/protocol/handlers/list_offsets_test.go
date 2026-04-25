@@ -37,6 +37,8 @@ func (stubStorage) Read(_ context.Context, _ string, _ int32, _ int64, _ int) ([
 }
 func (stubStorage) CreatePartition(_ string, _ int32) error { return nil }
 func (stubStorage) DeletePartition(_ string, _ int32) error { return nil }
+func (stubStorage) PartitionSize(_ string, _ int32) int64   { return 0 }
+func (stubStorage) DataDir() string                         { return "/tmp/stub" }
 
 var _ storage.StorageEngine = stubStorage{}
 
