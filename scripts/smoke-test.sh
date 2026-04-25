@@ -1,39 +1,74 @@
 #!/usr/bin/env bash
-# Produce "Hello world" to a skafka topic and consume it back to verify the
-# round-trip works end-to-end. Uses kafka-console-{producer,consumer}.sh from
-# /opt/kafka/bin. Intended to be run from inside the cluster (the in-cluster
-# Service DNS is the default bootstrap).
+# Round-trip smoke test for skafka: produce a unique message, consume it back.
+# Uses kafka-console-{producer,consumer}.sh from /opt/kafka/bin. Intended to be
+# run from inside the cluster (the in-cluster Service DNS is the default).
 set -euo pipefail
 
 BOOTSTRAP="${BOOTSTRAP:-skafka.skafka.svc.cluster.local:9092}"
 TOPIC="${TOPIC:-smoke}"
-MESSAGE="${MESSAGE:-Hello world}"
 TIMEOUT_MS="${TIMEOUT_MS:-15000}"
+# Per-run token so we never pass on a stale message from an earlier run.
+TOKEN="${TOKEN:-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}}"
+MESSAGE="${MESSAGE:-Hello world ${TOKEN}}"
 
-echo ">> bootstrap: ${BOOTSTRAP}"
-echo ">> topic:     ${TOPIC}"
+TMP="$(mktemp -d)"
+trap 'rm -rf "${TMP}"' EXIT
 
-echo ">> producing one message"
-# Disable idempotence: skafka does not implement InitProducerId (API key 22),
-# which the modern producer would otherwise call on startup.
-echo "${MESSAGE}" | kafka-console-producer.sh \
-  --bootstrap-server "${BOOTSTRAP}" \
-  --topic "${TOPIC}" \
-  --producer-property enable.idempotence=false \
-  --producer-property acks=1
+log()  { printf '>> %s\n' "$*"; }
+fail() { printf '!! %s\n' "$*" >&2; exit 1; }
 
-echo ">> consuming from beginning (timeout ${TIMEOUT_MS}ms)"
-out=$(kafka-console-consumer.sh \
-  --bootstrap-server "${BOOTSTRAP}" \
-  --topic "${TOPIC}" \
-  --from-beginning \
-  --timeout-ms "${TIMEOUT_MS}" 2>/dev/null || true)
+log "bootstrap: ${BOOTSTRAP}"
+log "topic:     ${TOPIC}"
+log "token:     ${TOKEN}"
 
-echo "${out}"
-
-if grep -Fxq "${MESSAGE}" <<<"${out}"; then
-  echo ">> PASS: round-trip successful"
-  exit 0
+# --- 0. preflight ----------------------------------------------------------
+# Exercises ApiVersions + Metadata. Surfaces wire-protocol problems before we
+# blame produce/consume for them.
+log "preflight: kafka-broker-api-versions"
+if ! kafka-broker-api-versions.sh \
+        --bootstrap-server "${BOOTSTRAP}" \
+        >"${TMP}/api-versions.out" 2>"${TMP}/api-versions.err"; then
+    cat "${TMP}/api-versions.err" >&2
+    fail "preflight failed: broker did not respond to ApiVersions"
 fi
-echo ">> FAIL: expected ${MESSAGE@Q} not found in consumer output" >&2
-exit 1
+
+# --- 1. produce ------------------------------------------------------------
+# enable.idempotence=false avoids InitProducerId (API key 22), which skafka
+# does not implement yet.
+log "producing: ${MESSAGE@Q}"
+if ! printf '%s\n' "${MESSAGE}" | kafka-console-producer.sh \
+        --bootstrap-server "${BOOTSTRAP}" \
+        --topic "${TOPIC}" \
+        --producer-property enable.idempotence=false \
+        --producer-property acks=1 \
+        >"${TMP}/produce.out" 2>"${TMP}/produce.err"; then
+    cat "${TMP}/produce.err" >&2
+    fail "producer failed"
+fi
+
+# --- 2. consume ------------------------------------------------------------
+# kafka-console-consumer exits non-zero on --timeout-ms even when it received
+# messages, so we ignore its exit code and check output instead.
+log "consuming from beginning (timeout ${TIMEOUT_MS}ms)"
+kafka-console-consumer.sh \
+    --bootstrap-server "${BOOTSTRAP}" \
+    --topic "${TOPIC}" \
+    --from-beginning \
+    --timeout-ms "${TIMEOUT_MS}" \
+    >"${TMP}/consume.out" 2>"${TMP}/consume.err" || true
+
+# --- 3. verify -------------------------------------------------------------
+if grep -Fxq -- "${MESSAGE}" "${TMP}/consume.out"; then
+    log "PASS: round-trip successful"
+    exit 0
+fi
+
+# On failure, dump everything so the cause is obvious from CI logs.
+{
+    echo "expected line: ${MESSAGE@Q}"
+    echo "--- consumer stdout (last 50 lines) ---"
+    tail -n 50 "${TMP}/consume.out" || true
+    echo "--- consumer stderr (last 50 lines) ---"
+    tail -n 50 "${TMP}/consume.err" || true
+} >&2
+fail "expected message not found in consumer output"
