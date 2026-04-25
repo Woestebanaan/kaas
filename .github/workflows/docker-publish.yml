@@ -20,6 +20,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # docker/build-push-action@v7 uploads buildx "build records" as Actions
+      # artifacts by default. They duplicate provenance metadata that already
+      # lives on the GHCR image and consume the (account-wide) Actions
+      # storage quota. We don't use them, so disable.
+      DOCKER_BUILD_SUMMARY: "false"
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
 
     steps:
       - name: Wait for Docker daemon (DinD sidecar)
