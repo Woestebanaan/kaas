@@ -89,6 +89,32 @@ func TestJoinGroupSingleMember(t *testing.T) {
 	}
 }
 
+// TestJoinGroupNewGroupCapsInitialDelay verifies that a single consumer joining a brand-new
+// group with a production-realistic RebalanceTimeoutMs (Java client default = max.poll.interval.ms
+// = 5 min) does not have to wait the full timeout. The initial-rebalance delay caps it to ~3s.
+func TestJoinGroupNewGroupCapsInitialDelay(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+
+	req := &api.JoinGroupRequest{
+		GroupID:            "new-group",
+		SessionTimeoutMs:   30_000,
+		RebalanceTimeoutMs: 300_000, // 5 min — what the Java consumer sends
+		ProtocolType:       "consumer",
+		Protocols:          []api.JoinGroupProtocol{{Name: "range"}},
+	}
+	start := time.Now()
+	resp := mgr.JoinGroup(req, "client-1")
+	elapsed := time.Since(start)
+
+	if resp.ErrorCode != 0 {
+		t.Fatalf("JoinGroup errCode=%d", resp.ErrorCode)
+	}
+	// Must complete within the initial rebalance delay (3s) plus generous slack.
+	if elapsed > 5*time.Second {
+		t.Errorf("JoinGroup blocked for %v, want <=5s (initial-rebalance delay should cap this)", elapsed)
+	}
+}
+
 func TestJoinGroupTwoMembersConcurrent(t *testing.T) {
 	mgr := newTestCoordinator(t, "broker-0")
 	const groupID = "two-member-group"

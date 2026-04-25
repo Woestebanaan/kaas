@@ -120,10 +120,10 @@ func (g *group) join(req *api.JoinGroupRequest, clientID string) *api.JoinGroupR
 	switch g.state {
 	case stateEmpty:
 		g.state = statePreparingRebalance
-		g.startRebalanceTimer()
+		g.startRebalanceTimer(true)
 	case stateStable, stateCompletingRebalance:
 		g.state = statePreparingRebalance
-		g.startRebalanceTimer()
+		g.startRebalanceTimer(false)
 		// Cancel pending sync so blocked SyncGroup calls unblock with REBALANCE_IN_PROGRESS.
 		if g.currentSync != nil {
 			select {
@@ -297,7 +297,7 @@ func (g *group) leave(memberIDs []string) []api.LeaveMemberResponse {
 		}
 	} else if g.state == stateStable {
 		g.state = statePreparingRebalance
-		g.startRebalanceTimer()
+		g.startRebalanceTimer(false)
 	}
 
 	return responses
@@ -367,14 +367,21 @@ func (g *group) resetHeartbeatTimer(m *groupMember) {
 			}
 		} else if g.state == stateStable {
 			g.state = statePreparingRebalance
-			g.startRebalanceTimer()
+			g.startRebalanceTimer(false)
 		}
 	})
 }
 
+// initialRebalanceDelayMs caps the wait for the first rebalance of a new (empty) group.
+// Mirrors Kafka's group.initial.rebalance.delay.ms — short enough that a single consumer
+// joining a brand-new group doesn't have to wait out the client's max.poll.interval.ms
+// (which is sent as RebalanceTimeoutMs and defaults to 5 minutes).
+const initialRebalanceDelayMs int32 = 3000
+
 // startRebalanceTimer starts the rebalance completion timer.
+// initial=true caps the wait at initialRebalanceDelayMs for the first rebalance of a new group.
 // Must be called with g.mu held.
-func (g *group) startRebalanceTimer() {
+func (g *group) startRebalanceTimer(initial bool) {
 	var maxMs int32
 	for _, m := range g.members {
 		if m.rebalanceTimeoutMs > maxMs {
@@ -383,6 +390,9 @@ func (g *group) startRebalanceTimer() {
 	}
 	if maxMs <= 0 {
 		maxMs = 30_000 // default 30s when no member has set a timeout
+	}
+	if initial && maxMs > initialRebalanceDelayMs {
+		maxMs = initialRebalanceDelayMs
 	}
 	if g.rebalanceTimer != nil {
 		g.rebalanceTimer.Stop()
