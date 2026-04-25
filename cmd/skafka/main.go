@@ -120,16 +120,25 @@ func runBroker(ctx context.Context) {
 	} else {
 		brokerID = 0
 		leaseManager = broker.NewLocalLeaseManager()
-		partLock = broker.NewLocalPartitionLock()
 		brokerSource = handlers.BrokerInfo{NodeID: 0, Host: host, Port: portNum, ClusterID: clusterID}
+		// Disk-backed local-dev still needs a real flock so the engine and the
+		// produce handler share the same lock state.
+		if dataDir != "" {
+			partLock = lock.NewFlockLock(dataDir)
+		} else {
+			partLock = broker.NewLocalPartitionLock()
+		}
 		slog.Info("local-dev mode (single broker)")
 	}
 
 	// --- Storage ---
 	var store storage.StorageEngine
 	if dataDir != "" {
-		flockLock := lock.NewFlockLock(dataDir)
-		engine, err := storage.NewDiskStorageEngine(dataDir, leaseManager, flockLock, storage.DefaultConfig())
+		// Reuse partLock so engine.TakeoverPartition and handler.IsLocked share
+		// the same in-memory `held` map. Two FlockLock instances would each
+		// track their own state and the produce handler would always see the
+		// partition as unlocked.
+		engine, err := storage.NewDiskStorageEngine(dataDir, leaseManager, partLock, storage.DefaultConfig())
 		if err != nil {
 			slog.Error("open disk storage", "dir", dataDir, "err", err)
 			os.Exit(1)
