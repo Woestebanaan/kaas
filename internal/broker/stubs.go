@@ -67,12 +67,16 @@ func (m *MemoryStorage) Append(_ context.Context, topic string, partition int32,
 		return -1, fmt.Errorf("memory storage: batch too short: %d bytes", len(rawBatch))
 	}
 
-	baseOffset := int64(binary.BigEndian.Uint64(rawBatch[0:8]))
-	lastOffsetDelta := int32(binary.BigEndian.Uint32(rawBatch[23:27]))
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.getOrCreate(topic, partition)
+
+	// Brokers own offsets: rewrite baseOffset to current HWM (CRC covers
+	// attrs..records, not baseOffset). See DiskStorageEngine.Append.
+	binary.BigEndian.PutUint64(rawBatch[0:8], uint64(p.highWater))
+	baseOffset := int64(binary.BigEndian.Uint64(rawBatch[0:8]))
+	lastOffsetDelta := int32(binary.BigEndian.Uint32(rawBatch[23:27]))
+
 	p.batches = append(p.batches, memBatch{
 		baseOffset:      baseOffset,
 		lastOffsetDelta: lastOffsetDelta,

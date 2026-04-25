@@ -328,6 +328,64 @@ func TestSegmentRollAndRead(t *testing.T) {
 	}
 }
 
+// TestAppendAssignsOffsets verifies the engine rewrites the producer-supplied
+// baseOffset (always 0 on the wire) to the partition's high watermark, so
+// offsets advance monotonically across batches.
+func TestAppendAssignsOffsets(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	engine := newEngine(t, dir)
+	if err := engine.CreatePartition("topic", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1 + 1 + 3 records → expected baseOffsets 0, 1, 2; final HWM 5.
+	wantOffsets := []int64{0, 1, 2}
+	recordCounts := []int{1, 1, 3}
+	for i, n := range recordCounts {
+		// Caller always sends baseOffset=0, like a real producer.
+		base, err := engine.Append(ctx, "topic", 0, makeBatch(0, n))
+		if err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+		if base != wantOffsets[i] {
+			t.Errorf("Append %d: base=%d, want %d", i, base, wantOffsets[i])
+		}
+	}
+
+	hwm, err := engine.HighWatermark("topic", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hwm != 5 {
+		t.Errorf("HighWatermark=%d, want 5", hwm)
+	}
+
+	raw, err := engine.Read(ctx, "topic", 0, 0, 64*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Walk the returned batches and confirm baseOffsets are 0, 1, 4.
+	var got []int64
+	for pos := 0; pos < len(raw); {
+		if pos+12 > len(raw) {
+			t.Fatalf("truncated batch header at pos %d", pos)
+		}
+		base := int64(binary.BigEndian.Uint64(raw[pos : pos+8]))
+		batchLen := int32(binary.BigEndian.Uint32(raw[pos+8 : pos+12]))
+		got = append(got, base)
+		pos += 12 + int(batchLen)
+	}
+	if len(got) != len(wantOffsets) {
+		t.Fatalf("got %d batches, want %d", len(got), len(wantOffsets))
+	}
+	for i, w := range wantOffsets {
+		if got[i] != w {
+			t.Errorf("batch %d baseOffset on disk: got %d, want %d", i, got[i], w)
+		}
+	}
+}
+
 // batchTotalSizeCheck is a white-box sanity check: the wire size must match what
 // EncodeRecordBatch produces.
 func TestBatchHeaderParsing(t *testing.T) {

@@ -230,6 +230,12 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
+	// Brokers own offsets. Producers ship baseOffset=0 (the wire convention);
+	// rewrite to the partition's high watermark before persisting so reads
+	// see strictly-increasing offsets across batches. CRC32C covers
+	// attrs..records (body[9:]), not baseOffset, so the 8-byte overwrite is safe.
+	binary.BigEndian.PutUint64(rawBatch[0:8], uint64(ps.highWater))
+
 	baseOffset, lastOffsetDelta, err := parseBatchOffsets(rawBatch)
 	if err != nil {
 		return -1, fmt.Errorf("storage: %w", err)
