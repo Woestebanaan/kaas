@@ -95,7 +95,15 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(0, 3, 9, handlers.NewProduceHandler(b.store, b.leases, b.locks, b.auth))
 	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.auth))
 	d.Register(2, 1, 7, handlers.NewListOffsetsHandler(b.store, b.leases))
-	d.Register(3, 1, 12, handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, b.leases))
+	// Metadata: cap at v10. v11 removed IncludeClusterAuthorizedOperations,
+	// but the Java AdminClient happily selects our advertised max and then
+	// fails serialisation on its own side when the flag is set
+	// ("Attempted to write a non-default includeClusterAuthorizedOperations
+	// at version 12") — observed from kafbat-ui's brokers page. Capping at
+	// v10 keeps the flag available, which is what callers actually want.
+	// The only thing we give up is v11/v12 UUID-based topic IDs (a KRaft
+	// transition feature skafka does not need).
+	d.Register(3, 1, 10, handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, b.leases))
 	d.Register(8, 2, 8, handlers.NewOffsetCommitHandler(b.coord))
 	d.Register(9, 1, 8, handlers.NewOffsetFetchHandler(b.coord))
 	d.Register(10, 0, 4, handlers.NewFindCoordinatorHandler(b.coord))
