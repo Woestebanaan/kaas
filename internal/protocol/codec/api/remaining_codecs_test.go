@@ -399,6 +399,39 @@ func TestDescribeGroupsRoundTripV0(t *testing.T) {
 	}
 }
 
+// Regression: members with nil MemberMetadata/MemberAssignment must be encoded
+// as zero-length bytes, NOT as the -1 (null) sentinel. The Java client throws
+// "non-nullable field memberMetadata was serialized as null" on a null read
+// and the AdminClient thread dies (observed against kafbat-ui v1.5.0).
+func TestDescribeGroupsEmptyMemberBytesAreNonNull(t *testing.T) {
+	resp := &DescribeGroupsResponse{
+		Groups: []DescribedGroup{{
+			GroupID:    "g",
+			GroupState: "Stable",
+			Members: []DescribedGroupMember{{
+				MemberID:   "m",
+				ClientID:   "c",
+				ClientHost: "h",
+				// MemberMetadata, MemberAssignment intentionally nil.
+			}},
+		}},
+	}
+	for _, v := range []int16{0, 1, 2, 3, 4} {
+		w := codec.NewWriter()
+		EncodeDescribeGroupsResponse(w, resp, v)
+		// Look for the int32(-1) sentinel anywhere in the bytes; it would
+		// indicate a null write where spec demands non-nullable BYTES.
+		// (-1 = 0xFFFFFFFF; we check for that 4-byte pattern.)
+		buf := w.Bytes()
+		for i := 0; i+4 <= len(buf); i++ {
+			if buf[i] == 0xFF && buf[i+1] == 0xFF && buf[i+2] == 0xFF && buf[i+3] == 0xFF {
+				t.Errorf("v%d: response contains 0xFFFFFFFF (null length) at offset %d — non-nullable bytes written as null", v, i)
+				break
+			}
+		}
+	}
+}
+
 // ---- ListGroups ----
 
 func TestListGroupsRoundTripV0(t *testing.T) {

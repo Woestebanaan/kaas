@@ -91,13 +91,19 @@ func EncodeDescribeGroupsResponse(w *codec.Writer, resp *DescribeGroupsResponse,
 					}
 					writeString(w, m.ClientID, flexible)
 					writeString(w, m.ClientHost, flexible)
+					// MemberMetadata and MemberAssignment are non-nullable BYTES per
+					// the spec; the Java client throws "non-nullable field foo was
+					// serialized as null" on -1/0 length sentinels and dies the
+					// AdminClient thread (cascades into "Connection could not be
+					// established" loops). Use the non-nullable writers — they encode
+					// nil as zero-length bytes, which is the correct shape.
 					if flexible {
-						w.WriteCompactNullableBytes(m.MemberMetadata)
-						w.WriteCompactNullableBytes(m.MemberAssignment)
+						w.WriteCompactBytes(m.MemberMetadata)
+						w.WriteCompactBytes(m.MemberAssignment)
 						w.WriteEmptyTaggedFields()
 					} else {
-						w.WriteNullableBytes(m.MemberMetadata)
-						w.WriteNullableBytes(m.MemberAssignment)
+						w.WriteBytes(m.MemberMetadata)
+						w.WriteBytes(m.MemberAssignment)
 					}
 				}
 			}
