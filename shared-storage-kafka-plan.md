@@ -4,10 +4,12 @@
 ## Project Overview
 
 Build an open-source, Apache Kafka protocol-compatible broker that uses a single
-shared CephFS/NFS PVC as its storage backend, enabling replication factor 1
-while retaining durability through the storage layer itself. All coordination
-(leader election, cluster membership, metadata, access control) is delegated to
-Kubernetes — no custom consensus layer, no ZooKeeper, no KRaft.
+shared ReadWriteMany PVC as its storage backend, enabling replication factor 1
+while retaining durability through the storage layer itself. The PVC's filesystem
+must honour BSD `flock(2)` cluster-wide (CephFS, JuiceFS — see Target Deployment
+above). All coordination (leader election, cluster membership, metadata, access
+control) is delegated to Kubernetes — no custom consensus layer, no ZooKeeper,
+no KRaft.
 
 This plan covers two release milestones:
 
@@ -22,7 +24,12 @@ This plan covers two release milestones:
 **Working name:** `skafka`
 **Language:** Go 1.22+
 **License:** Apache 2.0
-**Target deployment:** Kubernetes with CephFS (recommended) or NFS PVC (ReadWriteMany)
+**Target deployment:** Kubernetes with any ReadWriteMany PVC whose filesystem
+propagates BSD `flock(2)` cluster-wide (CephFS, JuiceFS, etc.). NFS is **not**
+supported for multi-broker today — `flock(2)` is node-local on most NFS clients,
+and the `NFSLock` placeholder is advisory-only (logs a warning, never wired in).
+Single-broker deployments are safe on any RWX or RWO volume because the
+Kubernetes Lease alone arbitrates writers.
 
 ---
 
@@ -587,8 +594,9 @@ Reference material for implementation:
 
 ## Phase 3: Shared Storage Engine (Week 3–5)
 
-**Goal:** Log segment reads/writes to shared CephFS/NFS PVC with exclusive
-write access enforced by both Kubernetes Lease and filesystem lock.
+**Goal:** Log segment reads/writes to a shared RWX PVC (filesystem must honour
+BSD `flock(2)` cluster-wide — CephFS, JuiceFS) with exclusive write access
+enforced by both Kubernetes Lease and filesystem lock.
 
 ```
 1. Filesystem layout on PVC:
@@ -602,7 +610,7 @@ write access enforced by both Kubernetes Lease and filesystem lock.
          {base_offset}.index   ← sparse offset→position index
          {base_offset}.timeindex
          .leader-epoch         ← epoch of broker that created each segment
-         .lock                 ← flock file (CephFS) or advisory sentinel (NFS)
+         .lock                 ← BSD flock(2) target file (must be honoured cross-node)
 
 2. Segment file format: match Apache Kafka exactly.
    Reason: kafka-dump-log.sh and other tooling work out of the box.
@@ -624,11 +632,16 @@ write access enforced by both Kubernetes Lease and filesystem lock.
      OnNewLeader      → update in-memory routing table
 
    Lock B — Filesystem lock (internal/lock/):
-   - CephFS: syscall.Flock(fd, LOCK_EX | LOCK_NB) on .lock file
-   - NFS: write hostname+pid to .lock, verify ownership on each write
-     (advisory only — flock over NFS is unreliable)
-   - Held as long as Kubernetes Lease is held
-   - Released immediately when Lease is lost
+   - syscall.Flock(fd, LOCK_EX | LOCK_NB) on the partition's .lock file.
+     Requires the underlying filesystem to honour BSD flock(2) cross-node
+     (CephFS, JuiceFS). This is the only path wired into cmd/skafka.
+   - Held as long as the Kubernetes Lease is held.
+   - Released immediately when the Lease is lost.
+   - NFS note: `flock(2)` is node-local on most NFS clients, so the lock
+     does not protect against a writer on another node. internal/lock/nfs.go
+     ships an advisory placeholder that logs a warning and is never selected
+     automatically; safe NFS support would require fcntl/POSIX locks via
+     rpc.statd/lockd and is not implemented today.
 
    Append() pseudocode:
      if !leaseManager.IsLeader(topic, partition):
