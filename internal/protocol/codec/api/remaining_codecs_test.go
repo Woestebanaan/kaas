@@ -6,6 +6,84 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 )
 
+// ---- DescribeConfigs ----
+
+func TestDescribeConfigsRequestDecodeAllConfigs(t *testing.T) {
+	w := codec.NewWriter()
+	// Resources: 1 entry — Topic / "foo" / null ConfigNames.
+	w.WriteInt32(1)
+	w.WriteInt8(2) // Topic
+	w.WriteString("foo")
+	w.WriteInt32(-1) // ConfigNames = null
+	// v1+ adds IncludeSynonyms.
+	w.WriteInt8(1)
+	r := codec.NewReader(w.Bytes())
+
+	req, err := DecodeDescribeConfigsRequest(r, 1)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(req.Resources) != 1 {
+		t.Fatalf("got %d resources, want 1", len(req.Resources))
+	}
+	res := req.Resources[0]
+	if res.ResourceType != 2 || res.ResourceName != "foo" {
+		t.Errorf("res=%+v", res)
+	}
+	if !res.ConfigNull {
+		t.Error("ConfigNull=false, want true (null array)")
+	}
+	if !req.IncludeSynonyms {
+		t.Error("IncludeSynonyms not decoded")
+	}
+}
+
+func TestDescribeConfigsRequestDecodeNamedConfigs(t *testing.T) {
+	w := codec.NewWriter()
+	w.WriteInt32(1)
+	w.WriteInt8(4) // Broker
+	w.WriteString("0")
+	w.WriteInt32(2) // 2 names
+	w.WriteString("listeners")
+	w.WriteString("broker.id")
+	r := codec.NewReader(w.Bytes())
+
+	req, err := DecodeDescribeConfigsRequest(r, 0)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	res := req.Resources[0]
+	if res.ConfigNull {
+		t.Error("ConfigNull=true on non-null array")
+	}
+	if len(res.ConfigNames) != 2 || res.ConfigNames[0] != "listeners" {
+		t.Errorf("ConfigNames=%v", res.ConfigNames)
+	}
+}
+
+func TestDescribeConfigsResponseEncodeVersions(t *testing.T) {
+	resp := &DescribeConfigsResponse{
+		Results: []DescribeConfigsResult{{
+			ResourceType: 2,
+			ResourceName: "smoke",
+			Configs: []DescribeConfigsEntry{{
+				Name:         "retention.ms",
+				Value:        "604800000",
+				ReadOnly:     true,
+				IsDefault:    true,
+				ConfigSource: ConfigSourceDefault,
+			}},
+		}},
+	}
+	for _, v := range []int16{0, 1, 2, 3} {
+		w := codec.NewWriter()
+		EncodeDescribeConfigsResponse(w, resp, v)
+		if len(w.Bytes()) == 0 {
+			t.Errorf("v%d: empty response", v)
+		}
+	}
+}
+
 // ---- SASL Handshake ----
 
 func TestSaslHandshakeRoundTrip(t *testing.T) {

@@ -34,6 +34,7 @@ const (
 	ErrUnsupportedVersion          ErrorCode = 35
 	ErrTopicAlreadyExists          ErrorCode = 36
 	ErrInvalidPartitions           ErrorCode = 37
+	ErrInvalidRequest              ErrorCode = 42
 	ErrInvalidProducerEpoch        ErrorCode = 47
 	ErrTransactionalIdAuthFailed   ErrorCode = 53
 	ErrCoordinatorLoadInProgress   ErrorCode = 14

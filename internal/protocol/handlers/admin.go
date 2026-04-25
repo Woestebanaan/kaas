@@ -132,3 +132,110 @@ func (h *DeleteAclsHandler) Handle(_ *connstate.ConnState, version int16, body [
 	api.EncodeDeleteAclsResponse(w, resp, version)
 	return w.Bytes(), nil
 }
+
+// ---- DescribeConfigs ----
+//
+// Skafka does not yet support per-topic or per-broker config overrides; this
+// handler reports a fixed read-only snapshot of the broker's static defaults
+// so admin clients (kafka-configs.sh, kafbat-ui) can render the topic/broker
+// pages without erroring out.
+
+type DescribeConfigsHandler struct {
+	topics  TopicSource
+	brokers BrokerSource
+}
+
+func NewDescribeConfigsHandler(topics TopicSource, brokers BrokerSource) *DescribeConfigsHandler {
+	return &DescribeConfigsHandler{topics: topics, brokers: brokers}
+}
+
+func (h *DescribeConfigsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	r := codec.NewReader(body)
+	req, err := api.DecodeDescribeConfigsRequest(r, version)
+	if err != nil {
+		return nil, fmt.Errorf("describe_configs decode: %w", err)
+	}
+
+	resp := &api.DescribeConfigsResponse{}
+	for _, res := range req.Resources {
+		out := api.DescribeConfigsResult{
+			ResourceType: res.ResourceType,
+			ResourceName: res.ResourceName,
+		}
+		switch res.ResourceType {
+		case api.ConfigResourceTopic:
+			if _, ok := h.topics.Get(res.ResourceName); !ok {
+				out.ErrorCode = int16(codec.ErrUnknownTopicOrPartition)
+				out.ErrorMessage = "unknown topic"
+			} else {
+				out.Configs = filterConfigs(topicConfigs(), res.ConfigNames, res.ConfigNull)
+			}
+		case api.ConfigResourceBroker:
+			out.Configs = filterConfigs(brokerConfigs(h.brokers), res.ConfigNames, res.ConfigNull)
+		default:
+			out.ErrorCode = int16(codec.ErrInvalidRequest)
+			out.ErrorMessage = "unsupported resource type"
+		}
+		resp.Results = append(resp.Results, out)
+	}
+
+	w := codec.NewWriter()
+	api.EncodeDescribeConfigsResponse(w, resp, version)
+	return w.Bytes(), nil
+}
+
+// topicConfigs returns the static topic-level defaults reported for every
+// topic. Values mirror storage.DefaultConfig.
+func topicConfigs() []api.DescribeConfigsEntry {
+	return []api.DescribeConfigsEntry{
+		readOnlyEntry("cleanup.policy", "delete"),
+		readOnlyEntry("retention.ms", "604800000"),
+		readOnlyEntry("segment.bytes", "1073741824"),
+		readOnlyEntry("index.interval.bytes", "4096"),
+		readOnlyEntry("compression.type", "producer"),
+		readOnlyEntry("min.insync.replicas", "1"),
+	}
+}
+
+func brokerConfigs(brokers BrokerSource) []api.DescribeConfigsEntry {
+	self := brokers.Self()
+	return []api.DescribeConfigsEntry{
+		readOnlyEntry("broker.id", fmt.Sprintf("%d", self.NodeID)),
+		readOnlyEntry("listeners", fmt.Sprintf("PLAINTEXT://%s:%d", self.Host, self.Port)),
+		readOnlyEntry("auto.create.topics.enable", "false"),
+		readOnlyEntry("num.partitions", "1"),
+		readOnlyEntry("default.replication.factor", "1"),
+	}
+}
+
+func readOnlyEntry(name, value string) api.DescribeConfigsEntry {
+	return api.DescribeConfigsEntry{
+		Name:         name,
+		Value:        value,
+		ReadOnly:     true,
+		IsDefault:    true, // v0
+		ConfigSource: api.ConfigSourceDefault,
+	}
+}
+
+// filterConfigs honours the client's ConfigNames filter: nil → all, empty → none,
+// non-empty → only matching names.
+func filterConfigs(all []api.DescribeConfigsEntry, names []string, allRequested bool) []api.DescribeConfigsEntry {
+	if allRequested {
+		return all
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	want := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		want[n] = struct{}{}
+	}
+	out := make([]api.DescribeConfigsEntry, 0, len(names))
+	for _, e := range all {
+		if _, ok := want[e.Name]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}

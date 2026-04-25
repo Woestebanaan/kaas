@@ -57,18 +57,29 @@ kafka-console-consumer.sh \
     --timeout-ms "${TIMEOUT_MS}" \
     >"${TMP}/consume.out" 2>"${TMP}/consume.err" || true
 
-# --- 3. verify -------------------------------------------------------------
-if grep -Fxq -- "${MESSAGE}" "${TMP}/consume.out"; then
-    log "PASS: round-trip successful"
-    exit 0
+# --- 3. describe-configs ---------------------------------------------------
+# Exercises DescribeConfigs (API key 32). kafbat-ui and kafka-configs.sh both
+# depend on it; if the broker doesn't support it, kafka-configs.sh prints
+# "The node does not support DESCRIBE_CONFIGS" and exits non-zero.
+log "describe-configs: kafka-configs.sh --describe --topic ${TOPIC}"
+if ! kafka-configs.sh \
+        --bootstrap-server "${BOOTSTRAP}" \
+        --entity-type topics --entity-name "${TOPIC}" --describe \
+        >"${TMP}/configs.out" 2>"${TMP}/configs.err"; then
+    cat "${TMP}/configs.err" >&2
+    fail "describe-configs failed"
 fi
 
-# On failure, dump everything so the cause is obvious from CI logs.
-{
-    echo "expected line: ${MESSAGE@Q}"
-    echo "--- consumer stdout (last 50 lines) ---"
-    tail -n 50 "${TMP}/consume.out" || true
-    echo "--- consumer stderr (last 50 lines) ---"
-    tail -n 50 "${TMP}/consume.err" || true
-} >&2
-fail "expected message not found in consumer output"
+# --- 4. verify -------------------------------------------------------------
+if ! grep -Fxq -- "${MESSAGE}" "${TMP}/consume.out"; then
+    {
+        echo "expected line: ${MESSAGE@Q}"
+        echo "--- consumer stdout (last 50 lines) ---"
+        tail -n 50 "${TMP}/consume.out" || true
+        echo "--- consumer stderr (last 50 lines) ---"
+        tail -n 50 "${TMP}/consume.err" || true
+    } >&2
+    fail "expected message not found in consumer output"
+fi
+
+log "PASS: round-trip successful"
