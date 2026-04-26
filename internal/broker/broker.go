@@ -90,6 +90,12 @@ func (b *Broker) AddTopic(name string, partitions int32) {
 	b.topics.Add(name, partitions)
 }
 
+// RemoveTopic deregisters a topic from the local registry. Storage and lease
+// cleanup happen elsewhere (lease TTL expiry; operator finalizer for dirs).
+func (b *Broker) RemoveTopic(name string) {
+	b.topics.Remove(name)
+}
+
 // RegisterHandlers wires all API key handlers into d and returns d.
 func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(0, 3, 9, handlers.NewProduceHandler(b.store, b.leases, b.locks, b.auth))

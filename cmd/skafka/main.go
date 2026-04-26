@@ -133,12 +133,14 @@ func runBroker(ctx context.Context) {
 
 	// --- Storage ---
 	var store storage.StorageEngine
+	var engine *storage.DiskStorageEngine
 	if dataDir != "" {
 		// Reuse partLock so engine.TakeoverPartition and handler.IsLocked share
 		// the same in-memory `held` map. Two FlockLock instances would each
 		// track their own state and the produce handler would always see the
 		// partition as unlocked.
-		engine, err := storage.NewDiskStorageEngine(dataDir, leaseManager, partLock, storage.DefaultConfig())
+		var err error
+		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, partLock, storage.DefaultConfig())
 		if err != nil {
 			slog.Error("open disk storage", "dir", dataDir, "err", err)
 			os.Exit(1)
@@ -238,10 +240,15 @@ func runBroker(ctx context.Context) {
 	)
 
 	// Register topics discovered during k8s startup so Metadata responses and
-	// produce/fetch dispatch resolve them. (No watch on KafkaTopic CRs yet —
-	// topics created after startup require a broker restart to become visible.)
+	// produce/fetch dispatch resolve them.
 	for _, t := range k8sTopics {
 		b.AddTopic(t.Name, t.Partitions)
+	}
+
+	// Watch KafkaTopic CRs so topics created after startup become visible
+	// without a broker restart, and partition expansions are picked up.
+	if k8sMode && dataDir != "" {
+		startTopicWatcher(ctx, namespace, b, engine, leaseManager, brokerReg, brokerID, k8sTopics)
 	}
 
 	d := protocol.NewDispatcher()
@@ -331,6 +338,84 @@ func acquireK8sPartitions(ctx context.Context, k8sClient kubernetes.Interface, n
 		out = append(out, topicSpec{Name: topic.Name, Partitions: topic.Spec.Partitions})
 	}
 	return out
+}
+
+// startTopicWatcher launches a KafkaTopic CR watcher that mirrors changes into
+// the broker's TopicRegistry, creates partition directories on the shared PVC,
+// and acquires preferred-partition leases for newly observed partitions.
+//
+// The watcher is primed with topics already discovered by acquireK8sPartitions
+// so the watch-restart re-list does not re-fire callbacks for them.
+func startTopicWatcher(
+	ctx context.Context,
+	namespace string,
+	b *broker.Broker,
+	engine *storage.DiskStorageEngine,
+	lm lease.LeaseManager,
+	brokerReg *k8spkg.BrokerRegistry,
+	selfOrdinal int32,
+	primed []topicSpec,
+) {
+	onEvent := func(ev k8spkg.TopicEvent) {
+		switch ev.Type {
+		case k8spkg.TopicAdded:
+			slog.Info("kafkatopic added", "topic", ev.Name, "partitions", ev.Partitions)
+			numBrokers := brokerReg.Count()
+			for p := int32(0); p < ev.Partitions; p++ {
+				if err := engine.CreatePartition(ev.Name, p); err != nil {
+					slog.Warn("topic watcher: create partition", "topic", ev.Name, "partition", p, "err", err)
+				}
+				if k8spkg.Preferred(ev.Name, p, selfOrdinal, numBrokers) {
+					_ = lm.Acquire(ctx, ev.Name, p)
+				}
+			}
+			for p := int32(0); p < ev.Partitions; p++ {
+				if !lm.IsLeader(ev.Name, p) {
+					_ = lm.Acquire(ctx, ev.Name, p)
+				}
+			}
+			b.AddTopic(ev.Name, ev.Partitions)
+
+		case k8spkg.TopicModified:
+			slog.Info("kafkatopic expanded", "topic", ev.Name, "old", ev.OldPartitions, "new", ev.Partitions)
+			numBrokers := brokerReg.Count()
+			for p := ev.OldPartitions; p < ev.Partitions; p++ {
+				if err := engine.CreatePartition(ev.Name, p); err != nil {
+					slog.Warn("topic watcher: create partition", "topic", ev.Name, "partition", p, "err", err)
+				}
+				if k8spkg.Preferred(ev.Name, p, selfOrdinal, numBrokers) {
+					_ = lm.Acquire(ctx, ev.Name, p)
+				}
+			}
+			for p := ev.OldPartitions; p < ev.Partitions; p++ {
+				if !lm.IsLeader(ev.Name, p) {
+					_ = lm.Acquire(ctx, ev.Name, p)
+				}
+			}
+			b.AddTopic(ev.Name, ev.Partitions)
+
+		case k8spkg.TopicDeleted:
+			slog.Info("kafkatopic deleted", "topic", ev.Name, "partitions", ev.Partitions)
+			b.RemoveTopic(ev.Name)
+			for p := int32(0); p < ev.Partitions; p++ {
+				_ = lm.Release(ev.Name, p)
+			}
+		}
+	}
+
+	w, err := k8spkg.NewTopicWatcher(mustRestConfig(), namespace, onEvent)
+	if err != nil {
+		slog.Warn("topic watcher: init failed", "err", err)
+		return
+	}
+	for _, t := range primed {
+		w.Prime(t.Name, t.Partitions)
+	}
+	go func() {
+		if err := w.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("topic watcher stopped", "err", err)
+		}
+	}()
 }
 
 // runInit creates partition directories for all KafkaTopics on the PVC and exits.
