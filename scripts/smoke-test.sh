@@ -83,6 +83,27 @@ if ! kafka-log-dirs.sh \
     fail "describe-log-dirs failed"
 fi
 
+# --- 3c. list-topics --------------------------------------------------------
+# Exercises Metadata-with-empty-topic-list (API key 3). kafka-topics.sh --list
+# is what every admin UI and CLI uses to populate the topic picker; if the
+# broker can't enumerate topics the entire cluster reads as empty.
+log "list-topics: kafka-topics.sh --list"
+if ! kafka-topics.sh \
+        --bootstrap-server "${BOOTSTRAP}" \
+        --list \
+        >"${TMP}/topics.out" 2>"${TMP}/topics.err"; then
+    cat "${TMP}/topics.err" >&2
+    fail "list-topics failed"
+fi
+if ! grep -Fxq -- "${TOPIC}" "${TMP}/topics.out"; then
+    {
+        echo "expected topic ${TOPIC@Q} in --list output"
+        echo "--- topics stdout ---"
+        cat "${TMP}/topics.out" || true
+    } >&2
+    fail "topic ${TOPIC@Q} not present in --list output"
+fi
+
 # --- 4. verify -------------------------------------------------------------
 if ! grep -Fxq -- "${MESSAGE}" "${TMP}/consume.out"; then
     {

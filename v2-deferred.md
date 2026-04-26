@@ -122,8 +122,20 @@ it lands.
 
 ### Surfaced via
 
-`kafbat-ui` "Clear Messages" UI button on the topic page. UI hides the
-button when the cluster doesn't advertise the API in `ApiVersions`.
+- `kafbat-ui` "Clear Messages" UI button on the topic page. UI hides the
+  button when the cluster doesn't advertise the API in `ApiVersions`.
+- `scripts/smoke-test.sh` has no native way to purge accumulated messages
+  between runs — the consumer reads `--from-beginning` every time, so the
+  per-run TOKEN check passes but the read window grows unboundedly. The
+  available alternatives all require non-Kafka surface area: deleting +
+  recreating the `KafkaTopic` CR (CRD-driven, requires broker restart since
+  topics are picked up on startup), `kafka-topics.sh --delete` + recreate
+  (fights the operator reconciler and still needs a restart), or
+  `kubectl exec` + `rm -rf` on partition dirs (bypasses normal flow).
+  `kafka-delete-records.sh` would be the natural fit but is gated on this
+  API. `kafka-configs.sh --alter --add-config retention.ms=1` would also
+  work but is gated on item 6 (AlterConfigs). Any of these unblocks an
+  in-test purge step; until then the smoke test accepts unbounded growth.
 
 ---
 
