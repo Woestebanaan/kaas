@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+// Package heartbeat is the v3 cluster-coordination protocol between brokers
+// and the elected controller. Bidirectional gRPC: brokers stream BrokerStatus
+// upstream every ~1s; the controller streams ControllerCommand back, sending
+// PING for liveness and ASSIGNMENT_CHANGED to push assignment.json refreshes.
+//
+// Phase 4 wires the client/server. Phase 1 only ships this schema.
+package skafka.heartbeat.v1;
+
+option go_package = "github.com/woestebanaan/skafka/pkg/heartbeatpb;heartbeatpb";
+
+service ControllerHeartbeat {
+  // Stream is opened by the broker. Long-lived; reconnect on disconnect.
+  rpc Stream(stream BrokerStatus) returns (stream ControllerCommand);
+}
+
+// BrokerStatus is sent upstream from broker to controller every
+// heartbeatIntervalMs (default 1000ms).
+message BrokerStatus {
+  string broker_id = 1;
+  int64  timestamp_ms = 2;
+
+  // Highest assignmentVersion the broker has applied. Lets the controller
+  // detect brokers that missed an ASSIGNMENT_CHANGED push and re-deliver.
+  uint64 last_seen_assignment_version = 3;
+
+  repeated PartitionStatus partitions = 4;
+}
+
+message PartitionStatus {
+  string topic = 1;
+  int32  partition = 2;
+  uint32 epoch = 3;
+
+  enum State {
+    READY = 0;
+    RECOVERING = 1;
+    ERROR = 2;
+  }
+  State state = 4;
+  int64 high_watermark = 5;
+}
+
+// ControllerCommand is pushed downstream from controller to broker.
+message ControllerCommand {
+  int64 timestamp_ms = 1;
+
+  enum Type {
+    PING = 0;                // standard heartbeat, refresh broker liveness
+    LEAVING = 1;             // controller shutting down gracefully
+    ASSIGNMENT_CHANGED = 2;  // re-read /data/__cluster/assignment.json now
+  }
+  Type type = 2;
+
+  // Populated when type == ASSIGNMENT_CHANGED.
+  uint64 assignment_version = 3;
+}

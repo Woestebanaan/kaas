@@ -142,6 +142,20 @@ func (m *MemoryStorage) DeletePartition(topic string, partition int32) error {
 	return nil
 }
 
+// TakeOver returns the in-memory high watermark; in-memory storage has no
+// disk state to recover, so the only meaningful value is the current HWM.
+func (m *MemoryStorage) TakeOver(_ context.Context, topic string, partition int32, _ uint32) (int64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p := m.partitions[m.key(topic, partition)]
+	if p == nil {
+		return 0, nil
+	}
+	return p.highWater, nil
+}
+
+func (m *MemoryStorage) Relinquish(_ string, _ int32) error { return nil }
+
 // ---- LocalLeaseManager ---- //
 
 // LocalLeaseManager is a single-broker stub: this node is always the leader.

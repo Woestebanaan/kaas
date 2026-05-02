@@ -37,6 +37,16 @@ type StorageEngine interface {
 	// DataDir returns the broker's data directory (advertised as the "log dir"
 	// in DescribeLogDirs).
 	DataDir() string
+	// TakeOver claims write ownership of a partition under the given epoch.
+	// Acquires whatever local locks the implementation uses, recovers any
+	// partial writes from a previous leader, and returns the recovered high
+	// watermark so the caller can report it back to the controller in the
+	// next heartbeat. Part of the v3 coordination contract; v2.6 callers
+	// (per-partition Lease callbacks) may continue to use TakeoverPartition.
+	TakeOver(ctx context.Context, topic string, partition int32, epoch uint32) (recoveryOffset int64, err error)
+	// Relinquish releases write ownership of a partition. Part of the v3
+	// coordination contract.
+	Relinquish(topic string, partition int32) error
 }
 
 // Config holds tunable parameters for DiskStorageEngine.
@@ -397,14 +407,25 @@ func (e *DiskStorageEngine) RelinquishPartition(topic string, partition int32) {
 // TakeoverPartition is called when this broker becomes leader. It acquires the
 // filesystem lock, validates the log (truncating any partial writes from the
 // previous leader), writes the new epoch, and marks the partition writable.
+//
+// Retained for the v2.6 per-partition Lease callback wiring in cmd/skafka.
+// New code should prefer TakeOver, which returns the recovered high watermark
+// for reporting back to the v3 controller.
 func (e *DiskStorageEngine) TakeoverPartition(topic string, partition int32, newEpoch int64) error {
+	_, err := e.takeoverInternal(topic, partition, newEpoch)
+	return err
+}
+
+// takeoverInternal is the shared implementation behind TakeoverPartition (v2.6
+// callers) and TakeOver (v3 callers). Returns the recovered high watermark.
+func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newEpoch int64) (int64, error) {
 	if err := e.locks.Lock(topic, partition); err != nil {
-		return fmt.Errorf("storage: acquire fs lock: %w", err)
+		return 0, fmt.Errorf("storage: acquire fs lock: %w", err)
 	}
 
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
-		return fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+		return 0, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
 	}
 
 	ps.mu.Lock()
@@ -412,21 +433,37 @@ func (e *DiskStorageEngine) TakeoverPartition(topic string, partition int32, new
 
 	diskEpoch, err := readLeaderEpoch(ps.dir)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("storage: read leader epoch: %w", err)
+		return 0, fmt.Errorf("storage: read leader epoch: %w", err)
 	}
 
 	if diskEpoch < newEpoch {
 		hwm, err := recoverSegment(ps.active)
 		if err != nil {
-			return fmt.Errorf("storage: recover segment: %w", err)
+			return 0, fmt.Errorf("storage: recover segment: %w", err)
 		}
 		if err := rebuildIndex(ps.active, e.cfg.IndexIntervalBytes); err != nil {
-			return fmt.Errorf("storage: rebuild index: %w", err)
+			return 0, fmt.Errorf("storage: rebuild index: %w", err)
 		}
 		ps.highWater = hwm
 	}
 
-	return writeLeaderEpoch(ps.dir, newEpoch)
+	if err := writeLeaderEpoch(ps.dir, newEpoch); err != nil {
+		return 0, err
+	}
+	return ps.highWater, nil
+}
+
+// TakeOver implements the v3 StorageEngine contract. It claims write ownership
+// of the partition under the given epoch, recovers any partial writes, and
+// returns the recovered high watermark.
+func (e *DiskStorageEngine) TakeOver(_ context.Context, topic string, partition int32, epoch uint32) (int64, error) {
+	return e.takeoverInternal(topic, partition, int64(epoch))
+}
+
+// Relinquish implements the v3 StorageEngine contract. It releases the
+// filesystem lock; the partition becomes read-only on this broker.
+func (e *DiskStorageEngine) Relinquish(topic string, partition int32) error {
+	return e.locks.Unlock(topic, partition)
 }
 
 // AllPartitions returns all known partitions — used by the retention cleaner.
