@@ -1,7 +1,9 @@
 package codec
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
 
@@ -70,5 +72,65 @@ func TestCRC32CUint32Encoding(t *testing.T) {
 	got := binary.BigEndian.Uint32(buf[:])
 	if got != crc {
 		t.Errorf("CRC round-trip via int32 field: got %08x want %08x", got, crc)
+	}
+}
+
+// TestCRC32CSpecVectors covers Castagnoli test vectors that show up across
+// the iSCSI/SCTP/Btrfs literature. They are hard-coded against the Go std
+// library implementation so that a polynomial regression here would also
+// fail against any independent Castagnoli implementation.
+func TestCRC32CSpecVectors(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want uint32
+	}{
+		// Canonical Castagnoli vector — already covered above, repeated here for grouping.
+		{"123456789", []byte("123456789"), 0xE3069283},
+		// 32 zero bytes — RFC 3720 (iSCSI) test vector.
+		{"32 zero bytes", make([]byte, 32), 0x8A9136AA},
+		// 32 0xFF bytes — RFC 3720 (iSCSI) test vector.
+		{"32 0xFF bytes", bytes.Repeat([]byte{0xFF}, 32), 0x62A8AB43},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ComputeCRC(tc.in)
+			if got != tc.want {
+				t.Errorf("CRC32C(%s) = %08x, want %08x", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// BenchmarkCRC32C confirms hardware-accelerated CRC32C is engaged. On modern
+// x86 (CLMUL) or ARM (CRC32 instruction), throughput should sit in the
+// multi-GB/s range; software-only fallback is closer to 100-300 MB/s. A
+// regression to the slow path is a five- to twenty-fold drop and shows up
+// here before it shows up as broker-throughput collapse on the produce hot
+// path.
+func BenchmarkCRC32C(b *testing.B) {
+	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
+		buf := make([]byte, size)
+		for i := range buf {
+			buf[i] = byte(i)
+		}
+		b.Run(humanSize(size), func(b *testing.B) {
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = ComputeCRC(buf)
+			}
+		})
+	}
+}
+
+func humanSize(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%dMB", n>>20)
+	case n >= 1<<10:
+		return fmt.Sprintf("%dKB", n>>10)
+	default:
+		return fmt.Sprintf("%dB", n)
 	}
 }
