@@ -1,7 +1,9 @@
-package codec
+package recordbatch
 
 import (
 	"testing"
+
+	"github.com/woestebanaan/skafka/internal/protocol/codec"
 )
 
 func TestRecordBatchRoundTrip(t *testing.T) {
@@ -37,11 +39,11 @@ func TestRecordBatchRoundTrip(t *testing.T) {
 		},
 	}
 
-	encoded := EncodeRecordBatch(nil, batch)
-	r := NewReader(encoded)
-	got, err := DecodeRecordBatch(r)
+	encoded := Encode(nil, batch)
+	r := codec.NewReader(encoded)
+	got, err := Decode(r)
 	if err != nil {
-		t.Fatalf("DecodeRecordBatch: %v", err)
+		t.Fatalf("Decode: %v", err)
 	}
 
 	if got.BaseOffset != batch.BaseOffset {
@@ -91,14 +93,14 @@ func TestRecordBatchCRCValidation(t *testing.T) {
 		BaseSequence:  -1,
 		Records:       []Record{{Value: []byte("hello")}},
 	}
-	encoded := EncodeRecordBatch(nil, batch)
+	encoded := Encode(nil, batch)
 
 	// Corrupt a byte in the CRC payload area (after baseOffset+batchLength+ple+magic+crc = 8+4+4+1+4 = 21 bytes)
 	encoded[22] ^= 0xFF
 
-	r := NewReader(encoded)
-	if _, err := DecodeRecordBatch(r); err == nil {
-		t.Error("DecodeRecordBatch: expected CRC error for corrupted batch, got nil")
+	r := codec.NewReader(encoded)
+	if _, err := Decode(r); err == nil {
+		t.Error("Decode: expected CRC error for corrupted batch, got nil")
 	}
 }
 
@@ -110,14 +112,14 @@ func TestRecordBatchWrongMagic(t *testing.T) {
 		BaseSequence:  -1,
 		Records:       []Record{{Value: []byte("x")}},
 	}
-	encoded := EncodeRecordBatch(nil, batch)
+	encoded := Encode(nil, batch)
 
 	// Magic byte is at offset 8(baseOffset)+4(batchLength)+4(ple) = 16
-	encoded[16] = 1 // set magic=1
+	encoded[16] = 1
 
-	r := NewReader(encoded)
-	if _, err := DecodeRecordBatch(r); err == nil {
-		t.Error("DecodeRecordBatch: expected error for magic=1, got nil")
+	r := codec.NewReader(encoded)
+	if _, err := Decode(r); err == nil {
+		t.Error("Decode: expected error for magic=1, got nil")
 	}
 }
 
@@ -129,11 +131,11 @@ func TestRecordBatchAttributeFlags(t *testing.T) {
 		BaseSequence:  -1,
 		Records:       []Record{},
 	}
-	encoded := EncodeRecordBatch(nil, batch)
-	r := NewReader(encoded)
-	got, err := DecodeRecordBatch(r)
+	encoded := Encode(nil, batch)
+	r := codec.NewReader(encoded)
+	got, err := Decode(r)
 	if err != nil {
-		t.Fatalf("DecodeRecordBatch: %v", err)
+		t.Fatalf("Decode: %v", err)
 	}
 	if !got.IsTransactional() {
 		t.Error("IsTransactional() should be true")
@@ -151,11 +153,11 @@ func TestRecordBatchEmptyRecords(t *testing.T) {
 		BaseSequence:  -1,
 		Records:       []Record{},
 	}
-	encoded := EncodeRecordBatch(nil, batch)
-	r := NewReader(encoded)
-	got, err := DecodeRecordBatch(r)
+	encoded := Encode(nil, batch)
+	r := codec.NewReader(encoded)
+	got, err := Decode(r)
 	if err != nil {
-		t.Fatalf("DecodeRecordBatch: %v", err)
+		t.Fatalf("Decode: %v", err)
 	}
 	if len(got.Records) != 0 {
 		t.Errorf("expected 0 records, got %d", len(got.Records))
@@ -174,11 +176,11 @@ func TestRecordNullKeyAndValue(t *testing.T) {
 			{Key: nil, Value: nil},
 		},
 	}
-	encoded := EncodeRecordBatch(nil, batch)
-	r := NewReader(encoded)
-	got, err := DecodeRecordBatch(r)
+	encoded := Encode(nil, batch)
+	r := codec.NewReader(encoded)
+	got, err := Decode(r)
 	if err != nil {
-		t.Fatalf("DecodeRecordBatch: %v", err)
+		t.Fatalf("Decode: %v", err)
 	}
 	if got.Records[0].Key != nil || got.Records[0].Value != nil {
 		t.Error("null key/value should decode as nil")

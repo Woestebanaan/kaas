@@ -53,7 +53,7 @@ func (m *MemoryStorage) getOrCreate(topic string, partition int32) *memPartition
 	return p
 }
 
-func (m *MemoryStorage) Append(_ context.Context, topic string, partition int32, rawBatch []byte) (int64, error) {
+func (m *MemoryStorage) Append(_ context.Context, topic string, partition int32, _ uint32, rawBatch []byte) (int64, error) {
 	if len(rawBatch) == 0 {
 		m.mu.RLock()
 		p := m.partitions[m.key(topic, partition)]

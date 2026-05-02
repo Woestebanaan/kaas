@@ -10,8 +10,8 @@ import (
 
 	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/lock"
-	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/storage"
+	"github.com/woestebanaan/skafka/tests/testutil/recordbatch"
 )
 
 // --- stub implementations ---
@@ -53,7 +53,7 @@ func newEngine(t *testing.T, dir string) *storage.DiskStorageEngine {
 
 // makeBatch encodes a RecordBatch with numRecords single-byte records starting at baseOffset.
 func makeBatch(baseOffset int64, numRecords int) []byte {
-	batch := &codec.RecordBatch{
+	batch := &recordbatch.RecordBatch{
 		BaseOffset:      baseOffset,
 		BaseTimestamp:   time.Now().UnixMilli(),
 		LastOffsetDelta: int32(numRecords - 1),
@@ -62,12 +62,12 @@ func makeBatch(baseOffset int64, numRecords int) []byte {
 		BaseSequence:    -1,
 	}
 	for i := 0; i < numRecords; i++ {
-		batch.Records = append(batch.Records, codec.Record{
+		batch.Records = append(batch.Records, recordbatch.Record{
 			OffsetDelta: int32(i),
 			Value:       []byte{byte(i)},
 		})
 	}
-	return codec.EncodeRecordBatch(nil, batch)
+	return recordbatch.Encode(nil, batch)
 }
 
 // --- tests ---
@@ -85,7 +85,7 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		batch := makeBatch(int64(i*10), 10)
 		allBatches = append(allBatches, batch)
-		base, err := engine.Append(ctx, "test-topic", 0, batch)
+		base, err := engine.Append(ctx, "test-topic", 0, 0, batch)
 		if err != nil {
 			t.Fatalf("Append batch %d: %v", i, err)
 		}
@@ -151,7 +151,7 @@ func TestReadFromOffset(t *testing.T) {
 	b1 := makeBatch(10, 10)
 	b2 := makeBatch(20, 10)
 	for _, b := range [][]byte{b0, b1, b2} {
-		if _, err := engine.Append(ctx, "topic", 0, b); err != nil {
+		if _, err := engine.Append(ctx, "topic", 0, 0, b); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -186,7 +186,7 @@ func TestTwoLockEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = e.Append(ctx, "topic", 0, makeBatch(0, 1))
+	_, err = e.Append(ctx, "topic", 0, 0, makeBatch(0, 1))
 	if err != storage.ErrLockNotHeld {
 		t.Errorf("expected ErrLockNotHeld, got %v", err)
 	}
@@ -203,10 +203,10 @@ func TestRecoveryAfterPartialWrite(t *testing.T) {
 
 	b0 := makeBatch(0, 5)
 	b1 := makeBatch(5, 5)
-	if _, err := engine.Append(ctx, "topic", 0, b0); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, b0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Append(ctx, "topic", 0, b1); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, b1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -309,7 +309,7 @@ func TestSegmentRollAndRead(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		b := makeBatch(int64(i*5), 5)
 		allBatches = append(allBatches, b)
-		if _, err := engine.Append(ctx, "topic", 0, b); err != nil {
+		if _, err := engine.Append(ctx, "topic", 0, 0, b); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -339,7 +339,7 @@ func TestPartitionSizeReflectsAppends(t *testing.T) {
 	}
 
 	before := engine.PartitionSize("topic", 0)
-	if _, err := engine.Append(ctx, "topic", 0, makeBatch(0, 10)); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 10)); err != nil {
 		t.Fatal(err)
 	}
 	after := engine.PartitionSize("topic", 0)
@@ -372,7 +372,7 @@ func TestAppendAssignsOffsets(t *testing.T) {
 	recordCounts := []int{1, 1, 3}
 	for i, n := range recordCounts {
 		// Caller always sends baseOffset=0, like a real producer.
-		base, err := engine.Append(ctx, "topic", 0, makeBatch(0, n))
+		base, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, n))
 		if err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}

@@ -17,14 +17,20 @@ import (
 )
 
 var (
-	ErrNotLeader   = errors.New("storage: not leader for partition")
-	ErrLockNotHeld = errors.New("storage: filesystem lock not held")
+	ErrNotLeader     = errors.New("storage: not leader for partition")
+	ErrLockNotHeld   = errors.New("storage: filesystem lock not held")
+	ErrEpochMismatch = errors.New("storage: epoch behind current partition leader")
 )
 
 // StorageEngine is the interface for reading and writing topic partition data.
-// Append and Read operate on raw RecordBatch bytes as sent by / returned to Kafka clients.
+// Append and Read operate on raw RecordBatch bytes as sent by / returned to
+// Kafka clients — never on a decoded record set. epoch is the v3 leader-epoch
+// fence supplied by the BrokerCoordinator; Append returns ErrEpochMismatch
+// when the caller's epoch is behind the partition's current epoch. Phase 1
+// plumbs the parameter; the fence is wired together with the BrokerCoordinator
+// in Phase 4. Pass 0 to skip the fence under v2.6 callers.
 type StorageEngine interface {
-	Append(ctx context.Context, topic string, partition int32, rawBatch []byte) (baseOffset int64, err error)
+	Append(ctx context.Context, topic string, partition int32, epoch uint32, batchBytes []byte) (baseOffset int64, err error)
 	Read(ctx context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]byte, error)
 	HighWatermark(topic string, partition int32) (int64, error)
 	LogStartOffset(topic string, partition int32) (int64, error)
@@ -226,7 +232,12 @@ func (e *DiskStorageEngine) DeletePartition(topic string, partition int32) error
 
 // Append writes a raw RecordBatch to the partition log.
 // Both the Kubernetes Lease and the filesystem lock must be held by the caller.
-func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition int32, rawBatch []byte) (int64, error) {
+//
+// epoch is the v3 leader-epoch fence supplied by the BrokerCoordinator. Phase 1
+// accepts the parameter but does not enforce it — Phase 4 wires the cached
+// partition epoch into the per-partition state and rejects stale callers with
+// ErrEpochMismatch. Until then, callers from the v2.6 path pass 0.
+func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition int32, _ uint32, rawBatch []byte) (int64, error) {
 	if len(rawBatch) == 0 {
 		hwm, _ := e.HighWatermark(topic, partition)
 		return hwm, nil

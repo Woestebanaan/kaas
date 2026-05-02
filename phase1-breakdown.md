@@ -46,8 +46,8 @@ Plan listed six CRDs. All present under `operator/api/v1alpha1/`:
 
 Plan defined five contracts. Mapping:
 
-### `StorageEngine` — 🟡 signature gap under v3.3
-`internal/storage/engine.go:26-50`. Repo has `Append(ctx, topic, partition int32, rawBatch []byte) (baseOffset, error)`. v3.3 mandates `Append(ctx, topic, partition int32, epoch uint32, batchBytes []byte)` — the byte-opacity half is already satisfied, but **the `epoch uint32` parameter is missing on Append**. Under v3.2 (where the plan still showed `[]Record`) this was a reasonable deviation; under v3.3 the plan has converged on bytes and explicitly added per-Append epoch fencing, so this is now a real gap to close. `TakeOver(ctx, topic, partition, epoch uint32)` and `Relinquish` are present alongside the v2.6 `TakeoverPartition`/`RelinquishPartition`.
+### `StorageEngine` — ✅ matches v3.3
+`internal/storage/engine.go:26-58`. Now `Append(ctx, topic, partition int32, epoch uint32, batchBytes []byte)`. Phase 1 plumbs the parameter through `DiskStorageEngine`, `MemoryStorage`, and the `produce.go` handler (which passes `0` until BrokerCoordinator is wired in Phase 4). `ErrEpochMismatch` sentinel error is defined for the future fence implementation. `TakeOver(ctx, topic, partition, epoch uint32)` and `Relinquish` are present alongside the v2.6 `TakeoverPartition`/`RelinquishPartition`.
 
 ### `AssignmentStore` — ✅ matches plan
 `pkg/kafkaapi/assignment.go:75-88`. Read / Write / Watch surface as specified.
@@ -138,33 +138,32 @@ v3.3 elevated byte-opacity from a v1.5 optimization to a Phase 1 architectural c
 | Constraint | Repo status |
 |---|---|
 | 21. RecordBatch payloads opaque end-to-end; on-disk == wire format | ✅ already true: `internal/storage/engine.go:25` and `:227` operate on `rawBatch []byte`; `internal/protocol/handlers/produce.go:126` only parses the 61-byte header |
-| 22. **No decoded `RecordBatch` struct with `[]Record` field anywhere in the codec** | ❌ `internal/protocol/codec/types.go:50-77` defines `Record`, `RecordBatch{... Records []Record}`, `EncodeRecordBatch`, `DecodeRecordBatch`. Only called from `types_test.go` — **but the constraint forbids the *type* existing, not just hot-path usage**. Phase 1 cleanup item under v3.3. |
+| 22. **No decoded `RecordBatch` struct with `[]Record` field anywhere in the codec** | ✅ moved to `tests/testutil/recordbatch/` (test-only package outside `internal/`). The codec package now contains only frame-level types (`ErrorCode`, `Reader`, `Writer`, primitives, CRC helpers); the package doc on `codec/types.go` explicitly documents the constraint. |
 | 23. Produce hot path: per-batch allocations, never per-record | ✅ produce handler does not iterate records |
 | 24. Fetch path passes segment bytes directly into response framing, no re-encode, no re-CRC | ✅ confirmed — `engine.go:298` returns `[]byte`, handlers wrap it |
 
-The plan also says the v3.3 project layout has `tests/byte-opacity/` (line 581). Not present in repo. Per local convention (placeholder `t.Skip` packages for Phase 4 CI hooks), an empty placeholder would let `go test ./...` reference it; but the byte-opacity tests are real (round-trip + CPU-profile assertions + tripwire metrics) and depend on Phase 3 storage being real, so deferring the directory is reasonable.
+The plan also says the v3.3 project layout has `tests/byte-opacity/` (line 581). ✅ Added as `tests/byte-opacity/placeholder_test.go` with a `t.Skip("byte-opacity tests land in Phase 3")` marker, matching the existing convention in `tests/controller-failover/` and `tests/stale-controller-race/`.
 
 ---
 
-## Action items introduced by v3.3
+## Action items introduced by v3.3 — all closed
 
-1. **Add `epoch uint32` to `StorageEngine.Append`** (and propagate to `MemoryStorage.Append` and `DiskStorageEngine.Append` and all callers in `internal/protocol/handlers/produce.go`). Append-time epoch check is what fences out a stale leader on the very next batch when self-fencing alone would take up to `heartbeatTimeout` to react.
-2. **Remove `RecordBatch`/`Record` decoded structs** from `internal/protocol/codec/types.go` (lines 50-77) along with `EncodeRecordBatch` / `DecodeRecordBatch`. Migrate `types_test.go` to either header-only assertions or hand-built byte fixtures. Add the tripwire metrics `skafka_codec_record_decode_total` and `skafka_codec_batch_reencode_total` (plan line 1352-1354) — but only if a useful place to increment them remains; if the symbols are gone, the metrics flat-line at zero by construction, which is the desired property.
-3. **Add `tests/byte-opacity/` placeholder** (optional in Phase 1; required by Phase 3).
-4. **Document open question #12** (mmap vs `pread()`) — no code change in Phase 1, but the question now needs an owner and a per-provider answer ahead of Phase 3.
+1. ✅ **Added `epoch uint32` to `StorageEngine.Append`**. Plumbed through `DiskStorageEngine`, `MemoryStorage`, the `produce.go` handler (passes `0` until BrokerCoordinator is wired in Phase 4), and all integration test call sites. `ErrEpochMismatch` sentinel defined for the future fence implementation.
+2. ✅ **Moved `Record` / `RecordBatch` / `Encode` / `Decode` to `tests/testutil/recordbatch/`** — outside `internal/`, test-only by import. The codec package keeps only frame-level types and primitives; the package doc on `codec/types.go` explicitly states the constraint. Equivalent tests now live in `tests/testutil/recordbatch/recordbatch_test.go`. Tripwire metrics (`skafka_codec_record_decode_total`, `skafka_codec_batch_reencode_total`) are **not** added — there is no production code path to increment them, so they would flat-line at zero by construction (which is the desired property).
+3. ✅ **Added `tests/byte-opacity/placeholder_test.go`** with `t.Skip("byte-opacity tests land in Phase 3")`, mirroring the convention in `tests/controller-failover/` and `tests/stale-controller-race/`.
+4. **Open question #12** (mmap vs `pread()`) — no code change in Phase 1; needs an owner and per-provider answer ahead of Phase 3.
 
 ---
 
 ## Summary
 
-Phase 1 is **substantively complete as a foundation pass**. Module, CRD set, RBAC, and the new contracts (`AssignmentStore`, `Controller`, `BrokerCoordinator`, plus the `Assignment` struct) are landed.
+Phase 1 is **complete under v3.3**. All deliverables landed:
 
-Under the v3.2 plan I had two reasonable deviations to flag. v3.3 closes one of them and opens two new gaps:
+- Module + CRDs + RBAC + core contracts (carried over from `c03eb64`).
+- `StorageEngine.Append` carries per-call leader epoch.
+- Codec package contains zero decoded RecordBatch types — bytes-are-opaque is enforced at the type-system level.
+- `tests/byte-opacity/` placeholder ready for Phase 3 to populate.
 
-1. ❌ `StorageEngine.Append` is now byte-batch *with* per-Append `epoch uint32`. Repo has the bytes but not the epoch parameter. Real gap.
-2. ❌ Constraint #22: codec must not contain a decoded `RecordBatch` / `[]Record` type. Repo still does, in `codec/types.go`. Real gap (even if test-only today).
-3. ✅ `Controller.Start(ctx, epoch int64)` was a v3.2 deviation; v3.3 doesn't change it.
+The deferred items — golangci-lint re-enable, RWX-provider integration matrix, controller-failover and stale-controller-race CI jobs — still wait on Phase 3/4 implementations and have placeholder hooks (`t.Skip`, stub binaries) so they can be filled in without restructuring.
 
-The deferred items — golangci-lint re-enable, RWX-provider integration matrix, controller-failover and stale-controller-race CI jobs — still wait on Phase 3/4 implementations.
-
-Recommended ordering: close the two byte-opacity gaps before moving to Phase 4, since both touch the storage and codec interfaces that Phase 4's broker-coordinator and self-fencing code will build against.
+Phase 1 no longer has open scope. Phase 4 (cluster controller / broker coordinator) is the natural next target; the storage and codec interfaces it will build against are now in their final v3.3 shape.

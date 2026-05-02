@@ -29,7 +29,7 @@ func (s stubStorage) LogStartOffset(_ string, _ int32) (int64, error) {
 	}
 	return s.logSt, nil
 }
-func (stubStorage) Append(_ context.Context, _ string, _ int32, _ []byte) (int64, error) {
+func (stubStorage) Append(_ context.Context, _ string, _ int32, _ uint32, _ []byte) (int64, error) {
 	return 0, nil
 }
 func (stubStorage) Read(_ context.Context, _ string, _ int32, _ int64, _ int) ([]byte, error) {
