@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -97,6 +98,13 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 				continue
 			}
 
+			if !validateProduceBatches(pd.Records) {
+				pr.ErrorCode = int16(codec.ErrCorruptMessage)
+				pr.BaseOffset = -1
+				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
+				continue
+			}
+
 			appendStart := time.Now()
 			// Phase 1: epoch is 0 (no fence). Phase 4 reads it from BrokerCoordinator.CurrentEpoch.
 			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, 0, pd.Records)
@@ -122,6 +130,55 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 	w := codec.NewWriter()
 	api.EncodeProduceResponse(w, resp, version)
 	return w.Bytes(), nil
+}
+
+// validateProduceBatches walks every RecordBatch concatenated in a Produce
+// request's RecordSet and validates each one's CRC32C and length-bound. Empty
+// input is treated as a valid no-op (clients sometimes send empty produce
+// requests as a keepalive).
+//
+// Wire layout per batch:
+//
+//	[0:8]   baseOffset
+//	[8:12]  batchLength    (covers everything from byte 12 onward)
+//	[12:16] partitionLeaderEpoch
+//	[16]    magic          (must be 2)
+//	[17:21] crc            (Castagnoli, covers bytes [21 : 12+batchLength])
+//	[21:..] crcPayload     (attrs..numRecords..opaque records)
+//
+// The function only inspects the 21-byte header per batch — it never iterates
+// individual records, preserving the bytes-are-opaque invariant.
+func validateProduceBatches(records []byte) bool {
+	if len(records) == 0 {
+		return true
+	}
+	pos := 0
+	for pos < len(records) {
+		if len(records)-pos < 12 {
+			return false
+		}
+		batchLength := int(int32(binary.BigEndian.Uint32(records[pos+8 : pos+12])))
+		// Minimum batch body is 49 bytes:
+		//   ple(4) + magic(1) + crc(4) + attrs(2) + lastOffsetDelta(4) +
+		//   baseTimestamp(8) + maxTimestamp(8) + producerID(8) +
+		//   producerEpoch(2) + baseSequence(4) + recordCount(4).
+		if batchLength < 49 {
+			return false
+		}
+		end := pos + 12 + batchLength
+		if end > len(records) {
+			return false
+		}
+		if records[pos+16] != 2 {
+			return false // magic must be 2 for v3+ batches; v1/v0 not supported
+		}
+		storedCRC := binary.BigEndian.Uint32(records[pos+17 : pos+21])
+		if codec.ValidateCRC(records[pos+21:end], storedCRC) != nil {
+			return false
+		}
+		pos = end
+	}
+	return true
 }
 
 // recordCountFromBatch extracts numRecords from the RecordBatch header bytes.

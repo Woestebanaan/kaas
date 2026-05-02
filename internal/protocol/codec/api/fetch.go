@@ -2,7 +2,9 @@ package api
 
 import "github.com/woestebanaan/skafka/internal/protocol/codec"
 
-// FetchRequest (key 1, v4–v13).
+// FetchRequest (key 1, v4–v12). v13 introduced UUID topic IDs in place of
+// topic names; that schema change is not implemented yet — clients
+// negotiating to v13 fall back to v12 via the ApiVersions handshake.
 type FetchRequest struct {
 	ReplicaID       int32  // always -1 for clients
 	MaxWaitMs       int32
