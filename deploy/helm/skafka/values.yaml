@@ -35,6 +35,20 @@ broker:
     limits:
       cpu: 2
       memory: 4Gi
+  # Pod-level securityContext. The broker image runs USER nonroot:nonroot
+  # (distroless's UID/GID 65532). Without fsGroup the dynamically
+  # provisioned PVC's mount point comes back root:root 0755, which
+  # blocks the broker from creating partition directories at runtime
+  # (the partition-init init container hits the same wall on a fresh
+  # cluster where KafkaTopic CRs sync after the pod starts).
+  # fsGroupChangePolicy=OnRootMismatch skips the recursive chgrp on
+  # warm restarts when ownership is already correct.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    fsGroupChangePolicy: OnRootMismatch
   readinessGate:
     # Adds the skafka.io/PartitionsReady readinessGate to broker pods. Required
     # whenever the broker's ReadinessUpdater is expected to gate Endpoints

@@ -15,6 +15,10 @@ spec:
       labels: {{- include "skafka.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "skafka.brokerSAName" . }}
+      {{- with .Values.broker.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.broker.readinessGate.enabled }}
       # Pod only joins the headless service after all partition leases are held.
       readinessGates:
