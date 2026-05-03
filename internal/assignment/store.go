@@ -21,11 +21,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-
+	"github.com/woestebanaan/skafka/internal/fsutil"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
@@ -162,52 +160,14 @@ func (s *FileStore) Write(_ context.Context, a *kafkaapi.Assignment) error {
 }
 
 // Watch returns a channel that fires whenever the assignment file changes.
-// Two complementary mechanisms drive the channel:
-//
-//  1. fsnotify on the parent directory — sub-second latency on local fs;
-//     unreliable on NFS where inotify falls back to polling.
-//  2. A periodic mtime poll (default 1s) plus a full-read fallback (default
-//     30s) that fires regardless of mtime — defends against NFS attribute
-//     caching and second-resolution mtime on some servers.
-//
-// The channel is unbuffered-but-coalescing: a non-blocking send is used, so
-// rapid bursts of changes deliver a single tick. Callers re-read via Read().
+// The merged fsnotify + 1s mtime poll + 30s full-fire loop lives in
+// internal/fsutil; this method just adapts the per-file callback into a
+// non-blocking channel send so rapid bursts of changes deliver a single
+// tick (consumers re-read via Read()).
 //
 // The goroutine exits when ctx is cancelled.
 func (s *FileStore) Watch(ctx context.Context) (<-chan struct{}, error) {
 	out := make(chan struct{}, 1)
-
-	// Best-effort fsnotify; if init or AddPath fails, we silently fall back to
-	// polling alone (the plan §"inotify on config files" explicitly allows this).
-	w, err := fsnotify.NewWatcher()
-	if err == nil {
-		if err := os.MkdirAll(s.dir(), 0755); err == nil {
-			if werr := w.Add(s.dir()); werr != nil {
-				_ = w.Close()
-				w = nil
-			}
-		} else {
-			_ = w.Close()
-			w = nil
-		}
-	} else {
-		w = nil
-	}
-
-	go s.watchLoop(ctx, w, out)
-	return out, nil
-}
-
-// watchLoop is the merged fsnotify + polling event source. It owns w and
-// closes it on ctx cancellation.
-func (s *FileStore) watchLoop(ctx context.Context, w *fsnotify.Watcher, out chan<- struct{}) {
-	if w != nil {
-		defer w.Close()
-	}
-
-	// notify is a non-blocking send: we never want to block fsnotify's event
-	// channel, and consumers only need to know "something changed", not how
-	// many times.
 	notify := func() {
 		select {
 		case out <- struct{}{}:
@@ -215,70 +175,14 @@ func (s *FileStore) watchLoop(ctx context.Context, w *fsnotify.Watcher, out chan
 		}
 	}
 
-	var pollC, fullC <-chan time.Time
-	if s.pollInterval > 0 {
-		pt := time.NewTicker(s.pollInterval)
-		defer pt.Stop()
-		pollC = pt.C
-	}
-	if s.fullReadInterval > 0 {
-		ft := time.NewTicker(s.fullReadInterval)
-		defer ft.Stop()
-		fullC = ft.C
-	}
+	w := fsutil.New([]fsutil.FileSpec{
+		{Path: s.path(), OnChange: notify},
+	}).
+		WithPollInterval(s.pollInterval).
+		WithFullReadInterval(s.fullReadInterval)
 
-	var cachedMtime time.Time
-
-	checkMtime := func() {
-		stat, err := os.Stat(s.path())
-		if err != nil {
-			return
-		}
-		if !stat.ModTime().Equal(cachedMtime) {
-			cachedMtime = stat.ModTime()
-			notify()
-		}
-	}
-
-	// fsnotify's Events channel is nil when w is nil — a nil-channel select
-	// case never fires, so the merged loop falls through to polling cleanly.
-	var fsEvents <-chan fsnotify.Event
-	if w != nil {
-		fsEvents = w.Events
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case ev, ok := <-fsEvents:
-			if !ok {
-				fsEvents = nil
-				continue
-			}
-			if filepath.Base(ev.Name) != assignmentFilename {
-				continue
-			}
-			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) == 0 {
-				continue
-			}
-			// Update cachedMtime so the poll loop doesn't re-fire on the same change.
-			if stat, err := os.Stat(s.path()); err == nil {
-				cachedMtime = stat.ModTime()
-			}
-			notify()
-
-		case <-pollC:
-			checkMtime()
-
-		case <-fullC:
-			notify()
-			if stat, err := os.Stat(s.path()); err == nil {
-				cachedMtime = stat.ModTime()
-			}
-		}
-	}
+	go func() { _ = w.Run(ctx) }()
+	return out, nil
 }
 
 // IsNotExist is a small convenience for callers that need to distinguish
@@ -291,7 +195,3 @@ func IsNotExist(err error) bool {
 // contract that Phase 1 defined.
 var _ kafkaapi.AssignmentStore = (*FileStore)(nil)
 
-// _ keeps the sync import in use without reaching for it in this minimal
-// implementation; future revisions may track in-flight Watch goroutines for
-// graceful shutdown via a sync.WaitGroup.
-var _ = sync.Mutex{}

@@ -170,7 +170,7 @@ Plan §"inotify on config files" (lines 1043–1047): "On NFS, fsnotify falls ba
 |---|---|---|
 | Watch `acls.json` + `credentials.json` | ✅ | `watcher.go:35` |
 | Debounced reload | ✅ | `watcher.go:29` (100ms debounce) |
-| **NFS polling fallback** | ❌ | uses fsnotify directly; on NFS without inotify support, file changes will be silently missed. The plan's "~1s polling fallback" is not implemented. |
+| **NFS polling fallback** | ✅ | refactored onto `internal/fsutil.FileWatcher` (the same merged fsnotify + 1s mtime poll + 30s full-fire helper used by `internal/assignment.FileStore`). On NFS where inotify is unreliable, the poll path keeps callbacks firing within ~1s. |
 
 The fallback isn't strictly required for v1 single-broker / local-disk setups — but the moment skafka runs on csi-driver-nfs (Tier 1 RWX provider per plan §"Supported RWX providers"), this becomes a hot reload bug.
 
@@ -198,7 +198,7 @@ Integration coverage is reasonable for what's implemented. The gaps mirror the i
 | 3 | **`.log.sealed` marker after takeover** | Medium — explicit signal of takeover-closed vs. clean-roll | Open |
 | 4 | **`.recovery` sidecar** | Low — debugging artifact | Open |
 | 5 | **Per-batch / policy-driven `fdatasync`** | High — acks=all currently didn't guarantee durability beyond OS write-back | ✅ closed |
-| 6 | **fsnotify polling fallback** for NFS | Medium for NFS deployments | Open |
+| 6 | **fsnotify polling fallback** for NFS | Medium for NFS deployments | ✅ closed (extracted to `internal/fsutil/filewatch.go`, used by both `internal/assignment.FileStore` and `internal/storage.ClusterFileWatcher`) |
 | 7 | **TakeOver scans forward, not backward** + missing sealing | Stylistic — same boundary either way | Open |
 | 8 | **`.timeindex` files** | Low — only used by Kafka admin tools | Open |
 | 9 | **`kafka-dump-log.sh` compat assertion** | Strong proof of byte-identical on-disk format | CI integration job, not a Go test |
