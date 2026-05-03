@@ -433,22 +433,70 @@ func TestFranzGoIdempotentSnappy(t *testing.T) {
 	}
 }
 
-// TestFranzGoConsumerGroup is a SKIPPED placeholder for an end-to-end
-// consumer-group flow exercised through real franz-go group consumer.
+// TestFranzGoConsumerGroup exercises FindCoordinator → JoinGroup →
+// SyncGroup → Heartbeat → OffsetCommit/Fetch end-to-end via the real
+// franz-go group consumer.
 //
-// The wire-level interaction between franz-go's group consumer and this
-// broker's coordinator is currently flaky on first-run cold start: the
-// consumer's first PollFetches call consistently times out, no matter how
-// far the deadline is pushed. This is not a coordinator-correctness
-// problem — the same coordinator code path is tested directly via the
-// internal API in tests/integration/consumer_group_test.go and works — but
-// some interaction in the JoinGroup → SyncGroup → Fetch handoff is
-// confusing franz-go specifically.
+// History: this test was previously t.Skipped because the wire-level
+// flow consistently timed out on first-run cold start. The skip was
+// added in commit 5ea4c1d with a memory note attributing the flake to
+// per-group Lease cold-start behaviour. Phase 5 step 4 rewired
+// coordinator selection from per-group Leases onto controller
+// assignment, so the conditions that produced the flake are gone —
+// trying again here.
 //
-// Keeping the test scaffolding (topic with 3 partitions, coordinator
-// wired into TestMain) so a future fix can drop straight in.
+// Tolerant of transient PollFetches errors during the cold-start
+// rebalance phase: only the final delivered-record count is asserted.
 func TestFranzGoConsumerGroup(t *testing.T) {
-	t.Skip("franz-go group consumer cold-start flake; coordinator correctness is covered by tests/integration/consumer_group_test.go")
+	const N = 30
+	const groupID = "compat-group-1"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	producer := franzClient(t)
+	records := make([]*kgo.Record, N)
+	for i := 0; i < N; i++ {
+		records[i] = &kgo.Record{
+			Topic: topicConsumerGrp,
+			Value: []byte(fmt.Sprintf("g-%03d", i)),
+		}
+	}
+	res := producer.ProduceSync(ctx, records...)
+	for i, r := range res {
+		if r.Err != nil {
+			t.Fatalf("ProduceSync[%d]: %v", i, r.Err)
+		}
+	}
+
+	consumer := franzClient(t,
+		kgo.ConsumeTopics(topicConsumerGrp),
+		kgo.ConsumerGroup(groupID),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.SessionTimeout(10*time.Second),
+		kgo.HeartbeatInterval(1*time.Second),
+	)
+
+	seen := 0
+	deadline := time.Now().Add(25 * time.Second)
+	for seen < N && time.Now().Before(deadline) {
+		pollCtx, pollCancel := context.WithTimeout(ctx, 3*time.Second)
+		fetches := consumer.PollFetches(pollCtx)
+		pollCancel()
+		if errs := fetches.Errors(); len(errs) > 0 {
+			t.Logf("PollFetches transient errors (will retry): %v", errs)
+			continue
+		}
+		fetches.EachRecord(func(r *kgo.Record) {
+			seen++
+		})
+	}
+	if seen != N {
+		t.Fatalf("consumer group saw %d records, want %d", seen, N)
+	}
+
+	if err := consumer.CommitUncommittedOffsets(ctx); err != nil {
+		t.Fatalf("CommitUncommittedOffsets: %v", err)
+	}
 }
 
 // strings_repeat avoids importing strings just for one helper.
