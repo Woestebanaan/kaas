@@ -126,6 +126,12 @@ spec:
                   fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
             - name: EXTERNAL_HOSTNAME_PATTERN
               value: {{ .Values.listeners.external.hostnamePattern | quote }}
+            {{- if and .Values.listeners.external.tls.clientCA.enabled .Values.listeners.external.tls.clientCA.existingSecret }}
+            # Mutual TLS: require every TLS client to present a cert
+            # signed by this CA bundle.
+            - name: SKAFKA_TLS_CLIENT_CA_FILE
+              value: /tls-client-ca/{{ .Values.listeners.external.tls.clientCA.key }}
+            {{- end }}
             {{- end }}
           livenessProbe:
             tcpSocket:
@@ -145,6 +151,11 @@ spec:
             - name: tls
               mountPath: /tls
               readOnly: true
+            {{- if and .Values.listeners.external.tls.clientCA.enabled .Values.listeners.external.tls.clientCA.existingSecret }}
+            - name: tls-client-ca
+              mountPath: /tls-client-ca
+              readOnly: true
+            {{- end }}
             {{- end }}
           resources: {{- toYaml .Values.broker.resources | nindent 12 }}
       volumes:
@@ -157,4 +168,9 @@ spec:
             # Secret created by cert-manager from the Certificate resource.
             # Single Secret shared across all broker pods.
             secretName: {{ include "skafka.fullname" . }}-broker-tls
+        {{- if and .Values.listeners.external.tls.clientCA.enabled .Values.listeners.external.tls.clientCA.existingSecret }}
+        - name: tls-client-ca
+          secret:
+            secretName: {{ .Values.listeners.external.tls.clientCA.existingSecret }}
+        {{- end }}
         {{- end }}

@@ -77,6 +77,34 @@ epoch-prefixed segment filenames + the BrokerCoordinator's ownership decision
 | **Longhorn / OpenEBS RWX** | ✅ Production | Block-backed RWX. |
 | **Local / hostPath** | ✅ Single-pod dev | Not RWX; only works with `broker.replicaCount: 1`. |
 
+### NFS mount options
+
+For any NFS-backed StorageClass (csi-driver-nfs, EFS, Filestore, etc.) set
+`mountOptions` on the StorageClass — not on the PVC, since `mountOptions` is a
+StorageClass field that the CSI driver translates into NFS mount flags at
+attach time. Example:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: skafka-nfs
+provisioner: nfs.csi.k8s.io
+mountOptions:
+  - nfsvers=4.1
+  - nconnect=8        # parallel TCP connections; faster fsync
+  - acregmax=1        # sub-second mtime freshness on assignment.json polling
+  - hard              # block on server unavailability instead of returning EIO
+parameters:
+  server: nfs.example.com
+  share: /export/skafka
+```
+
+The `acregmax=1` setting matters most: the broker polls assignment.json's
+mtime as the fast-failover signal, and the default NFS attribute cache
+(60s) would delay every controller failover. `nconnect` raises throughput
+under concurrent fsyncs from multiple brokers.
+
 ## Configuration
 
 See `values.yaml` for the full set of tunables. Common overrides:
@@ -89,6 +117,10 @@ See `values.yaml` for the full set of tunables. Common overrides:
 | `auth.enabled` | true | Enable credentials.json/acls.json loading |
 | `auth.requireSasl` | false | Reject non-SASL requests |
 | `auth.tls.enabled` | false | Bind TLS listener on port 9093 |
+| `listeners.external.enabled` | false | Enable per-broker external TLS listener |
+| `listeners.external.tls.clientCA.enabled` | false | Require every TLS client to present a cert (mTLS) |
+| `listeners.external.tls.clientCA.existingSecret` | `""` | Secret holding the CA bundle for client cert verification |
+| `broker.controllerLease.durationSeconds` | 15 | Cluster-controller Lease lifetime; lower = faster failover, more etcd writes |
 | `podDisruptionBudget.maxUnavailable` | 1 | Equivalent to Kafka min-ISR guarantee |
 
 ## Smoke test

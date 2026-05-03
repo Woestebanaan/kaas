@@ -144,6 +144,21 @@ listeners:
           name: letsencrypt-prod
           kind: ClusterIssuer
 
+      # Mutual TLS: when set, the broker requires every TLS client to
+      # present a cert signed by one of the CAs in this bundle. Pair
+      # with auth.mechanisms = ["mTLS"] (or include alongside SCRAM)
+      # for full mTLS authentication. Disabled by default — opportunistic
+      # mTLS still works without this (the broker will record the client
+      # CN as principal if a cert is presented, otherwise fall back to
+      # SASL or anonymous per auth.requireSasl).
+      clientCA:
+        enabled: false
+        # Name of an existing Secret containing the CA bundle. The chart
+        # mounts secret.key (default ca.crt) at /tls-client-ca/ca.crt and
+        # sets SKAFKA_TLS_CLIENT_CA_FILE to point at it.
+        existingSecret: ""
+        key: ca.crt
+
     gateway:
       # Create one TLSRoute per broker when true. Requires Gateway API CRDs
       # and a Gateway resource with a TLS passthrough listener on the external
