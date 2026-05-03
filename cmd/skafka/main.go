@@ -309,7 +309,18 @@ func runBroker(ctx context.Context) {
 	if certFile := os.Getenv("SKAFKA_TLS_CERT_FILE"); certFile != "" {
 		keyFile := os.Getenv("SKAFKA_TLS_KEY_FILE")
 		tlsPort := envOr("SKAFKA_TLS_PORT", "9093")
-		tlsCfg, err := protocol.WatchingCertificate(certFile, keyFile)
+
+		// mTLS: when SKAFKA_TLS_CLIENT_CA_FILE is set, the listener
+		// requires every client to present a cert signed by one of the
+		// CAs in the bundle. Without it, TLS is opportunistic — clients
+		// can connect cert-less and authenticate via SASL.
+		var tlsOpts []protocol.TLSOption
+		if caFile := os.Getenv("SKAFKA_TLS_CLIENT_CA_FILE"); caFile != "" {
+			tlsOpts = append(tlsOpts, protocol.WithRequireClientCert(caFile))
+			slog.Info("TLS: client cert verification enabled", "ca_bundle", caFile)
+		}
+
+		tlsCfg, err := protocol.WatchingCertificate(certFile, keyFile, tlsOpts...)
 		if err != nil {
 			slog.Error("load TLS cert", "err", err)
 			os.Exit(1)
