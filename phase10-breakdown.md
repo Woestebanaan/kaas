@@ -435,7 +435,36 @@ The plan adds:
 panel, change the `expr`, adjust the title. The v3.3 panels can't
 ship until Gap #3 emits the metrics, so this is post-Gap-#3.
 
-### Gap #7: PrometheusRule (alerting) for the failure modes (P2)
+### Gap #7: PrometheusRule (alerting) for the failure modes (P2) — DONE
+
+> **Status:** shipped. `deploy/helm/skafka/templates/prometheusrule.yaml`
+> gated on `observability.alerts.enabled`. 9 alerts across 4 groups:
+>
+>   - **byteopacity**:
+>     - `SkafkaByteOpacityViolated` (critical) — codec_record_decode or
+>       codec_batch_reencode increased.
+>   - **coordination**:
+>     - `SkafkaSelfFencing` (warning) — broker rejecting writes on stale
+>       heartbeat for 2m.
+>     - `SkafkaStaleControllerWriting` (critical) — ex-controller still
+>       writing assignment.json for 5m.
+>     - `SkafkaNoCurrentController` (critical) — sum(skafka_is_controller) == 0.
+>     - `SkafkaBrokerCountMismatch` (warning) — alive > assigned for 5m.
+>   - **assignment_loop**:
+>     - `SkafkaAssignmentFileWriteFailing` (critical) — write errors for 2m.
+>     - `SkafkaAssignmentFileSizeApproachingCap` (warning) — size > 512KB for 10m.
+>     - `SkafkaCRMirrorErrorSustained` (warning) — mirror errors for 15m.
+>   - **heartbeat**:
+>     - `SkafkaHeartbeatRTTHigh` (warning) — p99 RTT above threshold for 5m.
+>
+> Thresholds are exposed in `values.yaml` under
+> `observability.alerts.thresholds`. `additionalLabels` merges into
+> every rule's labels block for Alertmanager routing (e.g.
+> `team: data-platform`). Each alert's `description` is written as
+> runbook copy — operators paged on the alert have enough context to
+> start an investigation without reading the source.
+
+### Gap #7 (original): PrometheusRule (alerting) for the failure modes (P2)
 
 The plan doesn't explicitly mandate a `PrometheusRule`, but operating
 the cluster without one means failover signals only show up in

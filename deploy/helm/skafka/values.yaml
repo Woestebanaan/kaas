@@ -118,6 +118,28 @@ observability:
     level: info        # debug|info|warn|error
     format: json       # json|text
 
+  # Prometheus Operator PrometheusRule for the load-bearing skafka alerts
+  # (byte-opacity tripwires, self-fence, stale assignments, etc.).
+  # Off by default — opt in only if Prometheus Operator is installed and
+  # routes PrometheusRule resources from this namespace.
+  alerts:
+    enabled: false
+    # Extra labels merged into every rule's labels block (useful for
+    # routing in Alertmanager — e.g. team: data-platform).
+    additionalLabels: {}
+    # Override individual alert thresholds. Each key maps to a value
+    # that's substituted into the rule expression / for clause.
+    thresholds:
+      # Heartbeat RTT p99 above this for 5m → warning.
+      heartbeatRttP99Seconds: 0.5
+      # Self-fence events in 1m above this → warning.
+      selfFencePerMinute: 1
+      # assignment.json size in bytes — warning above this, critical past 900KB.
+      assignmentFileSizeWarnBytes: 524288
+      # Stale assignments rejected in 1m above this → warning. Sustained
+      # non-zero is the signal a partitioned ex-controller is still alive.
+      staleAssignmentsPerMinute: 1
+
 listeners:
   internal:
     # Plaintext in-cluster listener. Always active; clients use headless DNS.

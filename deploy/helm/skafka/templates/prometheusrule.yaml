@@ -1,0 +1,188 @@
+{{- if and .Values.observability.metrics.enabled .Values.observability.alerts.enabled }}
+{{- /*
+Phase 10 Gap #7: PrometheusRule for skafka's load-bearing failure
+modes. Off by default — opt in via observability.alerts.enabled.
+
+Each rule's "summary" + "description" annotations are written so an
+operator hitting Alertmanager has enough context to start an
+investigation without reading the source. The byte-opacity tripwires
+are critical (architectural invariant); the rest are warnings unless
+they sustain.
+*/ -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "skafka.fullname" . }}
+  labels:
+    {{- include "skafka.labels" . | nindent 4 }}
+    {{- with .Values.observability.alerts.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: skafka.byteopacity
+      interval: 30s
+      rules:
+        - alert: SkafkaByteOpacityViolated
+          expr: increase(skafka_codec_record_decode_total[5m]) > 0 or increase(skafka_codec_batch_reencode_total[5m]) > 0
+          for: 0s
+          labels:
+            severity: critical
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "Byte-opacity invariant violated on {{`{{ $labels.broker_id }}`}}"
+            description: |
+              skafka_codec_record_decode_total or skafka_codec_batch_reencode_total
+              incremented. The v3.3 plan is explicit: the broker is a byte mover,
+              not a byte interpreter. A non-zero increment means some code path
+              decoded an individual record or re-encoded a RecordBatch — page on
+              this. Check the slog warnings around the increment for the call site.
+
+    - name: skafka.coordination
+      interval: 30s
+      rules:
+        - alert: SkafkaSelfFencing
+          expr: sum by (broker_id) (rate(skafka_self_fence_events_total[1m])) * 60 > {{ .Values.observability.alerts.thresholds.selfFencePerMinute }}
+          for: 2m
+          labels:
+            severity: warning
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "Broker {{`{{ $labels.broker_id }}`}} is self-fencing on stale heartbeats"
+            description: |
+              skafka_self_fence_events_total exceeded {{ .Values.observability.alerts.thresholds.selfFencePerMinute }}/min for 2 minutes.
+              The broker has lost connectivity to the controller; produces are
+              being rejected with NOT_LEADER_FOR_PARTITION. Check
+              skafka_heartbeat_rtt_seconds and the controller's
+              skafka_assignment_pushes_total — likely a network partition or
+              controller pod issue.
+
+        - alert: SkafkaStaleControllerWriting
+          expr: sum by (broker_id) (rate(skafka_stale_assignments_rejected_total[1m])) * 60 > {{ .Values.observability.alerts.thresholds.staleAssignmentsPerMinute }}
+          for: 5m
+          labels:
+            severity: critical
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "Stale controller still writing assignment.json (broker {{`{{ $labels.broker_id }}`}} rejecting)"
+            description: |
+              An ex-controller whose lease expired is still writing assignment.json.
+              The epoch fence is rejecting these files (correctly), but the
+              ex-controller pod should be restarted or its grpc server killed
+              to stop the noise. Check Lease holder identity vs the broker that's
+              still calling FileStore.Write.
+
+        - alert: SkafkaNoCurrentController
+          expr: sum(skafka_is_controller) == 0
+          for: 30s
+          labels:
+            severity: critical
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "No broker holds the cluster controller lease"
+            description: |
+              sum(skafka_is_controller) == 0 — the cluster has no active
+              controller. Brokers can still serve produce/fetch on existing
+              assignments, but no rebalance, topic creation, or broker
+              join/leave will be processed until election succeeds.
+              Check the kube Lease object skafka-controller and the broker
+              pods' leader election logs.
+
+        - alert: SkafkaBrokerCountMismatch
+          expr: max(skafka_broker_count_alive) - max(skafka_broker_count_assigned) > 0
+          for: 5m
+          labels:
+            severity: warning
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "Brokers alive but not in current assignment"
+            description: |
+              The controller hasn't re-balanced onto a live broker for over
+              5 minutes. Possible causes: the broker isn't streaming
+              heartbeats (check ConnectedBrokers in the controller's
+              AssignmentLoop), or the assignment loop is stuck (check
+              skafka_assignment_changes_total).
+
+    - name: skafka.assignment_loop
+      interval: 30s
+      rules:
+        - alert: SkafkaAssignmentFileWriteFailing
+          expr: rate(skafka_assignment_file_writes_total{result="error"}[5m]) > 0
+          for: 2m
+          labels:
+            severity: critical
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "AssignmentStore.Write failures on {{`{{ $labels.broker_id }}`}}"
+            description: |
+              The controller can't persist assignment.json — partition
+              rebalances and broker join/leave events will not propagate.
+              Check the shared PVC's health (df, fsync, NFS mount status)
+              and the broker pod's filesystem permissions on
+              /data/__cluster.
+
+        - alert: SkafkaAssignmentFileSizeApproachingCap
+          expr: max(skafka_assignment_file_size_bytes) > {{ .Values.observability.alerts.thresholds.assignmentFileSizeWarnBytes }}
+          for: 10m
+          labels:
+            severity: warning
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "assignment.json approaching the Kubernetes 1MB CR-status cap"
+            description: |
+              The KafkaClusterAssignments mirror CR truncates partition lists
+              when the rendered Status exceeds 1MB. With ~100 bytes/partition,
+              this fires around 5000-8000 partitions. The authoritative file
+              on the PVC is unaffected; only the kubectl-debug view truncates.
+
+        - alert: SkafkaCRMirrorErrorSustained
+          expr: rate(skafka_assignment_cr_mirror_writes_total{result="error"}[5m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "KafkaClusterAssignments CR mirror writes failing for 15m"
+            description: |
+              The CR is the kubectl-visible debug mirror — failures here
+              don't affect the data plane (the file on the PVC is the
+              source of truth) but mean kubectl get kafkaclusterassignments
+              shows stale state. Check operator RBAC (kafkaclusterassignments,
+              kafkaclusterassignments/status) and CRD installation.
+
+    - name: skafka.heartbeat
+      interval: 30s
+      rules:
+        - alert: SkafkaHeartbeatRTTHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(skafka_heartbeat_rtt_seconds_bucket[5m]))) > {{ .Values.observability.alerts.thresholds.heartbeatRttP99Seconds }}
+          for: 5m
+          labels:
+            severity: warning
+            {{- with .Values.observability.alerts.additionalLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "Heartbeat RTT p99 above {{ .Values.observability.alerts.thresholds.heartbeatRttP99Seconds }}s"
+            description: |
+              The broker→controller→broker round-trip is slow. Doesn't affect
+              data plane directly, but high RTT eats into the 3s heartbeatTimeout
+              budget — sustained values above ~1s mean self-fencing is one
+              network blip away. Check inter-pod network latency and the
+              controller pod's CPU.
+{{- end }}
