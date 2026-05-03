@@ -290,16 +290,21 @@ func runBroker(ctx context.Context) {
 	if k8sMode && dataDir != "" && k8sClient != nil && engine != nil {
 		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
 		heartbeatAddr := envOr("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094")
+		peerPort := int32(9094)
+		if p, err := strconv.Atoi(envOr("SKAFKA_PEER_HEARTBEAT_PORT", "9094")); err == nil {
+			peerPort = int32(p)
+		}
 		startClusterRuntime(ctx, clusterRuntimeConfig{
-			k8sClient:     k8sClient,
-			namespace:     namespace,
-			brokerIDStr:   brokerIDStr,
-			dataDir:       dataDir,
-			engine:        engine,
-			coordMgr:      coordMgr,
-			topicRegistry: b.Topics(),
-			brokerReg:     brokerReg,
-			heartbeatAddr: heartbeatAddr,
+			k8sClient:         k8sClient,
+			namespace:         namespace,
+			brokerIDStr:       brokerIDStr,
+			dataDir:           dataDir,
+			engine:            engine,
+			coordMgr:          coordMgr,
+			topicRegistry:     b.Topics(),
+			brokerReg:         brokerReg,
+			heartbeatAddr:     heartbeatAddr,
+			peerHeartbeatPort: peerPort,
 		})
 	}
 

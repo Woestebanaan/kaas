@@ -237,3 +237,47 @@ func TestActiveGroupsAggregatesAcrossBrokers(t *testing.T) {
 		t.Errorf("ActiveGroups() should be deduped (size 3); got %d: %v", len(got), got)
 	}
 }
+
+// TestHeartbeatClientTargetFunc verifies the dynamic target resolver path
+// used by clusterRuntime to follow the cluster controller across Lease
+// transitions. The resolver returns "" until "ready", then the bufconn
+// dialer kicks in and the broker registers normally.
+func TestHeartbeatClientTargetFunc(t *testing.T) {
+	srv := NewHeartbeatServer().WithPingInterval(50 * time.Millisecond)
+	dialOpt, stop := startServer(t, srv)
+	defer stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var ready atomic.Bool
+	cl := broker.NewHeartbeatClient("", "broker-target",
+		dialOpt,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	).WithTargetFunc(func() string {
+		if !ready.Load() {
+			return ""
+		}
+		return "passthrough://bufnet"
+	})
+
+	go func() { _ = cl.Run(ctx) }()
+
+	// While targetFunc returns "", the broker must NOT register on the server.
+	time.Sleep(200 * time.Millisecond)
+	if _, ok := srv.BrokerLastSeen("broker-target"); ok {
+		t.Fatal("broker registered while target was empty")
+	}
+
+	// Flip the resolver — the next reconnect cycle should dial successfully.
+	ready.Store(true)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := srv.BrokerLastSeen("broker-target"); ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("broker did not register after target became non-empty")
+}

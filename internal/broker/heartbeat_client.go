@@ -31,8 +31,9 @@ type CommandHandler func(*heartbeatpb.ControllerCommand)
 // received from the controller. Self-fencing reads this to decide whether
 // the controller is still alive.
 type HeartbeatClient struct {
-	target   string // "host:port"
-	brokerID string
+	target     string             // "host:port", used when targetFunc is nil
+	targetFunc func() string      // re-resolved each runOnce to follow controller changes
+	brokerID   string
 
 	dialOpts []grpc.DialOption
 
@@ -73,6 +74,27 @@ func (c *HeartbeatClient) OnCommand(h CommandHandler) {
 	c.onCommand = h
 }
 
+// WithTargetFunc replaces the static target with a resolver that's called
+// at the start of every reconnect cycle. Used to follow the controller:
+// the resolver reads ControllerWatch.CurrentHolder + BrokerRegistry to
+// produce "host:peerHeartbeatPort" for whoever currently holds the
+// cluster Lease. An empty return triggers a backoff retry rather than a
+// dial — useful when no holder is known yet (cluster startup).
+func (c *HeartbeatClient) WithTargetFunc(fn func() string) *HeartbeatClient {
+	c.targetFunc = fn
+	return c
+}
+
+// resolveTarget returns the dial target for the next reconnect cycle.
+// Honours the dynamic resolver when set; otherwise falls back to the
+// static target field.
+func (c *HeartbeatClient) resolveTarget() string {
+	if c.targetFunc != nil {
+		return c.targetFunc()
+	}
+	return c.target
+}
+
 // Run blocks until ctx is cancelled, maintaining a long-lived bidi stream
 // to the controller. On disconnect, reconnects with exponential backoff
 // (capped at 5s). Returns nil on clean shutdown.
@@ -103,7 +125,14 @@ func (c *HeartbeatClient) Run(ctx context.Context) error {
 }
 
 func (c *HeartbeatClient) runOnce(ctx context.Context) error {
-	conn, err := grpc.NewClient(c.target, c.dialOpts...)
+	target := c.resolveTarget()
+	if target == "" {
+		// No controller known yet — return so the outer Run loop's
+		// backoff timer fires; on the next attempt the resolver may
+		// have been populated by ControllerWatch.
+		return errors.New("heartbeat: no controller target yet")
+	}
+	conn, err := grpc.NewClient(target, c.dialOpts...)
 	if err != nil {
 		return fmt.Errorf("heartbeat: dial: %w", err)
 	}

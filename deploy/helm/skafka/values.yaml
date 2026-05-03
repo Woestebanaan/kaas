@@ -24,6 +24,10 @@ broker:
     kafka: 9092
     tls: 9093
     health: 8080
+    # Internal-only gRPC heartbeat between brokers and the elected
+    # cluster controller (Phase 4/5). Not exposed externally; the
+    # headless service routes this so peers can dial each other.
+    heartbeat: 9094
   resources:
     requests:
       cpu: 500m

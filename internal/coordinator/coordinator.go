@@ -81,6 +81,20 @@ func (m *Manager) getOrCreate(groupID string) *group {
 	return g
 }
 
+// LocalGroups returns the IDs of every consumer group this broker is
+// currently coordinating. The cluster controller aggregates this across
+// brokers (via BrokerStatus.active_groups in the heartbeat) into the
+// GroupSource it uses to compute assignments. Order is unspecified.
+func (m *Manager) LocalGroups() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.groups))
+	for id := range m.groups {
+		out = append(out, id)
+	}
+	return out
+}
+
 // RelinquishGroup drops in-memory state for groupID. Called by
 // GroupTakeoverDriver when the cluster controller reassigns the group
 // to another broker. Pending offset commits remain on disk for the new

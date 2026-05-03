@@ -46,6 +46,8 @@ spec:
               containerPort: {{ .Values.listeners.external.port | default .Values.broker.ports.tls }}
             - name: health
               containerPort: {{ .Values.broker.ports.health }}
+            - name: heartbeat
+              containerPort: {{ .Values.broker.ports.heartbeat }}
             {{- if .Values.observability.metrics.enabled }}
             - name: metrics
               containerPort: {{ .Values.observability.metrics.port }}
@@ -69,6 +71,10 @@ spec:
               value: "{{ .Values.broker.ports.kafka }}"
             - name: SKAFKA_HEALTH_ADDR
               value: ":{{ .Values.broker.ports.health }}"
+            - name: SKAFKA_CONTROLLER_HEARTBEAT_ADDR
+              value: "0.0.0.0:{{ .Values.broker.ports.heartbeat }}"
+            - name: SKAFKA_PEER_HEARTBEAT_PORT
+              value: "{{ .Values.broker.ports.heartbeat }}"
             {{- if .Values.auth.requireSasl }}
             - name: SKAFKA_REQUIRE_SASL
               value: "true"

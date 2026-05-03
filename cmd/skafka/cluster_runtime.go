@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"google.golang.org/grpc"
 	"k8s.io/client-go/kubernetes"
@@ -14,21 +15,23 @@ import (
 	"github.com/woestebanaan/skafka/internal/controller"
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8spkg "github.com/woestebanaan/skafka/internal/k8s"
+	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/storage"
 	"github.com/woestebanaan/skafka/pkg/heartbeatpb"
 )
 
 // clusterRuntimeConfig captures the inputs the v3 runtime needs from main.go.
 type clusterRuntimeConfig struct {
-	k8sClient      kubernetes.Interface
-	namespace      string
-	brokerIDStr    string // matches kafkaapi.ConsumerGroupAssignment.Broker, e.g. "skafka-0"
-	dataDir        string // shared PVC mount
-	engine         *storage.DiskStorageEngine
-	coordMgr       *coordinator.Manager
-	topicRegistry  *broker.TopicRegistry
-	brokerReg      *k8spkg.BrokerRegistry
-	heartbeatAddr  string // host:port the controller's heartbeat gRPC server binds to
+	k8sClient        kubernetes.Interface
+	namespace        string
+	brokerIDStr      string // matches kafkaapi.ConsumerGroupAssignment.Broker, e.g. "skafka-0"
+	dataDir          string // shared PVC mount
+	engine           *storage.DiskStorageEngine
+	coordMgr         *coordinator.Manager
+	topicRegistry    *broker.TopicRegistry
+	brokerReg        *k8spkg.BrokerRegistry
+	heartbeatAddr    string // host:port the controller's heartbeat gRPC server binds to
+	peerHeartbeatPort int32 // port to dial when reaching another broker's heartbeat server (default 9094)
 }
 
 // clusterRuntime owns the v3 distributed-coordination goroutines: the
@@ -69,9 +72,40 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 	ctrlWatch := broker.NewControllerWatch(cfg.k8sClient, cfg.namespace)
 	go func() { _ = ctrlWatch.Run(ctx) }()
 
-	// Heartbeat client deferred — see comment on clusterRuntime above.
-	coord := broker.NewCoordinator(cfg.brokerIDStr, store, ctrlWatch, nil /* heartbeat client */)
+	// Heartbeat client. The target follows the controller via
+	// ctrlWatch.CurrentHolder + brokerReg lookup: when the Lease moves
+	// to a different broker, the resolver returns the new dial target
+	// and the next reconnect cycle picks it up. Empty return → backoff.
+	peerPort := cfg.peerHeartbeatPort
+	if peerPort == 0 {
+		peerPort = 9094
+	}
+	heart := broker.NewHeartbeatClient("", cfg.brokerIDStr).WithTargetFunc(func() string {
+		holder := ctrlWatch.CurrentHolder()
+		if holder == "" {
+			return ""
+		}
+		// holder is the pod name like "skafka-N"; look up its host via
+		// the EndpointSlice-driven BrokerRegistry.
+		ord := lease.ParseOrdinalFromIdentity(holder)
+		for _, ep := range cfg.brokerReg.All() {
+			if ep.NodeID == ord {
+				return fmt.Sprintf("%s:%d", ep.Host, peerPort)
+			}
+		}
+		return ""
+	})
+	go func() { _ = heart.Run(ctx) }()
+
+	coord := broker.NewCoordinator(cfg.brokerIDStr, store, ctrlWatch, heart)
 	go func() { _ = coord.Start(ctx) }()
+
+	// Periodic upstream BrokerStatus tick: every heartbeatInterval, send
+	// the broker's current view of the cluster — last-applied
+	// assignmentVersion, partition statuses, active groups. The
+	// controller aggregates these into ActiveGroups (Phase 5 GroupSource)
+	// and broker liveness.
+	go runHeartbeatPump(ctx, heart, coord, cfg.coordMgr)
 
 	// TakeoverDriver moves the storage engine through TakeOver/Relinquish
 	// when partition assignments change. GroupTakeoverDriver does the same
@@ -177,8 +211,8 @@ func (a *brokerSourceAdapter) AliveBrokers() []string {
 	for _, ep := range a.reg.All() {
 		id := fmt.Sprintf("skafka-%d", ep.NodeID)
 		// If we have ANY heartbeat data, prefer the intersection.
-		// Otherwise (cold-start, no heartbeat client wired yet) trust
-		// the registry alone.
+		// Otherwise (cold-start, no heartbeat yet) trust the registry
+		// alone so partitions still get distributed.
 		if len(connected) > 0 {
 			if _, ok := connected[id]; !ok {
 				continue
@@ -187,4 +221,42 @@ func (a *brokerSourceAdapter) AliveBrokers() []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// runHeartbeatPump sends a periodic upstream BrokerStatus to the
+// controller every heartbeatInterval. The status carries:
+//   - lastSeenAssignmentVersion (so the controller can detect brokers
+//     that missed an ASSIGNMENT_CHANGED push and re-deliver),
+//   - active_groups (Phase 5 GroupSource — the controller takes the
+//     union across brokers and treats it as the live group catalog).
+//
+// First Send is fire-and-forget; if the heartbeat stream isn't connected
+// yet (target empty, dial failing, etc.) the helper backs off silently.
+// This is the periodic "I'm alive" signal — controller-side recvLoop
+// updates lastSeen on each message.
+func runHeartbeatPump(
+	ctx context.Context,
+	heart *broker.HeartbeatClient,
+	coord *broker.Coordinator,
+	mgr *coordinator.Manager,
+) {
+	tick := time.NewTicker(1 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			status := &heartbeatpb.BrokerStatus{
+				TimestampMs: time.Now().UnixMilli(),
+			}
+			if snap := coord.Snapshot(); snap != nil {
+				status.LastSeenAssignmentVersion = uint64(snap.AssignmentVersion)
+			}
+			if mgr != nil {
+				status.ActiveGroups = mgr.LocalGroups()
+			}
+			_ = heart.Send(status)
+		}
+	}
 }
