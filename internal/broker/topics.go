@@ -47,3 +47,16 @@ func (r *TopicRegistry) All() []handlers.TopicEntry {
 	}
 	return out
 }
+
+// AllNames returns the topic names sorted lexically — used by the
+// AssignmentLoop GroupSource adapter and other diagnostics that need
+// stable ordering. Allocates a fresh slice; caller may mutate.
+func (r *TopicRegistry) AllNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.topics))
+	for name := range r.topics {
+		out = append(out, name)
+	}
+	return out
+}

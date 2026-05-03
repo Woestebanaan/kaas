@@ -87,6 +87,13 @@ func (b *Broker) AddTopic(name string, partitions int32) {
 	b.topics.Add(name, partitions)
 }
 
+// Topics returns the underlying topic registry. Phase 4+5: cmd/skafka
+// wraps this as the controller's TopicSource so the AssignmentLoop sees
+// every topic the broker knows about.
+func (b *Broker) Topics() *TopicRegistry {
+	return b.topics
+}
+
 // RemoveTopic deregisters a topic from the local registry. Storage and lease
 // cleanup happen elsewhere (lease TTL expiry; operator finalizer for dirs).
 func (b *Broker) RemoveTopic(name string) {

@@ -282,6 +282,27 @@ func runBroker(ctx context.Context) {
 		return srv.Addr() != ""
 	})
 
+	// v3 cluster runtime: BrokerCoordinator + ControllerWatch +
+	// AssignmentStore (always-on), plus Election + AssignmentLoop +
+	// heartbeat gRPC server (when this broker holds the Lease).
+	// Boots only in k8s mode with a real data dir — the single-broker
+	// dev path runs without it.
+	if k8sMode && dataDir != "" && k8sClient != nil && engine != nil {
+		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
+		heartbeatAddr := envOr("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094")
+		startClusterRuntime(ctx, clusterRuntimeConfig{
+			k8sClient:     k8sClient,
+			namespace:     namespace,
+			brokerIDStr:   brokerIDStr,
+			dataDir:       dataDir,
+			engine:        engine,
+			coordMgr:      coordMgr,
+			topicRegistry: b.Topics(),
+			brokerReg:     brokerReg,
+			heartbeatAddr: heartbeatAddr,
+		})
+	}
+
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
 	<-ctx.Done()
 	slog.Info("shutting down")
