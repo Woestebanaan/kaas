@@ -76,7 +76,7 @@ func Bootstrap(ctx context.Context, service string) (*Providers, error) {
 	p.shutdowns = append(p.shutdowns, p.MeterProvider.Shutdown)
 
 	// Build central metric registry so the rest of the codebase has one source.
-	metrics, err := newMetrics(p.MeterProvider.Meter(service))
+	metrics, err := NewMetrics(p.MeterProvider.Meter(service))
 	if err != nil {
 		return nil, fmt.Errorf("observability: metrics: %w", err)
 	}

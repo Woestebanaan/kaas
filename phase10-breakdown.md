@@ -298,7 +298,31 @@ labels widens cardinality, so each one is a judgment call:
 site. Document the "broker label drops to resource attribute" choice
 so future contributors don't re-add it.
 
-### Gap #5: Add the byte-opacity tripwires (P1)
+### Gap #5: Add the byte-opacity tripwires (P1) — DONE
+
+> **Status:** shipped.
+>
+> - `CodecRecordDecode` + `CodecBatchReencode` Int64Counters live on
+>   the `Metrics` struct.
+> - `observability.BumpCodecRecordDecode(ctx, site)` /
+>   `BumpCodecBatchReencode(ctx, site)` are the canonical entry
+>   points — every increment also logs a `slog.Warn` so production
+>   logs surface the violation before alerts fire. As of v1, no
+>   skafka code path calls them.
+> - `tests/byte-opacity/tripwire_test.go` replaces the placeholder
+>   with two real tests:
+>   - `TestStorageRoundTripIsByteIdentical` — multi-codec
+>     (snappy/gzip/lz4/zstd/none) Append→Read round-trip; asserts
+>     byte-identical AND tripwires at zero.
+>   - `TestBumpCodecRecordDecodeIncrements` — meta-test that the
+>     tripwire counters DO fire when Bump* is called, so the alert
+>     wiring is real.
+>
+> Also exposed `observability.NewMetrics` (renamed from `newMetrics`)
+> so the test can install a ManualReader-backed registry without
+> needing the full Bootstrap path.
+
+### Gap #5 (original): Add the byte-opacity tripwires (P1)
 
 Plan lines 1153–1157 are explicit: these counters MUST stay at zero
 in steady state; if they ever increment, code is violating the

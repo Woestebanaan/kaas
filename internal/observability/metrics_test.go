@@ -16,9 +16,9 @@ func newTestMetrics(t *testing.T) (*Metrics, *sdkmetric.ManualReader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	m, err := newMetrics(mp.Meter("skafka-test"))
+	m, err := NewMetrics(mp.Meter("skafka-test"))
 	if err != nil {
-		t.Fatalf("newMetrics: %v", err)
+		t.Fatalf("NewMetrics: %v", err)
 	}
 	return m, reader
 }

@@ -30,7 +30,7 @@ func SetGlobal(m *Metrics) {
 // noopMetricsSingleton is built once against a no-op meter. All counters and
 // histograms on it discard input; safe to use without bootstrap.
 var noopMetricsSingleton = func() *Metrics {
-	m, err := newMetrics(noopmetric.NewMeterProvider().Meter("noop"))
+	m, err := NewMetrics(noopmetric.NewMeterProvider().Meter("noop"))
 	if err != nil {
 		panic("observability: noop metrics: " + err.Error())
 	}
@@ -81,6 +81,16 @@ type Metrics struct {
 	AssignmentPolls          metric.Int64Counter     // every fsutil mtime poll iteration (label: change_detected=true|false)
 	StaleAssignmentsRejected metric.Int64Counter     // assignment.json files dropped because controllerEpoch is behind
 
+	// Byte-opacity tripwires. The plan's load-bearing invariant is
+	// "the broker is a byte mover, not a byte interpreter": no code
+	// path should decode individual records or re-encode a
+	// RecordBatch. These counters MUST stay at zero in steady state.
+	// They have NO designated emit site — every increment is a bug.
+	// BumpCodecRecordDecode / BumpCodecBatchReencode exist for future
+	// violators to record themselves under so the alert fires loudly.
+	CodecRecordDecode  metric.Int64Counter
+	CodecBatchReencode metric.Int64Counter
+
 	// Consumer groups.
 	GroupRebalances metric.Int64Counter
 
@@ -103,9 +113,9 @@ type Metrics struct {
 	Connections metric.Int64Counter
 }
 
-// newMetrics creates all instruments on the given meter. Errors from individual
+// NewMetrics creates all instruments on the given meter. Errors from individual
 // instrument creation are joined and returned.
-func newMetrics(m metric.Meter) (*Metrics, error) {
+func NewMetrics(m metric.Meter) (*Metrics, error) {
 	mx := &Metrics{}
 	var err error
 
@@ -198,6 +208,14 @@ func newMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.StaleAssignmentsRejected, err = m.Int64Counter("skafka.stale.assignments.rejected",
 		metric.WithDescription("assignment.json reads dropped because controllerEpoch was behind")); err != nil {
+		return nil, err
+	}
+	if mx.CodecRecordDecode, err = m.Int64Counter("skafka.codec.record.decode",
+		metric.WithDescription("Tripwire: code path decoded an individual record. MUST stay at zero — alert if non-zero")); err != nil {
+		return nil, err
+	}
+	if mx.CodecBatchReencode, err = m.Int64Counter("skafka.codec.batch.reencode",
+		metric.WithDescription("Tripwire: code path re-encoded a RecordBatch. MUST stay at zero — alert if non-zero")); err != nil {
 		return nil, err
 	}
 	if mx.GroupRebalances, err = m.Int64Counter("skafka.group.rebalances",
