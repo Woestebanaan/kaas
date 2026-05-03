@@ -14,6 +14,7 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol"
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	"github.com/woestebanaan/skafka/internal/storage"
+	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
 func sprintfOrdinal(pattern string, ordinal int32) string {
@@ -36,7 +37,12 @@ type Broker struct {
 	auth    auth.AuthEngine
 	topics  *TopicRegistry
 	brokers handlers.BrokerSource
-	coord   *coordinator.Manager // nil in local-dev mode
+	coord   *coordinator.Manager // nil in local-dev mode (consumer-group manager)
+	// brokerCoord is the v3 BrokerCoordinator that produces partition
+	// ownership decisions on the produce hot path. UseCoordinator wires
+	// it; RegisterHandlers picks it up via WithCoordinator on the
+	// ProduceHandler. nil → legacy lease+lock fallback.
+	brokerCoord kafkaapi.BrokerCoordinator
 }
 
 func New(
@@ -94,6 +100,15 @@ func (b *Broker) Topics() *TopicRegistry {
 	return b.topics
 }
 
+// UseCoordinator wires the v3 BrokerCoordinator into the broker. Must be
+// called BEFORE RegisterHandlers so the ProduceHandler can pick it up
+// via WithCoordinator at registration time. Calling this with nil leaves
+// the broker on the legacy lease+lock fallback (the v2.6 path) — that's
+// the single-broker dev mode default.
+func (b *Broker) UseCoordinator(c kafkaapi.BrokerCoordinator) {
+	b.brokerCoord = c
+}
+
 // RemoveTopic deregisters a topic from the local registry. Storage and lease
 // cleanup happen elsewhere (lease TTL expiry; operator finalizer for dirs).
 func (b *Broker) RemoveTopic(name string) {
@@ -102,7 +117,11 @@ func (b *Broker) RemoveTopic(name string) {
 
 // RegisterHandlers wires all API key handlers into d and returns d.
 func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
-	d.Register(0, 3, 9, handlers.NewProduceHandler(b.store, b.leases, b.auth))
+	produceHandler := handlers.NewProduceHandler(b.store, b.leases, b.auth)
+	if b.brokerCoord != nil {
+		produceHandler = produceHandler.WithCoordinator(b.brokerCoord)
+	}
+	d.Register(0, 3, 9, produceHandler)
 	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.auth))
 	d.Register(2, 1, 7, handlers.NewListOffsetsHandler(b.store, b.leases))
 	// Metadata: cap at v10. v11 removed IncludeClusterAuthorizedOperations,

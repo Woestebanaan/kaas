@@ -252,6 +252,33 @@ func runBroker(ctx context.Context) {
 		startTopicWatcher(ctx, namespace, b, engine, leaseManager, brokerReg, brokerID, k8sTopics)
 	}
 
+	// v3 cluster runtime must boot BEFORE RegisterHandlers so the
+	// BrokerCoordinator is available for the produce handler to pick up
+	// via WithCoordinator. In single-broker dev mode (no k8sClient or
+	// no dataDir) the runtime isn't started and the broker stays on
+	// the legacy lease+lock fallback path.
+	if k8sMode && dataDir != "" && k8sClient != nil && engine != nil {
+		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
+		heartbeatAddr := envOr("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094")
+		peerPort := int32(9094)
+		if p, err := strconv.Atoi(envOr("SKAFKA_PEER_HEARTBEAT_PORT", "9094")); err == nil {
+			peerPort = int32(p)
+		}
+		rt := startClusterRuntime(ctx, clusterRuntimeConfig{
+			k8sClient:         k8sClient,
+			namespace:         namespace,
+			brokerIDStr:       brokerIDStr,
+			dataDir:           dataDir,
+			engine:            engine,
+			coordMgr:          coordMgr,
+			topicRegistry:     b.Topics(),
+			brokerReg:         brokerReg,
+			heartbeatAddr:     heartbeatAddr,
+			peerHeartbeatPort: peerPort,
+		})
+		b.UseCoordinator(rt.coord)
+	}
+
 	d := protocol.NewDispatcher()
 	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
 	b.RegisterHandlers(d)
@@ -281,32 +308,6 @@ func runBroker(ctx context.Context) {
 	startHealthServer(ctx, healthAddr, func() bool {
 		return srv.Addr() != ""
 	})
-
-	// v3 cluster runtime: BrokerCoordinator + ControllerWatch +
-	// AssignmentStore (always-on), plus Election + AssignmentLoop +
-	// heartbeat gRPC server (when this broker holds the Lease).
-	// Boots only in k8s mode with a real data dir — the single-broker
-	// dev path runs without it.
-	if k8sMode && dataDir != "" && k8sClient != nil && engine != nil {
-		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
-		heartbeatAddr := envOr("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094")
-		peerPort := int32(9094)
-		if p, err := strconv.Atoi(envOr("SKAFKA_PEER_HEARTBEAT_PORT", "9094")); err == nil {
-			peerPort = int32(p)
-		}
-		startClusterRuntime(ctx, clusterRuntimeConfig{
-			k8sClient:         k8sClient,
-			namespace:         namespace,
-			brokerIDStr:       brokerIDStr,
-			dataDir:           dataDir,
-			engine:            engine,
-			coordMgr:          coordMgr,
-			topicRegistry:     b.Topics(),
-			brokerReg:         brokerReg,
-			heartbeatAddr:     heartbeatAddr,
-			peerHeartbeatPort: peerPort,
-		})
-	}
 
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
 	<-ctx.Done()
