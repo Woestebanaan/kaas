@@ -56,7 +56,10 @@ type Metrics struct {
 	ReadLatency  metric.Float64Histogram
 	FsyncLatency metric.Float64Histogram
 
-	// Leadership.
+	// Cluster controller leadership. v3 uses a single cluster-controller
+	// Lease (not per-partition), so these count "this broker became /
+	// stopped being controller" events. Sum across brokers ≈ total
+	// controller failovers in the cluster.
 	LeaseAcquired metric.Int64Counter
 	LeaseLost     metric.Int64Counter
 
@@ -64,9 +67,14 @@ type Metrics struct {
 	GroupRebalances metric.Int64Counter
 
 	// Auth.
-	AuthSuccess   metric.Int64Counter
-	AuthFailure   metric.Int64Counter
-	ACLDeny       metric.Int64Counter
+	AuthSuccess metric.Int64Counter
+	AuthFailure metric.Int64Counter
+	ACLDeny     metric.Int64Counter
+
+	// QuotaThrottle is declared for forward compatibility with the
+	// per-principal quota engine planned post-v1; no v1 code path
+	// emits it. Dashboards and alerts should treat it as flat-zero
+	// and not be surprised when it stays that way.
 	QuotaThrottle metric.Int64Counter
 
 	// TLS / external access.
@@ -124,11 +132,11 @@ func newMetrics(m metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 	if mx.LeaseAcquired, err = m.Int64Counter("skafka.lease.acquired",
-		metric.WithDescription("Partition leader leases acquired by this broker")); err != nil {
+		metric.WithDescription("Times this broker won the controller lease")); err != nil {
 		return nil, err
 	}
 	if mx.LeaseLost, err = m.Int64Counter("skafka.lease.lost",
-		metric.WithDescription("Partition leader leases lost by this broker")); err != nil {
+		metric.WithDescription("Times this broker lost the controller lease")); err != nil {
 		return nil, err
 	}
 	if mx.GroupRebalances, err = m.Int64Counter("skafka.group.rebalances",

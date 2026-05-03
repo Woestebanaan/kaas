@@ -293,36 +293,49 @@ func TestExternalListenerPerBrokerHostnames(t *testing.T) {
 	}
 	defer cl.Close()
 
-	results := cl.ProduceSync(ctx,
-		&kgo.Record{Topic: extTopic, Partition: 0, Value: []byte("p0-on-broker0")},
-		&kgo.Record{Topic: extTopic, Partition: 1, Value: []byte("p1-on-broker1")},
-	)
-	for i, r := range results {
-		if r.Err != nil {
-			t.Fatalf("ProduceSync[%d]: %v", i, r.Err)
+	// Direct Metadata request via the bootstrap broker. This is the
+	// authoritative check: the response over the TLS listener MUST
+	// carry the per-broker external hostnames in brokers[].host. If
+	// it did, franz-go can route partition-N produce to broker-N
+	// regardless of when its internal connection pool warms up; if
+	// it didn't, no amount of retries would fix it.
+	mdReq := kmsg.NewPtrMetadataRequest()
+	mdReq.Topics = []kmsg.MetadataRequestTopic{{Topic: kmsg.StringPtr(extTopic)}}
+	mdResp, err := cl.Broker(0).Request(ctx, mdReq)
+	if err != nil {
+		t.Fatalf("metadata request: %v", err)
+	}
+	md := mdResp.(*kmsg.MetadataResponse)
+
+	if len(md.Brokers) != 2 {
+		t.Fatalf("metadata: %d brokers, want 2 — Self()-only response is the v2.6 bug Metadata.go is supposed to fix", len(md.Brokers))
+	}
+	gotHosts := map[int32]string{}
+	for _, b := range md.Brokers {
+		gotHosts[b.NodeID] = b.Host
+	}
+	wantHosts := map[int32]string{0: extBroker0Hostname, 1: extBroker1Hostname}
+	for nodeID, want := range wantHosts {
+		if got := gotHosts[nodeID]; got != want {
+			t.Errorf("metadata broker[%d].host=%q, want %q — addressFor(ListenerExternal) is not picking up ExternalHost",
+				nodeID, got, want)
 		}
 	}
 
-	// Per-broker hostname routing assertion: franz-go MUST have dialed
-	// broker-1.localhost at some point. If Metadata had returned 127.0.0.1
-	// for broker-1, franz-go would have reused the bootstrap dial and
-	// this list would only contain extBroker0Hostname.
-	calls := tracker.calls()
-	sawBroker0, sawBroker1 := false, false
-	for _, h := range calls {
-		if h == extBroker0Hostname {
-			sawBroker0 = true
-		}
-		if h == extBroker1Hostname {
-			sawBroker1 = true
-		}
+	// Cross-broker produce: exercises franz-go's per-leader connection
+	// pool by sending one record per partition. With the Metadata
+	// assertion above already passing, this is mostly a smoke test
+	// that the per-broker hostnames also work for actual data
+	// (custom dialer + cert + listener stack).
+	if r := cl.ProduceSync(ctx,
+		&kgo.Record{Topic: extTopic, Partition: 0, Value: []byte("p0-on-broker0")},
+	); r[0].Err != nil {
+		t.Fatalf("ProduceSync p0: %v", r[0].Err)
 	}
-	if !sawBroker0 {
-		t.Errorf("expected dial to %s (bootstrap), got %v", extBroker0Hostname, calls)
-	}
-	if !sawBroker1 {
-		t.Errorf("expected dial to %s (partition-1 leader); got %v — Metadata likely advertised 127.0.0.1 instead of the per-broker hostname",
-			extBroker1Hostname, calls)
+	if r := cl.ProduceSync(ctx,
+		&kgo.Record{Topic: extTopic, Partition: 1, Value: []byte("p1-on-broker1")},
+	); r[0].Err != nil {
+		t.Fatalf("ProduceSync p1: %v", r[0].Err)
 	}
 }
 

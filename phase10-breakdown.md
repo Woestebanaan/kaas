@@ -154,7 +154,29 @@ which today knows nothing about the v3 runtime.
 **Test**: `internal/observability/health_test.go` — table-driven
 test that passes a stub source and asserts the JSON shape.
 
-### Gap #2: Emit declared-but-unused metrics (P0)
+### Gap #2: Emit declared-but-unused metrics (P0) — DONE
+
+> **Status:** shipped.
+>
+> - `FsyncLatency` → `internal/storage/engine.go` `flushLocked` now
+>   records the log+index Sync + manifest write duration.
+> - `LeaseAcquired` / `LeaseLost` → repurposed for the v3
+>   cluster-controller lease (description updated; v2.6 partition-Lease
+>   semantics are gone). Emitted from
+>   `cmd/skafka/cluster_runtime.go`'s onAcquired / onLost callbacks.
+>   Sum across brokers ≈ total controller failovers.
+> - `GroupRebalances` → `internal/coordinator/group.go`
+>   `completeRebalance` increments with `consumer_group` label.
+> - `QuotaThrottle` → kept as a forward-compat placeholder; struct
+>   comment now spells out that there is no v1 emitter and that
+>   dashboards should treat it as flat-zero.
+>
+> Also fixed a flake in the Phase 9 `TestExternalListenerPerBrokerHostnames`
+> (the dial-trace assertion raced franz-go's connection-pool warm-up).
+> Replaced the trace check with a direct Metadata request +
+> per-broker `host` assertion — deterministic and stronger.
+
+### Gap #2 (original): Emit declared-but-unused metrics (P0)
 
 Five existing metrics are declared in the `Metrics` struct but never
 emitted. Either delete them or wire them — declared-unused is worse

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/woestebanaan/skafka/internal/lease"
+	"github.com/woestebanaan/skafka/internal/observability"
 )
 
 var (
@@ -133,6 +134,7 @@ func (ps *partitionState) flushLocked() error {
 	if ps.active == nil {
 		return nil
 	}
+	start := time.Now()
 	if ps.active.logFile != nil {
 		if err := ps.active.logFile.Sync(); err != nil {
 			return fmt.Errorf("storage: fsync log: %w", err)
@@ -146,6 +148,10 @@ func (ps *partitionState) flushLocked() error {
 	if err := ps.persistManifestLocked(); err != nil {
 		return err
 	}
+	// FsyncLatency covers both log + index Sync + manifest write — the
+	// user-observable durability cost. Caller (Append) already accounts
+	// for total request time via WriteLatency in produce.go.
+	observability.Global().FsyncLatency.Record(context.Background(), time.Since(start).Seconds())
 	ps.pendingFlushRecords = 0
 	return nil
 }

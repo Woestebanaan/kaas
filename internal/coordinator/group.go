@@ -1,11 +1,16 @@
 package coordinator
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
@@ -163,6 +168,9 @@ func (g *group) completeRebalance() {
 	g.state = stateCompletingRebalance
 	g.generationID++
 	g.protocolName = selectProtocol(g.members, g.joinWaiters)
+
+	observability.Global().GroupRebalances.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("consumer_group", g.id)))
 
 	if len(g.joinWaiters) > 0 {
 		g.leaderID = g.joinWaiters[0].memberID
