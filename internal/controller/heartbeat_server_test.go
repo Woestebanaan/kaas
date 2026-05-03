@@ -165,3 +165,75 @@ func TestPushAssignmentChangedIsBestEffort(t *testing.T) {
 	}
 	// The point of the test is that the calls didn't block forever — we got here.
 }
+
+// TestActiveGroupsAggregatesAcrossBrokers verifies the server's
+// ActiveGroups() returns the union of every connected broker's
+// BrokerStatus.active_groups. This is the GroupSource the AssignmentLoop
+// will consume in Phase 5 step 3.
+func TestActiveGroupsAggregatesAcrossBrokers(t *testing.T) {
+	srv := NewHeartbeatServer().WithPingInterval(time.Hour) // disable PING noise
+	dialOpt, stop := startServer(t, srv)
+	defer stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Two brokers; broker-A coordinates {payments, billing}, broker-B
+	// coordinates {billing, telemetry}. Union should be the 3-element
+	// set; "billing" appears once (deduped).
+	cases := []struct {
+		brokerID string
+		groups   []string
+	}{
+		{"broker-A", []string{"payments", "billing"}},
+		{"broker-B", []string{"billing", "telemetry"}},
+	}
+
+	for _, c := range cases {
+		cl := broker.NewHeartbeatClient("passthrough://bufnet", c.brokerID,
+			dialOpt, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		go func() { _ = cl.Run(ctx) }()
+
+		// Wait for registration so Send has somewhere to go.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, ok := srv.BrokerLastSeen(c.brokerID); ok {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if _, ok := srv.BrokerLastSeen(c.brokerID); !ok {
+			t.Fatalf("%s did not register", c.brokerID)
+		}
+
+		if err := cl.Send(&heartbeatpb.BrokerStatus{
+			TimestampMs:  time.Now().UnixMilli(),
+			ActiveGroups: c.groups,
+		}); err != nil {
+			t.Fatalf("Send for %s: %v", c.brokerID, err)
+		}
+	}
+
+	// Wait for both broker-status messages to be processed.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(srv.ActiveGroups()) >= 3 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	got := srv.ActiveGroups()
+	gotSet := map[string]bool{}
+	for _, g := range got {
+		gotSet[g] = true
+	}
+	for _, want := range []string{"payments", "billing", "telemetry"} {
+		if !gotSet[want] {
+			t.Errorf("ActiveGroups() missing %q; got %v", want, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("ActiveGroups() should be deduped (size 3); got %d: %v", len(got), got)
+	}
+}

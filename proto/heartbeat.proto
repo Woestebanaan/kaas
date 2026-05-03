@@ -26,6 +26,13 @@ message BrokerStatus {
   uint64 last_seen_assignment_version = 3;
 
   repeated PartitionStatus partitions = 4;
+
+  // Consumer groups this broker is currently coordinating (group state
+  // loaded, members joined, offsets cached). Phase 5: the controller
+  // aggregates active_groups across all brokers to build the GroupSource
+  // for assignment computation. Brokers populate this from the Manager's
+  // in-memory group set.
+  repeated string active_groups = 5;
 }
 
 message PartitionStatus {

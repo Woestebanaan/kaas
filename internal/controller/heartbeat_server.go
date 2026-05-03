@@ -39,9 +39,10 @@ type HeartbeatServer struct {
 
 // clientState tracks one connected broker's stream + last-seen status.
 type clientState struct {
-	send       chan *heartbeatpb.ControllerCommand
-	lastSeen   time.Time
-	lastVersion uint64
+	send         chan *heartbeatpb.ControllerCommand
+	lastSeen     time.Time
+	lastVersion  uint64
+	activeGroups []string // most recently reported in BrokerStatus.active_groups
 }
 
 // NewHeartbeatServer constructs a server. pingInterval (default 1s) is how
@@ -74,9 +75,10 @@ func (s *HeartbeatServer) Stream(stream heartbeatpb.ControllerHeartbeat_StreamSe
 	}
 
 	state := &clientState{
-		send:        make(chan *heartbeatpb.ControllerCommand, 4),
-		lastSeen:    time.Now(),
-		lastVersion: first.GetLastSeenAssignmentVersion(),
+		send:         make(chan *heartbeatpb.ControllerCommand, 4),
+		lastSeen:     time.Now(),
+		lastVersion:  first.GetLastSeenAssignmentVersion(),
+		activeGroups: append([]string(nil), first.GetActiveGroups()...),
 	}
 	s.mu.Lock()
 	// If a prior stream from the same broker is still registered, replace it
@@ -122,9 +124,9 @@ func (s *HeartbeatServer) recvLoop(
 		if cur, ok := s.clients[brokerID]; ok && cur == state {
 			cur.lastSeen = time.Now()
 			cur.lastVersion = msg.GetLastSeenAssignmentVersion()
+			cur.activeGroups = append(cur.activeGroups[:0], msg.GetActiveGroups()...)
 		}
 		s.mu.Unlock()
-		_ = msg // partition status processing happens in step 8 (assignment loop)
 	}
 }
 
@@ -225,6 +227,29 @@ func (s *HeartbeatServer) ConnectedBrokers() []string {
 	out := make([]string, 0, len(s.clients))
 	for id := range s.clients {
 		out = append(out, id)
+	}
+	return out
+}
+
+// ActiveGroups returns the union of consumer group IDs every connected
+// broker reports in its BrokerStatus.active_groups. The Phase 5
+// AssignmentLoop consumes this as its GroupSource: any group at least
+// one broker is currently coordinating shows up in the next assignment.
+//
+// The result is deduplicated; order is unspecified. Returns an empty
+// slice when no broker reports any active group.
+func (s *HeartbeatServer) ActiveGroups() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[string]struct{})
+	for _, c := range s.clients {
+		for _, g := range c.activeGroups {
+			seen[g] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for g := range seen {
+		out = append(out, g)
 	}
 	return out
 }

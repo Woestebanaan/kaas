@@ -136,8 +136,14 @@ type BrokerStatus struct {
 	// detect brokers that missed an ASSIGNMENT_CHANGED push and re-deliver.
 	LastSeenAssignmentVersion uint64             `protobuf:"varint,3,opt,name=last_seen_assignment_version,json=lastSeenAssignmentVersion,proto3" json:"last_seen_assignment_version,omitempty"`
 	Partitions                []*PartitionStatus `protobuf:"bytes,4,rep,name=partitions,proto3" json:"partitions,omitempty"`
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
+	// Consumer groups this broker is currently coordinating (group state
+	// loaded, members joined, offsets cached). Phase 5: the controller
+	// aggregates active_groups across all brokers to build the GroupSource
+	// for assignment computation. Brokers populate this from the Manager's
+	// in-memory group set.
+	ActiveGroups  []string `protobuf:"bytes,5,rep,name=active_groups,json=activeGroups,proto3" json:"active_groups,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *BrokerStatus) Reset() {
@@ -194,6 +200,13 @@ func (x *BrokerStatus) GetLastSeenAssignmentVersion() uint64 {
 func (x *BrokerStatus) GetPartitions() []*PartitionStatus {
 	if x != nil {
 		return x.Partitions
+	}
+	return nil
+}
+
+func (x *BrokerStatus) GetActiveGroups() []string {
+	if x != nil {
+		return x.ActiveGroups
 	}
 	return nil
 }
@@ -340,14 +353,15 @@ var File_heartbeat_proto protoreflect.FileDescriptor
 
 const file_heartbeat_proto_rawDesc = "" +
 	"\n" +
-	"\x0fheartbeat.proto\x12\x13skafka.heartbeat.v1\"\xd5\x01\n" +
+	"\x0fheartbeat.proto\x12\x13skafka.heartbeat.v1\"\xfa\x01\n" +
 	"\fBrokerStatus\x12\x1b\n" +
 	"\tbroker_id\x18\x01 \x01(\tR\bbrokerId\x12!\n" +
 	"\ftimestamp_ms\x18\x02 \x01(\x03R\vtimestampMs\x12?\n" +
 	"\x1clast_seen_assignment_version\x18\x03 \x01(\x04R\x19lastSeenAssignmentVersion\x12D\n" +
 	"\n" +
 	"partitions\x18\x04 \x03(\v2$.skafka.heartbeat.v1.PartitionStatusR\n" +
-	"partitions\"\xf3\x01\n" +
+	"partitions\x12#\n" +
+	"\ractive_groups\x18\x05 \x03(\tR\factiveGroups\"\xf3\x01\n" +
 	"\x0fPartitionStatus\x12\x14\n" +
 	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1c\n" +
 	"\tpartition\x18\x02 \x01(\x05R\tpartition\x12\x14\n" +
