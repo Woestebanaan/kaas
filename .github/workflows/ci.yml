@@ -45,11 +45,11 @@ jobs:
         run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
 
       - name: Check CRD manifests are up to date
+        # Phase 8: also verifies the Helm chart's crds/ stays in sync.
+        # Drift here means a fresh `helm install` would skip the new CRD.
         run: |
-          "$(go env GOPATH)/bin/controller-gen" \
-            crd paths="./operator/api/..." \
-            output:crd:artifacts:config=deploy/crds
-          git diff --exit-code -- deploy/crds/
+          PATH="$(go env GOPATH)/bin:$PATH" make manifests
+          git diff --exit-code -- deploy/crds/ deploy/helm/skafka/crds/
 
   docker:
     runs-on: arc-runner-set

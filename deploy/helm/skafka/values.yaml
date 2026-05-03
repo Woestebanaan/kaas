@@ -35,15 +35,6 @@ broker:
     limits:
       cpu: 2
       memory: 4Gi
-  config:
-    segmentBytes: 1073741824    # 1 GB
-    retentionHours: 168          # 7 days
-    numPartitions: 3
-    rebalanceTimeoutMs: 60000
-  lease:
-    durationSeconds: 15
-    renewDeadlineSeconds: 10
-    retryPeriodSeconds: 2
   readinessGate:
     # Adds the skafka.io/PartitionsReady readinessGate to broker pods. Required
     # whenever the broker's ReadinessUpdater is expected to gate Endpoints
