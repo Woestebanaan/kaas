@@ -22,29 +22,55 @@ type segmentMeta struct {
 }
 
 // activeSegment holds the open file handles for the current write segment.
+//
+// logPath / indexPath snapshot the on-disk paths used at creation time so
+// the engine can list them in segmentMeta during a roll without having to
+// re-derive the format (which depends on whether this segment was created
+// before or after the v3.3 epoch-prefix migration).
 type activeSegment struct {
-	baseOffset          int64
-	logFile             *os.File
-	indexFile           *os.File
-	logSize             int64
-	lastOffset          int64
-	lastIndexedLogPos   int64 // log position at which the last index entry was written
+	baseOffset        int64
+	epoch             int64
+	logFile           *os.File
+	indexFile         *os.File
+	logPath           string
+	indexPath         string
+	logSize           int64
+	lastOffset        int64
+	lastIndexedLogPos int64 // log position at which the last index entry was written
 }
 
 // segmentLogPath returns the .log file path for a segment.
-func segmentLogPath(dir string, baseOffset int64) string {
+//
+// Format: {epoch:08x}-{base_offset:020d}.log
+//
+// Epoch-prefixed naming is the v3 single-writer-by-construction story:
+// a partitioned ex-leader and a fresh leader at a higher epoch never
+// target the same path, so concurrent writes during takeover are
+// physically harmless. Legacy unprefixed segments (`{base_offset:020d}.log`)
+// are still parsed by listSegments for migration; createSegment always
+// emits the new format.
+func segmentLogPath(dir string, baseOffset int64, epoch int64) string {
+	return filepath.Join(dir, fmt.Sprintf("%08x-%020d.log", uint32(epoch), baseOffset))
+}
+
+// segmentIndexPath returns the .index file path matching segmentLogPath.
+func segmentIndexPath(dir string, baseOffset int64, epoch int64) string {
+	return filepath.Join(dir, fmt.Sprintf("%08x-%020d.index", uint32(epoch), baseOffset))
+}
+
+// legacySegmentLogPath returns the pre-Phase-4 unprefixed format, kept
+// for the migration test fixtures. listSegments parses files matching
+// either layout.
+func legacySegmentLogPath(dir string, baseOffset int64) string {
 	return filepath.Join(dir, fmt.Sprintf("%020d.log", baseOffset))
 }
 
-// segmentIndexPath returns the .index file path for a segment.
-func segmentIndexPath(dir string, baseOffset int64) string {
-	return filepath.Join(dir, fmt.Sprintf("%020d.index", baseOffset))
-}
-
-// createSegment creates a fresh segment starting at baseOffset.
-func createSegment(dir string, baseOffset int64) (*activeSegment, error) {
-	logPath := segmentLogPath(dir, baseOffset)
-	indexPath := segmentIndexPath(dir, baseOffset)
+// createSegment creates a fresh segment starting at baseOffset under the
+// given leader epoch. The epoch shows up in the filename so a stale
+// ex-leader's writes can never collide with a new leader's segment file.
+func createSegment(dir string, baseOffset, epoch int64) (*activeSegment, error) {
+	logPath := segmentLogPath(dir, baseOffset, epoch)
+	indexPath := segmentIndexPath(dir, baseOffset, epoch)
 
 	lf, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -57,8 +83,11 @@ func createSegment(dir string, baseOffset int64) (*activeSegment, error) {
 	}
 	return &activeSegment{
 		baseOffset: baseOffset,
+		epoch:      epoch,
 		logFile:    lf,
 		indexFile:  idxf,
+		logPath:    logPath,
+		indexPath:  indexPath,
 	}, nil
 }
 
@@ -92,6 +121,8 @@ func openActiveSegmentFromDisk(meta segmentMeta) (*activeSegment, int64, error) 
 		baseOffset:        meta.baseOffset,
 		logFile:           lf,
 		indexFile:         idxf,
+		logPath:           meta.logPath,
+		indexPath:         meta.indexPath,
 		logSize:           logSize,
 		lastIndexedLogPos: idxSize / 8 * 4096, // rough estimate; exact value not critical for appends
 	}
@@ -166,15 +197,16 @@ func (s *activeSegment) appendBatch(raw []byte, indexIntervalBytes int64) error 
 	return nil
 }
 
-// roll closes the current segment and returns a new segment starting at newBaseOffset.
-func (s *activeSegment) roll(dir string, newBaseOffset int64) (*activeSegment, error) {
+// roll closes the current segment and returns a new segment starting at
+// newBaseOffset under the given leader epoch.
+func (s *activeSegment) roll(dir string, newBaseOffset, epoch int64) (*activeSegment, error) {
 	if err := s.logFile.Sync(); err != nil {
 		return nil, err
 	}
 	if err := s.indexFile.Sync(); err != nil {
 		return nil, err
 	}
-	return createSegment(dir, newBaseOffset)
+	return createSegment(dir, newBaseOffset, epoch)
 }
 
 // close flushes and closes the segment files.
@@ -275,6 +307,14 @@ func searchIndex(indexPath string, segmentBaseOffset int64, targetOffset int64) 
 }
 
 // listSegments returns all segments in dir sorted by base offset, as segmentMeta.
+//
+// Two filename formats are accepted:
+//
+//   - {epoch:08x}-{base_offset:020d}.log — v3.3 epoch-prefixed (canonical).
+//   - {base_offset:020d}.log              — legacy v2.6, kept for migration.
+//
+// segmentMeta.indexPath is derived from the .log path's stem so the dual-
+// format parsing only happens once.
 func listSegments(dir string) ([]segmentMeta, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -289,9 +329,13 @@ func listSegments(dir string) ([]segmentMeta, error) {
 		if !strings.HasSuffix(e.Name(), ".log") {
 			continue
 		}
+		if strings.HasSuffix(e.Name(), ".log.sealed") {
+			// Sealed-by-takeover marker; not a readable segment.
+			continue
+		}
 		stem := strings.TrimSuffix(e.Name(), ".log")
-		baseOffset, err := strconv.ParseInt(stem, 10, 64)
-		if err != nil {
+		baseOffset, ok := parseSegmentStem(stem)
+		if !ok {
 			continue
 		}
 		segs = append(segs, segmentMeta{
@@ -302,6 +346,29 @@ func listSegments(dir string) ([]segmentMeta, error) {
 	}
 	sort.Slice(segs, func(i, j int) bool { return segs[i].baseOffset < segs[j].baseOffset })
 	return segs, nil
+}
+
+// parseSegmentStem extracts the baseOffset from either a legacy stem
+// (`00000000000000000123`) or an epoch-prefixed stem (`00000005-00000000000000000123`).
+func parseSegmentStem(stem string) (int64, bool) {
+	if dash := strings.IndexByte(stem, '-'); dash >= 0 {
+		// Epoch-prefixed format. Validate the epoch is a hex number; we
+		// don't currently use it on the read path (epoch is stored in
+		// the manifest), but a non-hex prefix means this isn't our file.
+		if _, err := strconv.ParseUint(stem[:dash], 16, 32); err != nil {
+			return 0, false
+		}
+		bo, err := strconv.ParseInt(stem[dash+1:], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return bo, true
+	}
+	bo, err := strconv.ParseInt(stem, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return bo, true
 }
 
 // segmentMaxTimestamp scans a .log file and returns the highest maxTimestamp seen.

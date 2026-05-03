@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -211,8 +212,14 @@ func TestRecoveryAfterPartialWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Corrupt the log by truncating it mid-way through b1.
-	logPath := dir + "/topic/0/00000000000000000000.log"
+	// Corrupt the log by truncating it mid-way through b1. The file name
+	// includes a v3.3 epoch prefix (`{epoch:08x}-{base_offset:020d}.log`)
+	// so glob for it rather than hardcoding the legacy name.
+	matches, err := filepath.Glob(dir + "/topic/0/*.log")
+	if err != nil || len(matches) == 0 {
+		t.Fatalf("locate log file: %v matches=%v", err, matches)
+	}
+	logPath := matches[0]
 	f, err := os.OpenFile(logPath, os.O_RDWR, 0644)
 	if err != nil {
 		t.Fatalf("open log for truncation: %v", err)

@@ -237,13 +237,22 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		return fmt.Errorf("storage: read manifest %s: %w", dir, manifestErr)
 	}
 
+	// Epoch for fresh segments comes from the manifest if present (post-
+	// takeover restart) or 0 if this is a brand-new partition that has
+	// never gone through TakeOver. The first TakeOver after Start will
+	// write a higher epoch into the manifest and roll a fresh segment.
+	var seedEpoch int64
+	if manifest != nil {
+		seedEpoch = manifest.Epoch
+	}
+
 	var ps *partitionState
 	if len(segs) == 0 {
-		seg, err := createSegment(dir, 0)
+		seg, err := createSegment(dir, 0, seedEpoch)
 		if err != nil {
 			return err
 		}
-		ps = &partitionState{dir: dir, active: seg}
+		ps = &partitionState{dir: dir, active: seg, epoch: seedEpoch}
 	} else {
 		last := segs[len(segs)-1]
 		active, scannedHWM, err := openActiveSegmentFromDisk(last)
@@ -391,15 +400,15 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 func (e *DiskStorageEngine) rollSegment(ps *partitionState) error {
 	closed := segmentMeta{
 		baseOffset: ps.active.baseOffset,
-		logPath:    segmentLogPath(ps.dir, ps.active.baseOffset),
-		indexPath:  segmentIndexPath(ps.dir, ps.active.baseOffset),
+		logPath:    ps.active.logPath,
+		indexPath:  ps.active.indexPath,
 	}
 	// Capture maxTimestamp from the last batch in the segment.
 	if ts, err := segmentMaxTimestamp(closed.logPath); err == nil {
 		closed.maxTimestamp = ts
 	}
 
-	newSeg, err := ps.active.roll(ps.dir, ps.highWater)
+	newSeg, err := ps.active.roll(ps.dir, ps.highWater, ps.epoch)
 	if err != nil {
 		return err
 	}
@@ -434,8 +443,8 @@ func (e *DiskStorageEngine) Read(_ context.Context, topic string, partition int3
 	all = append(all, ps.segments...)
 	all = append(all, segmentMeta{
 		baseOffset: ps.active.baseOffset,
-		logPath:    segmentLogPath(ps.dir, ps.active.baseOffset),
-		indexPath:  segmentIndexPath(ps.dir, ps.active.baseOffset),
+		logPath:    ps.active.logPath,
+		indexPath:  ps.active.indexPath,
 	})
 
 	// Find the first segment that could contain startOffset.
