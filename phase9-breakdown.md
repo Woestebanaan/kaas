@@ -213,7 +213,18 @@ one test exercising both the Metadata path and the retry path), or add
 retry automatically; the test just has to assert that the Produce
 eventually succeeds *and* that broker A logged a NOT_LEADER response.
 
-### Gap #4: Cert hot-reload during live handshake (P2, low value)
+### Gap #4: Cert hot-reload during live handshake (P2, low value) — DONE
+
+> **Status:** shipped as `tests/kafka-compat/cert_rotation_test.go`.
+> Generates a second server cert via `tlscerts.Bundle.IssueServerCert`
+> (signed by the same CA, different serial), atomic-renames the new
+> cert + key onto disk, sleeps past the watcher's 200ms debounce, and
+> dials a fresh TLS handshake. Asserts the peer cert serial flipped
+> from cert-A to cert-B without restarting the listener — closes the
+> MVP-checklist row "cert-manager Certificate rotates without pod
+> restart" without needing cert-manager itself.
+
+### Gap #4 (original): Cert hot-reload during live handshake (P2, low value)
 
 `TestWatchingCertificateReload` confirms the in-process `tls.Config`
 reload but does not exercise the full path: rotate the on-disk cert,

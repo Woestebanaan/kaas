@@ -29,6 +29,29 @@ type Bundle struct {
 	ClientCert []byte // PEM-encoded client cert with CN
 	ClientKey  []byte // PEM-encoded client private key
 	ClientCN   string // the CN baked into the client cert
+
+	// Retained so the bundle can re-issue additional server certs
+	// against the same trust anchor — see IssueServerCert.
+	caCertParsed *x509.Certificate
+	caKey        *ecdsa.PrivateKey
+}
+
+// IssueServerCert generates a new server cert + key pair signed by the
+// bundle's CA, with the given SANs. Used for cert-rotation tests: the
+// initial cert comes from NewBundle*; this method produces a follow-up
+// cert with a different serial number but the same trust chain so a
+// client trusting bundle.CAPool accepts both.
+func (b *Bundle) IssueServerCert(serverSANs []string) (certPEM, keyPEM []byte, err error) {
+	var dnsNames []string
+	var ipSANs []net.IP
+	for _, s := range serverSANs {
+		if ip := net.ParseIP(s); ip != nil {
+			ipSANs = append(ipSANs, ip)
+		} else {
+			dnsNames = append(dnsNames, s)
+		}
+	}
+	return signLeaf(b.caCertParsed, b.caKey, "skafka-server", dnsNames, ipSANs, x509.ExtKeyUsageServerAuth)
 }
 
 // NewBundle builds a fresh cert bundle. serverHost is the SAN entry on
@@ -94,13 +117,15 @@ func NewBundleWithSANs(serverSANs []string, clientCN string) (*Bundle, error) {
 	}
 
 	return &Bundle{
-		CACert:     caPEM,
-		CAPool:     pool,
-		ServerCert: serverPEM,
-		ServerKey:  serverKeyPEM,
-		ClientCert: clientPEM,
-		ClientKey:  clientKeyPEM,
-		ClientCN:   clientCN,
+		CACert:       caPEM,
+		CAPool:       pool,
+		ServerCert:   serverPEM,
+		ServerKey:    serverKeyPEM,
+		ClientCert:   clientPEM,
+		ClientKey:    clientKeyPEM,
+		ClientCN:     clientCN,
+		caCertParsed: caCert,
+		caKey:        caKey,
 	}, nil
 }
 
