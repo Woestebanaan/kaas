@@ -80,6 +80,12 @@ spec:
               value: "0.0.0.0:{{ .Values.broker.ports.heartbeat }}"
             - name: SKAFKA_PEER_HEARTBEAT_PORT
               value: "{{ .Values.broker.ports.heartbeat }}"
+            - name: SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS
+              value: "{{ .Values.broker.controllerLease.durationSeconds }}"
+            - name: SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS
+              value: "{{ .Values.broker.controllerLease.renewDeadlineSeconds }}"
+            - name: SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS
+              value: "{{ .Values.broker.controllerLease.retryPeriodSeconds }}"
             {{- if .Values.auth.requireSasl }}
             - name: SKAFKA_REQUIRE_SASL
               value: "true"

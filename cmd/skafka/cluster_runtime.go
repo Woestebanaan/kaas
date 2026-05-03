@@ -38,6 +38,12 @@ type clusterRuntimeConfig struct {
 	// need a working controller-runtime client.
 	crClient    sigs_client.Client
 	clusterName string
+	// Controller Lease tuning. Zero values fall back to controller.New
+	// defaults (15s/10s/2s); production overrides come from the Helm
+	// chart's broker.controllerLease.* block via env vars in main.go.
+	leaseDuration time.Duration
+	renewDeadline time.Duration
+	retryPeriod   time.Duration
 }
 
 // clusterRuntime owns the v3 distributed-coordination goroutines: the
@@ -170,6 +176,9 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 	}
 
 	election := controller.New(cfg.k8sClient, cfg.namespace, cfg.brokerIDStr, onAcquired, onLost)
+	if cfg.leaseDuration > 0 && cfg.renewDeadline > 0 && cfg.retryPeriod > 0 {
+		election = election.WithTimings(cfg.leaseDuration, cfg.renewDeadline, cfg.retryPeriod)
+	}
 	go func() { _ = election.Run(ctx) }()
 
 	slog.Info("v3 cluster runtime started",

@@ -284,6 +284,13 @@ func runBroker(ctx context.Context) {
 		// Metadata responses) so old deploys without the new env var still work.
 		clusterName := envOr("SKAFKA_CLUSTER_NAME", clusterID)
 
+		// Controller Lease tuning. Zero (or unparseable) → cluster_runtime
+		// falls back to controller.New defaults (15s/10s/2s). The Helm
+		// chart's broker.controllerLease.* block is the production source.
+		leaseDuration := envSecondsOr("SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS", 0)
+		renewDeadline := envSecondsOr("SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS", 0)
+		retryPeriod := envSecondsOr("SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS", 0)
+
 		rt := startClusterRuntime(ctx, clusterRuntimeConfig{
 			k8sClient:         k8sClient,
 			namespace:         namespace,
@@ -297,6 +304,9 @@ func runBroker(ctx context.Context) {
 			peerHeartbeatPort: peerPort,
 			crClient:          crClient,
 			clusterName:       clusterName,
+			leaseDuration:     leaseDuration,
+			renewDeadline:     renewDeadline,
+			retryPeriod:       retryPeriod,
 		})
 		b.UseCoordinator(rt.coord)
 	}
@@ -571,4 +581,20 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envSecondsOr reads an env var as an integer count of seconds and
+// returns it as a time.Duration. Empty / unparseable returns def. Used
+// for the Phase 8 controllerLease.* knobs; passing 0 to the cluster
+// runtime falls back to controller.New's hardcoded defaults.
+func envSecondsOr(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return time.Duration(n) * time.Second
 }

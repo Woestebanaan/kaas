@@ -42,6 +42,15 @@ broker:
     # tests where you just want the pod Ready as soon as the listener is up.
     enabled: true
 
+  # v3 cluster-controller Lease (Phase 4). One Lease per cluster; the
+  # winning broker runs the AssignmentLoop + heartbeat gRPC server.
+  # Tighter durations = faster failover, more etcd writes; defaults match
+  # client-go's recommended renew/retry ratios.
+  controllerLease:
+    durationSeconds: 15      # SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS
+    renewDeadlineSeconds: 10 # SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS
+    retryPeriodSeconds: 2    # SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS
+
 storage:
   className: ceph-filesystem    # or nfs-csi
   size: 500Gi

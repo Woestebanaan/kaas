@@ -42,3 +42,29 @@ To create a topic:
   spec:
     partitions: 3
   EOF
+
+To inspect cluster state (Phase 6 mirror, refreshed within ~1s of every
+assignment change):
+  kubectl get kafkaclusterassignments {{ include "skafka.fullname" . }} -n {{ .Release.Namespace }} -o yaml
+
+Storage requirements
+  ReadWriteMany volume with NFSv4-class semantics:
+    same-directory rename atomicity, fsync durability, close-to-open consistency.
+  Recommended NFS mount options on the StorageClass (not the PVC):
+    nconnect=4-8   parallel TCP connections; faster fsync
+    acregmax=1     sub-second freshness on assignment.json polling
+  Tier 1 RWX providers: csi-driver-nfs, AWS EFS, Azure Files Premium NFS,
+  Azure NetApp Files, GCP Filestore, Longhorn-NFS, Rook-Ceph CephFS.
+
+Failover characteristics
+  Graceful broker shutdown        ~150-400ms producer recovery
+  Hard broker kill (SIGKILL)      ~4-5s recovery (CRC-truncate boundary)
+  Hard controller failure         <15s assignment refresh (Lease + push + poll)
+  Storage backend total loss      fatal — RF=1; restore from backup
+
+Tunables (override via --set)
+  broker.replicaCount                            {{ .Values.broker.replicaCount }} (capacity, not RF)
+  broker.controllerLease.durationSeconds         {{ .Values.broker.controllerLease.durationSeconds }} (lower = faster failover, more etcd writes)
+  broker.controllerLease.renewDeadlineSeconds    {{ .Values.broker.controllerLease.renewDeadlineSeconds }}
+  broker.controllerLease.retryPeriodSeconds      {{ .Values.broker.controllerLease.retryPeriodSeconds }}
+  podDisruptionBudget.maxUnavailable             {{ .Values.podDisruptionBudget.maxUnavailable }} (Kafka min-ISR analogue)
