@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
@@ -163,10 +164,14 @@ func (l *AssignmentLoop) Start(ctx context.Context, epoch int64) error {
 		l.mu.Unlock()
 	}
 
-	// Initial recompute on Start.
+	// Initial recompute on Start. Time the first write end-to-end so
+	// ControllerFailoverDuration captures the "won the lease → live"
+	// gap; subsequent writes don't carry failover semantics.
+	failoverStart := time.Now()
 	_ = l.recomputeAndWrite(ctx, kafkaapi.AssignmentChange{
 		Reason: kafkaapi.AssignmentReasonBrokerJoined, // most generic "we're starting up"
 	})
+	observability.Global().ControllerFailoverDuration.Record(ctx, time.Since(failoverStart).Seconds())
 
 	for {
 		select {
@@ -244,12 +249,15 @@ func (l *AssignmentLoop) recomputeAndWrite(ctx context.Context, _ kafkaapi.Assig
 	l.current = a
 	l.mu.Unlock()
 
+	observability.Global().AssignmentChanges.Add(ctx, 1)
+
 	if err := l.store.Write(ctx, a); err != nil {
 		return err
 	}
 
 	if l.heart != nil {
 		l.heart.PushAssignmentChanged(uint64(version))
+		observability.Global().AssignmentPushes.Add(ctx, 1)
 	}
 	l.mirror.Mirror(ctx, a)
 	return nil

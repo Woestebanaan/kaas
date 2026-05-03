@@ -6,11 +6,14 @@ import (
 	"log/slog"
 	"sort"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
@@ -81,6 +84,10 @@ func (m *K8sMirror) Mirror(ctx context.Context, a *kafkaapi.Assignment) {
 	if a == nil {
 		return
 	}
+	mx := observability.Global()
+	resultLabel := func(s string) metric.MeasurementOption {
+		return metric.WithAttributes(attribute.String("result", s))
+	}
 
 	key := types.NamespacedName{Namespace: m.namespace, Name: m.clusterName}
 	var cr v1alpha1.KafkaClusterAssignments
@@ -88,10 +95,12 @@ func (m *K8sMirror) Mirror(ctx context.Context, a *kafkaapi.Assignment) {
 		if apierrors.IsNotFound(err) {
 			slog.Debug("crmirror: assignments CR not found; operator should create it",
 				"namespace", m.namespace, "name", m.clusterName)
+			mx.CRMirrorWrites.Add(ctx, 1, resultLabel("not_found"))
 			return
 		}
 		slog.Warn("crmirror: get failed",
 			"namespace", m.namespace, "name", m.clusterName, "err", err)
+		mx.CRMirrorWrites.Add(ctx, 1, resultLabel("error"))
 		return
 	}
 
@@ -109,8 +118,10 @@ func (m *K8sMirror) Mirror(ctx context.Context, a *kafkaapi.Assignment) {
 			"controllerEpoch", a.ControllerEpoch,
 			"assignmentVersion", a.AssignmentVersion,
 			"err", err)
+		mx.CRMirrorWrites.Add(ctx, 1, resultLabel("error"))
 		return
 	}
+	mx.CRMirrorWrites.Add(ctx, 1, resultLabel("ok"))
 }
 
 // buildStatus is the no-truncation path used when the assignment fits

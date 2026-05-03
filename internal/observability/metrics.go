@@ -56,12 +56,23 @@ type Metrics struct {
 	ReadLatency  metric.Float64Histogram
 	FsyncLatency metric.Float64Histogram
 
-	// Cluster controller leadership. v3 uses a single cluster-controller
-	// Lease (not per-partition), so these count "this broker became /
-	// stopped being controller" events. Sum across brokers ≈ total
-	// controller failovers in the cluster.
-	LeaseAcquired metric.Int64Counter
-	LeaseLost     metric.Int64Counter
+	// Cluster controller leadership. ControllerFailovers fires once per
+	// "this broker won the controller lease" event — broker_id is the
+	// OTel resource attribute, so summing across the fleet gives total
+	// failover count, while the per-broker decomposition tells you who
+	// wins repeatedly. ControllerFailoverDuration is a histogram of
+	// "won the lease → first AssignmentLoop write" — close to the
+	// data-plane downtime during a failover, though not exact (the
+	// previous controller's lease-lost event isn't visible from here).
+	ControllerFailovers        metric.Int64Counter
+	ControllerFailoverDuration metric.Float64Histogram
+
+	// Assignment loop (controller-side).
+	AssignmentChanges          metric.Int64Counter   // recomputeAndWrite calls
+	AssignmentFileWrites       metric.Int64Counter   // FileStore.Write attempts (label: result=ok|error)
+	AssignmentFileWriteLatency metric.Float64Histogram
+	AssignmentPushes           metric.Int64Counter   // PushAssignmentChanged broadcasts
+	CRMirrorWrites             metric.Int64Counter   // K8sMirror.Mirror attempts (label: result=ok|error)
 
 	// Consumer groups.
 	GroupRebalances metric.Int64Counter
@@ -131,12 +142,34 @@ func newMetrics(m metric.Meter) (*Metrics, error) {
 		metric.WithUnit("s")); err != nil {
 		return nil, err
 	}
-	if mx.LeaseAcquired, err = m.Int64Counter("skafka.lease.acquired",
-		metric.WithDescription("Times this broker won the controller lease")); err != nil {
+	if mx.ControllerFailovers, err = m.Int64Counter("skafka.controller.failovers",
+		metric.WithDescription("Times this broker won the cluster controller lease")); err != nil {
 		return nil, err
 	}
-	if mx.LeaseLost, err = m.Int64Counter("skafka.lease.lost",
-		metric.WithDescription("Times this broker lost the controller lease")); err != nil {
+	if mx.ControllerFailoverDuration, err = m.Float64Histogram("skafka.controller.failover.duration",
+		metric.WithDescription("Seconds from winning the lease to the first AssignmentLoop write"),
+		metric.WithUnit("s")); err != nil {
+		return nil, err
+	}
+	if mx.AssignmentChanges, err = m.Int64Counter("skafka.assignment.changes",
+		metric.WithDescription("AssignmentLoop recompute+write iterations")); err != nil {
+		return nil, err
+	}
+	if mx.AssignmentFileWrites, err = m.Int64Counter("skafka.assignment.file.writes",
+		metric.WithDescription("AssignmentStore.Write attempts (result=ok|error)")); err != nil {
+		return nil, err
+	}
+	if mx.AssignmentFileWriteLatency, err = m.Float64Histogram("skafka.assignment.file.write.latency",
+		metric.WithDescription("AssignmentStore.Write tmp+rename duration"),
+		metric.WithUnit("s")); err != nil {
+		return nil, err
+	}
+	if mx.AssignmentPushes, err = m.Int64Counter("skafka.assignment.pushes",
+		metric.WithDescription("ASSIGNMENT_CHANGED broadcasts via heartbeat server")); err != nil {
+		return nil, err
+	}
+	if mx.CRMirrorWrites, err = m.Int64Counter("skafka.assignment.cr.mirror.writes",
+		metric.WithDescription("KafkaClusterAssignments CR Status update attempts (result=ok|error)")); err != nil {
 		return nil, err
 	}
 	if mx.GroupRebalances, err = m.Int64Counter("skafka.group.rebalances",

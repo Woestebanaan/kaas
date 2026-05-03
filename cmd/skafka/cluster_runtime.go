@@ -138,7 +138,7 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 	// until the leader context is cancelled (loss of lease or process exit).
 	onAcquired := func(leaderCtx context.Context, epoch int64) {
 		slog.Info("controller acquired lease", "broker", cfg.brokerIDStr, "epoch", epoch)
-		observability.Global().LeaseAcquired.Add(leaderCtx, 1)
+		observability.Global().ControllerFailovers.Add(leaderCtx, 1)
 
 		heartSrv := controller.NewHeartbeatServer()
 		grpcSrv := grpc.NewServer()
@@ -178,7 +178,6 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 	}
 	onLost := func() {
 		slog.Info("controller lost lease", "broker", cfg.brokerIDStr)
-		observability.Global().LeaseLost.Add(context.Background(), 1)
 	}
 
 	election := controller.New(cfg.k8sClient, cfg.namespace, cfg.brokerIDStr, onAcquired, onLost)

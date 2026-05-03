@@ -99,12 +99,12 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Lease events",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+      "title": "Controller failovers (1m)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum(increase(skafka_lease_acquired_total[1m]))", "legendFormat": "acquired"},
-        {"expr": "sum(increase(skafka_lease_lost_total[1m]))", "legendFormat": "lost"}
+        {"expr": "sum(increase(skafka_controller_failovers_total[1m]))", "legendFormat": "cluster"},
+        {"expr": "sum by (broker_id) (increase(skafka_controller_failovers_total[1m]))", "legendFormat": "{{broker_id}}"}
       ]
     }
   ],

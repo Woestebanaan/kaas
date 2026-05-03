@@ -23,6 +23,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/woestebanaan/skafka/internal/observability"
+
 	"github.com/woestebanaan/skafka/internal/fsutil"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
@@ -118,7 +123,22 @@ func (s *FileStore) CleanupOrphanTmp() {
 // Caller is responsible for setting Assignment.ControllerEpoch (the writer's
 // leaseTransitions value) and AssignmentVersion (controller-local monotonic).
 // Callers also typically set GeneratedAt and Controller.
-func (s *FileStore) Write(_ context.Context, a *kafkaapi.Assignment) error {
+func (s *FileStore) Write(ctx context.Context, a *kafkaapi.Assignment) error {
+	start := time.Now()
+	mx := observability.Global()
+
+	err := s.writeImpl(a)
+
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	mx.AssignmentFileWrites.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+	mx.AssignmentFileWriteLatency.Record(ctx, time.Since(start).Seconds())
+	return err
+}
+
+func (s *FileStore) writeImpl(a *kafkaapi.Assignment) error {
 	if a == nil {
 		return errors.New("assignment: nil Assignment")
 	}

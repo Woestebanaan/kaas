@@ -199,7 +199,31 @@ the right call (one event per failover, not per partition).
 **Test**: spot-check via `internal/observability/metrics_test.go`
 that each instrument records ≥1 sample under a synthetic harness.
 
-### Gap #3: Add the v3.3 coordination metrics (P0)
+### Gap #3a: Controller-side counters — DONE
+
+> **Status:** shipped. Added 7 instruments and wired each at its
+> existing call site:
+>
+> - `ControllerFailovers` (renamed from LeaseAcquired) — at
+>   onAcquired in cluster_runtime. LeaseLost dropped (no plan
+>   equivalent; redundant with the failover counter).
+> - `ControllerFailoverDuration` — histogram around the first
+>   recompute+write inside AssignmentLoop.Start. Approximates
+>   data-plane downtime (won-lease → first-write).
+> - `AssignmentChanges` — per recomputeAndWrite call.
+> - `AssignmentFileWrites{result}` + `AssignmentFileWriteLatency` —
+>   wrapped FileStore.Write so timing covers the full
+>   marshal+open+write+sync+rename sequence; result label tags
+>   ok|error.
+> - `AssignmentPushes` — per heart.PushAssignmentChanged broadcast.
+> - `CRMirrorWrites{result}` — at K8sMirror.Mirror exit; labels
+>   distinguish ok / error / not_found (operator hasn't created
+>   the CR yet — non-fatal but worth a counter).
+>
+> Updated the Grafana "Lease events" panel to "Controller failovers
+> (1m)" with both fleet and per-broker series.
+
+### Gap #3 (original): Add the v3.3 coordination metrics (P0)
 
 The biggest hole. The plan lists ~15 metrics specific to the v3
 runtime — assignment_version, heartbeat_rtt, self_fence, takeover,
