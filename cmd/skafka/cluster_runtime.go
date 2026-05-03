@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"time"
 
 	"google.golang.org/grpc"
@@ -66,6 +68,11 @@ type clusterRuntime struct {
 	ctrlWatch *broker.ControllerWatch
 	heart     *broker.HeartbeatClient
 	brokerID  string
+	// dataDir + brokerReg + engine are kept for the gauge source — none
+	// are owned by the runtime, just borrowed pointers.
+	dataDir   string
+	brokerReg *k8spkg.BrokerRegistry
+	engine    *storage.DiskStorageEngine
 }
 
 // startClusterRuntime boots every v3 goroutine and returns a handle that
@@ -197,6 +204,9 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 		ctrlWatch: ctrlWatch,
 		heart:     heart,
 		brokerID:  cfg.brokerIDStr,
+		dataDir:   cfg.dataDir,
+		brokerReg: cfg.brokerReg,
+		engine:    cfg.engine,
 	}
 }
 
@@ -302,6 +312,107 @@ func (s *healthRuntimeState) PartitionsAssigned() int {
 // instrumentation in TakeoverDriver. Until then, the broker reports
 // 0 here, which is correct in steady state.
 func (s *healthRuntimeState) PartitionsRecovering() int { return 0 }
+
+// runtimeGaugeSource adapts clusterRuntime to observability.GaugeSource
+// so the Phase 10 ObservableGauges (is_controller, assignment_version,
+// per-partition leader/epoch/HWM, broker counts, file size) sample from
+// the live runtime on every Prometheus scrape.
+type runtimeGaugeSource struct{ rt *clusterRuntime }
+
+func (g *runtimeGaugeSource) IsController() int64 {
+	if g.rt == nil || g.rt.ctrlWatch == nil {
+		return 0
+	}
+	if g.rt.ctrlWatch.CurrentHolder() == g.rt.brokerID {
+		return 1
+	}
+	return 0
+}
+
+func (g *runtimeGaugeSource) AssignmentVersion() int64 {
+	if g.rt == nil || g.rt.coord == nil {
+		return 0
+	}
+	snap := g.rt.coord.Snapshot()
+	if snap == nil {
+		return 0
+	}
+	return snap.AssignmentVersion
+}
+
+func (g *runtimeGaugeSource) BrokerCountAlive() int64 {
+	if g.rt == nil || g.rt.brokerReg == nil {
+		return 0
+	}
+	return int64(len(g.rt.brokerReg.All()))
+}
+
+func (g *runtimeGaugeSource) BrokerCountAssigned() int64 {
+	if g.rt == nil || g.rt.coord == nil {
+		return 0
+	}
+	snap := g.rt.coord.Snapshot()
+	if snap == nil {
+		return 0
+	}
+	seen := map[string]struct{}{}
+	for _, p := range snap.Partitions {
+		seen[p.Broker] = struct{}{}
+	}
+	return int64(len(seen))
+}
+
+func (g *runtimeGaugeSource) AssignmentFileSizeBytes() int64 {
+	if g.rt == nil || g.rt.dataDir == "" {
+		return 0
+	}
+	path := filepath.Join(g.rt.dataDir, "__cluster", "assignment.json")
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+func (g *runtimeGaugeSource) Partitions() []observability.PartitionGauge {
+	if g.rt == nil || g.rt.coord == nil {
+		return nil
+	}
+	snap := g.rt.coord.Snapshot()
+	if snap == nil {
+		return nil
+	}
+	out := make([]observability.PartitionGauge, 0, len(snap.Partitions))
+	for _, p := range snap.Partitions {
+		row := observability.PartitionGauge{
+			Topic:     p.Topic,
+			Partition: p.Partition,
+			LeaderID:  parsedOrdinal(p.Broker),
+			Epoch:     int64(p.Epoch),
+		}
+		// HighWatermark only meaningful on the broker that leads the
+		// partition; reading from the storage engine on a non-leader
+		// would either fail or return a stale value.
+		if g.rt.engine != nil && p.Broker == g.rt.brokerID {
+			if hwm, err := g.rt.engine.HighWatermark(p.Topic, p.Partition); err == nil {
+				row.HighWatermark = hwm
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// parsedOrdinal extracts the trailing integer from a "skafka-N"
+// identifier. Returns -1 on a malformed value so the gauge clearly
+// flags the bug rather than silently mapping to broker 0.
+func parsedOrdinal(id string) int64 {
+	ord := lease.ParseOrdinalFromIdentity(id)
+	if ord < 0 {
+		return -1
+	}
+	return int64(ord)
+}
 
 // topicSourceAdapter wraps *broker.TopicRegistry as controller.TopicSource.
 // Lives in cmd/skafka rather than internal/broker because internal/controller's

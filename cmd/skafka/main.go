@@ -310,6 +310,10 @@ func runBroker(ctx context.Context) {
 			retryPeriod:       retryPeriod,
 		})
 		b.UseCoordinator(rt.coord)
+		// Phase 10 Gap #3c: feed runtime state to the ObservableGauge
+		// callback registered by observability.Bootstrap. Until this
+		// runs, gauges report zero.
+		observability.SetGaugeSource(&runtimeGaugeSource{rt: rt})
 	}
 
 	d := protocol.NewDispatcher()

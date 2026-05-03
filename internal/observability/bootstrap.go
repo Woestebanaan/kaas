@@ -83,6 +83,14 @@ func Bootstrap(ctx context.Context, service string) (*Providers, error) {
 	p.Metrics = metrics
 	SetGlobal(metrics)
 
+	// Phase 10 Gap #3c: register the v3 runtime ObservableGauges. Until
+	// SetGaugeSource is called by the runtime owner (cmd/skafka after
+	// the cluster runtime is up), the callback returns zero-valued
+	// samples so dashboards see present-but-flat instead of missing.
+	if err := installRuntimeGauges(p.MeterProvider.Meter(service)); err != nil {
+		return nil, fmt.Errorf("observability: install gauges: %w", err)
+	}
+
 	// --- Tracer provider (OTLP only if endpoint is set) ---
 	var spanProcessor sdktrace.SpanProcessor
 	if endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {

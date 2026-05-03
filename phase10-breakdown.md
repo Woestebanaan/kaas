@@ -219,6 +219,38 @@ that each instrument records ≥1 sample under a synthetic harness.
 > - `StaleAssignmentsRejected` — incremented in the epoch-fence
 >   path inside applyIfNew when `a.ControllerEpoch < leaseEpoch`.
 
+### Gap #3c: ObservableGauges via callback registry — DONE
+
+> **Status:** shipped. Eight gauges installed on the meter at
+> `Bootstrap` time, with a single shared callback that pulls all
+> values from a `GaugeSource` interface implemented by cmd/skafka:
+>
+> Cluster-level (no labels):
+> - `skafka.is.controller`        — 0/1; sum across fleet ≈ 1
+> - `skafka.assignment.version`   — most recent applied
+> - `skafka.broker.count.alive`   — live brokers from the registry
+> - `skafka.broker.count.assigned`— distinct brokers in assignment.json
+> - `skafka.assignment.file.size` — bytes; early-warning for the 1MB CR-status truncation cap
+>
+> Per-partition (labels: topic, partition):
+> - `skafka.partition.leader`         — broker ordinal
+> - `skafka.partition.epoch`          — leadership epoch
+> - `skafka.partition.high.watermark` — only meaningful on the leader broker
+>
+> Design choice: gauges are installed in observability.Bootstrap, not
+> by the runtime owner. Keeps the lifecycle simple (gauges always
+> exist; callback returns zero-valued samples until SetGaugeSource
+> is called by cmd/skafka after the cluster runtime is up). Two
+> unit tests cover the no-source-installed and populated-source paths.
+>
+> Follow-ups deferred to keep this commit focused:
+> - `skafka.segment.count{topic, partition}` — needs a SegmentCount
+>   method on DiskStorageEngine; left for a small follow-up.
+> - HighWatermark is reported as 0 on non-leader brokers (engine
+>   doesn't track HWM for partitions it doesn't lead). Acceptable —
+>   a Prometheus `max by (topic, partition)` query gives the
+>   leader-only view.
+
 ### Gap #3a: Controller-side counters — DONE
 
 > **Status:** shipped. Added 7 instruments and wired each at its
