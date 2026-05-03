@@ -61,21 +61,21 @@ done
 ## StorageClass guidance
 
 skafka stores all partition data on a single shared PVC. The StorageClass must
-support `ReadWriteMany` AND the broker's partition lock mechanism.
+support `ReadWriteMany` and provide NFSv4-class semantics: atomic same-directory
+rename, fsync durability, and close-to-open consistency.
 
-| StorageClass | Lock backend | Safe? | Notes |
-|---|---|---|---|
-| **CephFS (Rook / ceph-csi)** | `flock` | ✅ Production | `flock()` propagates cluster-wide. Recommended. |
-| **Longhorn / OpenEBS RWX** | `flock` | ✅ Production | Block-backed RWX; `flock()` works. |
-| **NFS (nfs-csi, subdir-external-provisioner)** | `nfs` | ⚠️ Advisory only | `flock()` over NFS is unreliable. Split-brain risk during network partitions. Not recommended for production. |
-| **Local / hostPath** | `flock` | ✅ Single-pod dev | Not RWX; only works with `broker.replicaCount: 1`. |
+Phase 4 dropped flock entirely — single-writer enforcement now comes from
+epoch-prefixed segment filenames + the BrokerCoordinator's ownership decision
+(see `internal/controller/`), so the StorageClass no longer needs to support
+`flock()`. Any RWX volume that meets NFSv4-class semantics works.
 
-Select the lock backend explicitly:
-
-```yaml
-lock:
-  backend: flock   # or "nfs"
-```
+| StorageClass | Status | Notes |
+|---|---|---|
+| **CephFS (Rook / ceph-csi)** | ✅ Production | Strong same-directory rename atomicity; recommended. |
+| **csi-driver-nfs / NFSv4.1 server** | ✅ Production | Use `nconnect=4-8` and `acregmax=1` for sub-second mtime freshness on assignment.json polling. |
+| **AWS EFS / Azure Files Premium NFS / GCP Filestore** | ✅ Production | All offer NFSv4-class semantics. |
+| **Longhorn / OpenEBS RWX** | ✅ Production | Block-backed RWX. |
+| **Local / hostPath** | ✅ Single-pod dev | Not RWX; only works with `broker.replicaCount: 1`. |
 
 ## Configuration
 

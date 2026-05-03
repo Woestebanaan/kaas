@@ -57,14 +57,18 @@ storage:
   accessMode: ReadWriteMany
   mountPath: /data
 
-lock:
-  backend: flock                # "flock" for CephFS; "nfs" for advisory NFS
-
 auth:
+  # When false, the broker uses an AllowAllAuthEngine (no authentication,
+  # ANONYMOUS principal for every connection). When true (default), the
+  # RealAuthEngine reads credentials.json and acls.json from the shared
+  # PVC. Translates to SKAFKA_AUTH_DISABLED env var on the broker.
   enabled: true
   mechanisms:
     - SCRAM-SHA-512
-  requireSasl: false            # reject non-SASL requests
+  # When true, the dispatcher rejects non-ApiVersions/SaslHandshake/SaslAuthenticate
+  # requests from connections that haven't completed SASL — closes the
+  # "anonymous fallthrough" hole. Translates to SKAFKA_REQUIRE_SASL.
+  requireSasl: false
   tls:
     enabled: false
     existingSecret: ""          # Secret with tls.crt + tls.key
