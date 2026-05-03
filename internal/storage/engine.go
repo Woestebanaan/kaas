@@ -318,11 +318,13 @@ func (e *DiskStorageEngine) DeletePartition(topic string, partition int32) error
 // Append writes a raw RecordBatch to the partition log.
 // Both the Kubernetes Lease and the filesystem lock must be held by the caller.
 //
-// epoch is the v3 leader-epoch fence supplied by the BrokerCoordinator. Phase 1
-// accepts the parameter but does not enforce it — Phase 4 wires the cached
-// partition epoch into the per-partition state and rejects stale callers with
-// ErrEpochMismatch. Until then, callers from the v2.6 path pass 0.
-func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition int32, _ uint32, rawBatch []byte) (int64, error) {
+// epoch is the v3 leader-epoch fence supplied by the BrokerCoordinator. When
+// both caller and stored epoch are non-zero and disagree, Append returns
+// ErrEpochMismatch — the data-plane half of the v3.3 epoch fence pairs with
+// assignment_watch.go's file-validation half. epoch==0 is the v2.6
+// compatibility sentinel ("no fence configured"), as is ps.epoch==0 (no
+// TakeOver has run since the partition was opened).
+func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition int32, epoch uint32, rawBatch []byte) (int64, error) {
 	if len(rawBatch) == 0 {
 		hwm, _ := e.HighWatermark(topic, partition)
 		return hwm, nil
@@ -342,6 +344,14 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+
+	// Epoch fence: caller's epoch must match the partition's stored epoch
+	// when both sides are non-zero. Strict equality matches the plan
+	// pseudocode in §"Append flow" — a caller running ahead of TakeOver
+	// is just as wrong as one running behind.
+	if epoch != 0 && ps.epoch != 0 && uint32(ps.epoch) != epoch {
+		return -1, ErrEpochMismatch
+	}
 
 	// Brokers own offsets. Producers ship baseOffset=0 (the wire convention);
 	// rewrite to the partition's high watermark before persisting so reads

@@ -17,6 +17,7 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 	"github.com/woestebanaan/skafka/internal/storage"
+	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
 type ProduceHandler struct {
@@ -24,6 +25,14 @@ type ProduceHandler struct {
 	leases lease.LeaseManager
 	locks  lock.PartitionLock
 	auth   auth.AuthEngine
+
+	// coord is the v3 BrokerCoordinator. When set, it replaces the legacy
+	// leases+locks ownership check on the produce hot path: Owns +
+	// IsHeartbeatFresh + CurrentEpoch fold the per-partition Lease, the
+	// flock check, and epoch acquisition into one source of truth. When
+	// nil, the handler falls back to the v2.6 path. The fallback goes
+	// away with internal/lock/ in step 9.
+	coord kafkaapi.BrokerCoordinator
 }
 
 func NewProduceHandler(
@@ -33,6 +42,14 @@ func NewProduceHandler(
 	authEng auth.AuthEngine,
 ) *ProduceHandler {
 	return &ProduceHandler{store: store, leases: leases, locks: locks, auth: authEng}
+}
+
+// WithCoordinator switches the handler over to the v3 BrokerCoordinator path.
+// Returning the receiver lets callers chain: NewProduceHandler(...).WithCoordinator(c).
+// The legacy leases/locks fields stay populated so a nil coord still works.
+func (h *ProduceHandler) WithCoordinator(coord kafkaapi.BrokerCoordinator) *ProduceHandler {
+	h.coord = coord
+	return h
 }
 
 func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -85,13 +102,8 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 				Index: pd.Index, LogAppendTime: -1, LogStartOffset: 0,
 			}
 
-			if !h.leases.IsLeader(td.Name, pd.Index) {
-				pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
-				pr.BaseOffset = -1
-				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
-				continue
-			}
-			if !h.locks.IsLocked(td.Name, pd.Index) {
+			ok, epoch := h.checkOwnership(td.Name, pd.Index)
+			if !ok {
 				pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
 				pr.BaseOffset = -1
 				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
@@ -106,8 +118,7 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 			}
 
 			appendStart := time.Now()
-			// Phase 1: epoch is 0 (no fence). Phase 4 reads it from BrokerCoordinator.CurrentEpoch.
-			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, 0, pd.Records)
+			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, epoch, pd.Records)
 			mx.WriteLatency.Record(context.Background(), time.Since(appendStart).Seconds(),
 				metric.WithAttributes(attribute.String("topic", td.Name)))
 			if err != nil {
@@ -131,6 +142,55 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 	api.EncodeProduceResponse(w, resp, version)
 	return w.Bytes(), nil
 }
+
+// checkOwnership decides whether this broker may serve a Produce for the
+// given partition, and returns the epoch to pass to storage.Append. When
+// the v3 BrokerCoordinator is wired (h.coord != nil) it is the only source
+// of truth: Owns + IsHeartbeatFresh together replace the v2.6 lease + flock
+// pair, and CurrentEpoch supplies the leader epoch for the per-batch fence.
+// When coord is nil, fall back to the v2.6 lease + lock check and pass
+// epoch=0 (storage skips the fence when caller's epoch is 0).
+func (h *ProduceHandler) checkOwnership(topic string, partition int32) (bool, uint32) {
+	if h.coord != nil {
+		if !h.coord.Owns(topic, partition) {
+			return false, 0
+		}
+		// Self-fence: a broker that has lost connectivity to the controller
+		// stops acking writes within heartbeatTimeout, regardless of what
+		// the (possibly stale) assignment file says it owns.
+		if !heartbeatFresh(h.coord) {
+			return false, 0
+		}
+		epoch, _ := h.coord.CurrentEpoch(topic, partition)
+		return true, epoch
+	}
+	if !h.leases.IsLeader(topic, partition) {
+		return false, 0
+	}
+	if !h.locks.IsLocked(topic, partition) {
+		return false, 0
+	}
+	return true, 0
+}
+
+// heartbeatFresh extracts the broker.Coordinator's IsHeartbeatFresh check
+// without making the produce handler depend on the internal/broker package
+// directly (which would create an import cycle). The kafkaapi contract
+// promises LastHeartbeat; we apply the freshness window here.
+func heartbeatFresh(c kafkaapi.BrokerCoordinator) bool {
+	last := c.LastHeartbeat()
+	if last.IsZero() {
+		return false
+	}
+	return time.Since(last) <= produceHeartbeatTimeout
+}
+
+// produceHeartbeatTimeout mirrors broker.DefaultHeartbeatTimeout (3s).
+// Duplicated here because importing internal/broker from
+// internal/protocol/handlers would form a cycle (broker → coordinator →
+// handlers via the Coordinator's own dependencies). Both constants must
+// stay in sync; if they drift, fix the broker side and update this file.
+const produceHeartbeatTimeout = 3 * time.Second
 
 // validateProduceBatches walks every RecordBatch concatenated in a Produce
 // request's RecordSet and validates each one's CRC32C and length-bound. Empty

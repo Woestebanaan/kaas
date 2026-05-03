@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -411,6 +412,50 @@ func TestAppendAssignsOffsets(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("batch %d baseOffset on disk: got %d, want %d", i, got[i], w)
 		}
+	}
+}
+
+// TestAppendEpochFenceRejectsStaleCaller verifies the data-plane half of
+// the v3.3 epoch fence: once TakeOver(epoch=N) has run, an Append(epoch=K)
+// with K < N must return ErrEpochMismatch instead of silently accepting
+// the write. Both K=0 (v2.6 path) and K==N continue to succeed — the fence
+// activates only when both sides report a real epoch and they disagree.
+func TestAppendEpochFenceRejectsStaleCaller(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	engine := newEngine(t, dir)
+	if err := engine.CreatePartition("topic", 0); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+
+	// Pre-fence: epoch=0 caller works fine (backwards compat).
+	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 1)); err != nil {
+		t.Fatalf("Append(epoch=0) before TakeOver: %v", err)
+	}
+
+	// Take over at epoch=5 — partition's stored epoch is now 5.
+	if _, err := engine.TakeOver(ctx, "topic", 0, 5); err != nil {
+		t.Fatalf("TakeOver: %v", err)
+	}
+
+	// Caller at the matching epoch succeeds.
+	if _, err := engine.Append(ctx, "topic", 0, 5, makeBatch(0, 1)); err != nil {
+		t.Errorf("Append(epoch=5) after TakeOver(5): unexpected err %v", err)
+	}
+
+	// Caller at a stale epoch is rejected.
+	if _, err := engine.Append(ctx, "topic", 0, 4, makeBatch(0, 1)); !errors.Is(err, storage.ErrEpochMismatch) {
+		t.Errorf("Append(epoch=4) after TakeOver(5): want ErrEpochMismatch, got %v", err)
+	}
+
+	// Caller running ahead is also rejected (strict equality — plan §"Append flow").
+	if _, err := engine.Append(ctx, "topic", 0, 6, makeBatch(0, 1)); !errors.Is(err, storage.ErrEpochMismatch) {
+		t.Errorf("Append(epoch=6) after TakeOver(5): want ErrEpochMismatch, got %v", err)
+	}
+
+	// epoch=0 still works as the v2.6 compat sentinel.
+	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 1)); err != nil {
+		t.Errorf("Append(epoch=0) after TakeOver: should still work for v2.6 callers; got %v", err)
 	}
 }
 
