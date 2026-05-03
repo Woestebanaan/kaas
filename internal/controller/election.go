@@ -14,12 +14,16 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+
+	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
 // LeaseName is the singleton cluster-wide controller Lease. v3.3 plan §"The
-// architecture in one paragraph" — exactly one Lease per cluster, named
-// skafka-controller.
-const LeaseName = "skafka-controller"
+// architecture in one paragraph" — exactly one Lease per cluster. The
+// constant lives in pkg/kafkaapi so the broker side can reference the same
+// name without importing this package; we re-export it here for in-package
+// readability.
+const LeaseName = kafkaapi.ControllerLeaseName
 
 // AcquiredCallback is fired when this broker wins the controller Lease.
 // epoch is the Lease's leaseTransitions value at the time of acquisition —

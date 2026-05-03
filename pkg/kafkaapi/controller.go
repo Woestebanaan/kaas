@@ -5,6 +5,11 @@ import (
 	"time"
 )
 
+// ControllerLeaseName is the singleton cluster-wide controller Lease name.
+// Lives here so both internal/controller (writer) and internal/broker
+// (reader) can reference it without an import cycle.
+const ControllerLeaseName = "skafka-controller"
+
 // AssignmentChangeReason names the trigger that caused the controller to
 // recompute and rewrite the assignment.
 type AssignmentChangeReason string
