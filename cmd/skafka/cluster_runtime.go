@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc"
 	"k8s.io/client-go/kubernetes"
+	sigs_client "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/woestebanaan/skafka/internal/assignment"
 	"github.com/woestebanaan/skafka/internal/broker"
@@ -22,16 +23,21 @@ import (
 
 // clusterRuntimeConfig captures the inputs the v3 runtime needs from main.go.
 type clusterRuntimeConfig struct {
-	k8sClient        kubernetes.Interface
-	namespace        string
-	brokerIDStr      string // matches kafkaapi.ConsumerGroupAssignment.Broker, e.g. "skafka-0"
-	dataDir          string // shared PVC mount
-	engine           *storage.DiskStorageEngine
-	coordMgr         *coordinator.Manager
-	topicRegistry    *broker.TopicRegistry
-	brokerReg        *k8spkg.BrokerRegistry
-	heartbeatAddr    string // host:port the controller's heartbeat gRPC server binds to
-	peerHeartbeatPort int32 // port to dial when reaching another broker's heartbeat server (default 9094)
+	k8sClient         kubernetes.Interface
+	namespace         string
+	brokerIDStr       string // matches kafkaapi.ConsumerGroupAssignment.Broker, e.g. "skafka-0"
+	dataDir           string // shared PVC mount
+	engine            *storage.DiskStorageEngine
+	coordMgr          *coordinator.Manager
+	topicRegistry     *broker.TopicRegistry
+	brokerReg         *k8spkg.BrokerRegistry
+	heartbeatAddr     string // host:port the controller's heartbeat gRPC server binds to
+	peerHeartbeatPort int32  // port to dial when reaching another broker's heartbeat server (default 9094)
+	// crClient + clusterName drive the KafkaClusterAssignments CR mirror.
+	// nil crClient → NoopMirror (the v2.6 path) so dev/test setups don't
+	// need a working controller-runtime client.
+	crClient    sigs_client.Client
+	clusterName string
 }
 
 // clusterRuntime owns the v3 distributed-coordination goroutines: the
@@ -145,8 +151,13 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 		topicSrc := &topicSourceAdapter{r: cfg.topicRegistry}
 		brokerSrc := &brokerSourceAdapter{reg: cfg.brokerReg, heart: heartSrv}
 
+		var mirror controller.CRMirror = controller.NewNoopMirror()
+		if cfg.crClient != nil && cfg.clusterName != "" {
+			mirror = controller.NewK8sMirror(cfg.crClient, cfg.namespace, cfg.clusterName)
+		}
+
 		loop := controller.NewAssignmentLoop(
-			store, heartSrv, controller.NewNoopMirror(),
+			store, heartSrv, mirror,
 			topicSrc, brokerSrc, cfg.brokerIDStr,
 		).WithGroupSource(heartSrv)
 

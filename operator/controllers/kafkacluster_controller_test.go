@@ -238,3 +238,55 @@ func TestKafkaClusterReconcileDeletion(t *testing.T) {
 }
 
 var _ = client.Object((*v1alpha1.KafkaCluster)(nil)) // compile-time interface check
+
+// TestKafkaClusterCreatesAssignmentsCR — Phase 6 step 4 — verifies the
+// reconciler creates a matching KafkaClusterAssignments CR with an
+// ownerReference back to the KafkaCluster, so deletion of the cluster
+// cascades to the assignments CR.
+func TestKafkaClusterCreatesAssignmentsCR(t *testing.T) {
+	cluster := baseCluster()
+	// Disable the external listener so the rest of the reconciler exits
+	// early — this test focuses solely on the assignments CR creation.
+	cluster.Spec.Listeners.External.Enabled = false
+
+	c := fake.NewClientBuilder().
+		WithScheme(newClusterScheme()).
+		WithObjects(cluster).
+		WithStatusSubresource(cluster).
+		Build()
+	r := NewKafkaClusterReconciler(c, "kafka")
+
+	reconcileTwice(t, r, "kafka", "skafka")
+
+	var got v1alpha1.KafkaClusterAssignments
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "kafka", Name: "skafka"}, &got); err != nil {
+		t.Fatalf("KafkaClusterAssignments CR not created: %v", err)
+	}
+
+	// Ownership: the KafkaCluster must be the controlling owner.
+	if len(got.OwnerReferences) == 0 {
+		t.Fatal("KafkaClusterAssignments CR has no ownerReferences")
+	}
+	owner := got.OwnerReferences[0]
+	if owner.Kind != "KafkaCluster" || owner.Name != "skafka" {
+		t.Errorf("ownerReference: got %s/%s, want KafkaCluster/skafka", owner.Kind, owner.Name)
+	}
+	if owner.Controller == nil || !*owner.Controller {
+		t.Error("ownerReference.controller should be true (cascade delete)")
+	}
+
+	// Status starts empty — the elected broker controller fills it.
+	if got.Status.AssignmentVersion != 0 {
+		t.Errorf("Status should start empty; got AssignmentVersion=%d", got.Status.AssignmentVersion)
+	}
+
+	// Idempotent: a second reconcile shouldn't error or create a duplicate.
+	reconcileTwice(t, r, "kafka", "skafka")
+	var crList v1alpha1.KafkaClusterAssignmentsList
+	if err := c.List(context.Background(), &crList, client.InNamespace("kafka")); err != nil {
+		t.Fatal(err)
+	}
+	if len(crList.Items) != 1 {
+		t.Errorf("idempotency: got %d KafkaClusterAssignments CRs, want 1", len(crList.Items))
+	}
+}

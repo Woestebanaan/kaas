@@ -80,6 +80,17 @@ func (r *KafkaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
+	// 0. Ensure the KafkaClusterAssignments CR exists for this cluster.
+	// Phase 6: this is the operator-side bootstrap. The cluster controller
+	// (an elected broker) writes Status to it after every assignment.json
+	// write; the operator just guarantees the object exists, with proper
+	// ownerReferences so deletion of KafkaCluster cascades to it.
+	if err := r.reconcileAssignmentsCR(ctx, &cluster); err != nil {
+		// Non-fatal — log via condition but continue.
+		_ = r.updateReadyCondition(ctx, &cluster, metav1.ConditionFalse, "AssignmentsCRError", err.Error())
+		return ctrl.Result{}, err
+	}
+
 	ext := cluster.Spec.Listeners.External
 	if !ext.Enabled {
 		// External listener disabled — tear down any previously-created resources.
@@ -123,6 +134,39 @@ func (r *KafkaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	return ctrl.Result{}, r.updateReadyCondition(ctx, &cluster, metav1.ConditionTrue, "ExternalListenerReady",
 		fmt.Sprintf("%d brokers advertised via external listener", cluster.Spec.Replicas))
+}
+
+// reconcileAssignmentsCR creates the per-cluster KafkaClusterAssignments
+// CR if it doesn't already exist, with an ownerReference back to the
+// KafkaCluster so deletion cascades. Status is left empty — the elected
+// cluster controller (a broker) fills it via the K8sMirror after every
+// assignment.json write. Idempotent: returns nil when the CR already
+// exists.
+func (r *KafkaClusterReconciler) reconcileAssignmentsCR(ctx context.Context, cluster *v1alpha1.KafkaCluster) error {
+	key := client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}
+	var existing v1alpha1.KafkaClusterAssignments
+	err := r.Get(ctx, key, &existing)
+	if err == nil {
+		// Already exists — nothing to do.
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("get KafkaClusterAssignments: %w", err)
+	}
+
+	assignmentsCR := &v1alpha1.KafkaClusterAssignments{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(cluster, v1alpha1.GroupVersion.WithKind("KafkaCluster")),
+			},
+		},
+	}
+	if err := r.Create(ctx, assignmentsCR); err != nil {
+		return fmt.Errorf("create KafkaClusterAssignments: %w", err)
+	}
+	return nil
 }
 
 func (r *KafkaClusterReconciler) reconcileCertificate(ctx context.Context, cluster *v1alpha1.KafkaCluster) error {

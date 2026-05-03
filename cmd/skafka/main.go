@@ -264,6 +264,26 @@ func runBroker(ctx context.Context) {
 		if p, err := strconv.Atoi(envOr("SKAFKA_PEER_HEARTBEAT_PORT", "9094")); err == nil {
 			peerPort = int32(p)
 		}
+
+		// Build a controller-runtime client for the KafkaClusterAssignments
+		// CR mirror (Phase 6). Failures are non-fatal — the file on the
+		// PVC is the source of truth, the CR is kubectl-debugging convenience.
+		var crClient sigs_client.Client
+		crScheme := runtime.NewScheme()
+		if err := operatorv1.AddToScheme(crScheme); err == nil {
+			if cl, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: crScheme}); err == nil {
+				crClient = cl
+			} else {
+				slog.Warn("crmirror: build controller-runtime client", "err", err)
+			}
+		}
+
+		// Cluster name maps the broker back to its KafkaCluster CR. The Helm
+		// chart populates SKAFKA_CLUSTER_NAME via release-name templating; if
+		// unset, fall back to SKAFKA_CLUSTER_ID (the value we already pass for
+		// Metadata responses) so old deploys without the new env var still work.
+		clusterName := envOr("SKAFKA_CLUSTER_NAME", clusterID)
+
 		rt := startClusterRuntime(ctx, clusterRuntimeConfig{
 			k8sClient:         k8sClient,
 			namespace:         namespace,
@@ -275,6 +295,8 @@ func runBroker(ctx context.Context) {
 			brokerReg:         brokerReg,
 			heartbeatAddr:     heartbeatAddr,
 			peerHeartbeatPort: peerPort,
+			crClient:          crClient,
+			clusterName:       clusterName,
 		})
 		b.UseCoordinator(rt.coord)
 	}

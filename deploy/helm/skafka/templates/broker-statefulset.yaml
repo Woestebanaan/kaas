@@ -67,6 +67,11 @@ spec:
               value: {{ .Values.storage.mountPath }}
             - name: SKAFKA_CLUSTER_ID
               value: {{ .Values.broker.clusterID }}
+            - name: SKAFKA_CLUSTER_NAME
+              # Matches the KafkaCluster CR's metadata.name so the
+              # KafkaClusterAssignments CR mirror writes back to the
+              # right object (Phase 6).
+              value: {{ include "skafka.fullname" . }}
             - name: SKAFKA_PORT
               value: "{{ .Values.broker.ports.kafka }}"
             - name: SKAFKA_HEALTH_ADDR
