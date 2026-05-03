@@ -15,6 +15,15 @@ type TopicSpec struct {
 	PartitionCount int32
 }
 
+// GroupSpec is the controller's view of an active consumer group. The
+// only attribute the balancer needs is the group ID — partition count
+// has no analogue for groups (each group is a single coordinated unit).
+// HeartbeatServer.ActiveGroups is the canonical GroupSource in v1; tests
+// pass an in-memory stub.
+type GroupSpec struct {
+	GroupID string
+}
+
 // Balance computes a partition-to-broker assignment under v1 strict-stability
 // rules:
 //
@@ -171,4 +180,90 @@ func totalPartitions(topics []TopicSpec) int {
 		n += int(t.PartitionCount)
 	}
 	return n
+}
+
+// BalanceGroups computes a consumer-group-to-broker assignment under the
+// same v1 strict-stability + rendezvous-hash rules as Balance:
+//
+//  1. If a group is currently assigned to a still-alive broker, keep it.
+//     Avoids spurious group-state migrations on a recompute.
+//  2. Otherwise, rendezvous-hash to a fresh broker keyed on the group ID.
+//  3. Bump the per-group epoch by one whenever the assigned broker
+//     changes — gives clients a monotonic counter to correlate state
+//     transitions with, even though v1 doesn't yet use it for fencing.
+//
+// Returns nil if brokers is empty.
+func BalanceGroups(
+	prev *kafkaapi.Assignment,
+	brokers []string,
+	groups []GroupSpec,
+) []kafkaapi.ConsumerGroupAssignment {
+	if len(brokers) == 0 {
+		return nil
+	}
+
+	alive := append([]string(nil), brokers...)
+	sort.Strings(alive)
+	aliveSet := make(map[string]struct{}, len(alive))
+	for _, b := range alive {
+		aliveSet[b] = struct{}{}
+	}
+
+	prevMap := map[string]kafkaapi.ConsumerGroupAssignment{}
+	if prev != nil {
+		for _, g := range prev.ConsumerGroups {
+			prevMap[g.GroupID] = g
+		}
+	}
+
+	out := make([]kafkaapi.ConsumerGroupAssignment, 0, len(groups))
+	for _, gs := range groups {
+		ga, hadPrev := prevMap[gs.GroupID]
+		if hadPrev {
+			if _, ok := aliveSet[ga.Broker]; ok {
+				out = append(out, ga)
+				continue
+			}
+		}
+		broker := rendezvousPickGroup(gs.GroupID, alive)
+		epoch := uint32(1)
+		if hadPrev {
+			epoch = ga.Epoch + 1
+		}
+		out = append(out, kafkaapi.ConsumerGroupAssignment{
+			GroupID: gs.GroupID,
+			Broker:  broker,
+			Epoch:   epoch,
+		})
+	}
+	return out
+}
+
+// rendezvousPickGroup is the group analogue of rendezvousPick: hash each
+// broker against the group ID and pick the highest. Group has no
+// partition concept, so the hash key is just (group_id, broker_id).
+func rendezvousPickGroup(groupID string, brokers []string) string {
+	if len(brokers) == 0 {
+		return ""
+	}
+	var (
+		best     string
+		bestHash uint64
+	)
+	for _, b := range brokers {
+		h := groupHash(groupID, b)
+		if best == "" || h > bestHash {
+			best = b
+			bestHash = h
+		}
+	}
+	return best
+}
+
+func groupHash(groupID, broker string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(groupID))
+	h.Write([]byte{0})
+	h.Write([]byte(broker))
+	return h.Sum64()
 }

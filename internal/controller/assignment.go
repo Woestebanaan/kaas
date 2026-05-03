@@ -24,6 +24,15 @@ type BrokerSource interface {
 	AliveBrokers() []string
 }
 
+// GroupSource reports the consumer groups currently active in the
+// cluster. HeartbeatServer.ActiveGroups() (the union of every connected
+// broker's BrokerStatus.active_groups) is the canonical source; tests
+// pass an in-memory stub. AssignmentLoop calls this on every recompute
+// to drive BalanceGroups.
+type GroupSource interface {
+	ActiveGroups() []string
+}
+
 // CRMirror is the best-effort write to the KafkaClusterAssignments CR for
 // kubectl-style debugging. The plan is explicit that mirror failures are
 // fire-and-forget — a successful AssignmentStore.Write is the
@@ -66,6 +75,7 @@ type AssignmentLoop struct {
 	mirror       CRMirror
 	topics       TopicSource
 	brokers      BrokerSource
+	groups       GroupSource // optional; nil means consumerGroups stays empty
 	controllerID string
 
 	// channelDepth is the queue size for pending change reasons. With
@@ -105,6 +115,16 @@ func NewAssignmentLoop(
 		channelDepth: 32,
 		updates:      make(chan kafkaapi.AssignmentChange, 32),
 	}
+}
+
+// WithGroupSource attaches a GroupSource so each recompute also assigns
+// consumer groups via BalanceGroups. Optional; nil leaves
+// Assignment.ConsumerGroups empty (the v2.6 path that pre-dates this).
+// In production, pass HeartbeatServer (which satisfies GroupSource via
+// its ActiveGroups method).
+func (l *AssignmentLoop) WithGroupSource(g GroupSource) *AssignmentLoop {
+	l.groups = g
+	return l
 }
 
 // Start runs the loop until ctx is cancelled. epoch is the
@@ -194,9 +214,21 @@ func (l *AssignmentLoop) recomputeAndWrite(ctx context.Context, _ kafkaapi.Assig
 	brokers := l.brokers.AliveBrokers()
 	topics := l.topics.Topics()
 
+	// Pre-build the GroupSpec list outside the lock so the GroupSource's
+	// own locking doesn't intersect with l.mu.
+	var groupSpecs []GroupSpec
+	if l.groups != nil {
+		ids := l.groups.ActiveGroups()
+		groupSpecs = make([]GroupSpec, 0, len(ids))
+		for _, id := range ids {
+			groupSpecs = append(groupSpecs, GroupSpec{GroupID: id})
+		}
+	}
+
 	l.mu.Lock()
 	prev := l.current
 	parts := Balance(prev, brokers, topics)
+	groups := BalanceGroups(prev, brokers, groupSpecs)
 	l.versionCounter++
 	version := l.versionCounter
 
@@ -207,6 +239,7 @@ func (l *AssignmentLoop) recomputeAndWrite(ctx context.Context, _ kafkaapi.Assig
 		Controller:        l.controllerID,
 		Brokers:           buildBrokerEntries(brokers),
 		Partitions:        parts,
+		ConsumerGroups:    groups,
 	}
 	l.current = a
 	l.mu.Unlock()

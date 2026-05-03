@@ -197,6 +197,153 @@ func samePartitions(a, b []kafkaapi.PartitionAssignment) bool {
 	return true
 }
 
+// --- group balancer tests ---
+
+func TestBalanceGroups_FreshClusterDistributesEvenly(t *testing.T) {
+	brokers := []string{"a", "b", "c"}
+	groups := []GroupSpec{
+		{GroupID: "payments"}, {GroupID: "billing"}, {GroupID: "telemetry"},
+		{GroupID: "audit"}, {GroupID: "shipping"}, {GroupID: "inventory"},
+	}
+
+	out := BalanceGroups(nil, brokers, groups)
+
+	if len(out) != 6 {
+		t.Fatalf("want 6 group assignments, got %d", len(out))
+	}
+	counts := map[string]int{}
+	for _, g := range out {
+		counts[g.Broker]++
+		if g.Epoch != 1 {
+			t.Errorf("fresh group %s: epoch=%d, want 1", g.GroupID, g.Epoch)
+		}
+	}
+	for _, b := range brokers {
+		if counts[b] == 0 {
+			t.Errorf("broker %s got no groups: %v", b, counts)
+		}
+	}
+}
+
+func TestBalanceGroups_StableAcrossNoOpRecompute(t *testing.T) {
+	brokers := []string{"a", "b", "c"}
+	groups := []GroupSpec{{GroupID: "x"}, {GroupID: "y"}, {GroupID: "z"}}
+
+	first := BalanceGroups(nil, brokers, groups)
+	prev := &kafkaapi.Assignment{ConsumerGroups: first}
+
+	second := BalanceGroups(prev, brokers, groups)
+	if !sameGroupAssignments(first, second) {
+		t.Errorf("BalanceGroups not stable: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestBalanceGroups_BrokerDeathRebalancesAffectedOnly(t *testing.T) {
+	brokers := []string{"a", "b", "c"}
+	groups := []GroupSpec{{GroupID: "g0"}, {GroupID: "g1"}, {GroupID: "g2"}, {GroupID: "g3"}, {GroupID: "g4"}, {GroupID: "g5"}}
+
+	first := BalanceGroups(nil, brokers, groups)
+	prev := &kafkaapi.Assignment{ConsumerGroups: first}
+
+	// b dies.
+	second := BalanceGroups(prev, []string{"a", "c"}, groups)
+
+	moved := 0
+	for _, g := range second {
+		var was kafkaapi.ConsumerGroupAssignment
+		for _, q := range first {
+			if q.GroupID == g.GroupID {
+				was = q
+				break
+			}
+		}
+		if was.Broker != g.Broker {
+			moved++
+			if g.Epoch <= was.Epoch {
+				t.Errorf("group %s moved %s→%s but epoch %d→%d", g.GroupID, was.Broker, g.Broker, was.Epoch, g.Epoch)
+			}
+			if g.Broker != "a" && g.Broker != "c" {
+				t.Errorf("group %s landed on dead broker %q", g.GroupID, g.Broker)
+			}
+		} else if g.Epoch != was.Epoch {
+			t.Errorf("untouched group %s epoch changed %d→%d", g.GroupID, was.Epoch, g.Epoch)
+		}
+	}
+	if moved == 0 {
+		t.Error("expected some groups to move when broker b died")
+	}
+	// Strict-stability: groups originally on a or c must stay put.
+	for _, was := range first {
+		if was.Broker == "a" || was.Broker == "c" {
+			for _, g := range second {
+				if g.GroupID == was.GroupID && g.Broker != was.Broker {
+					t.Errorf("strict-stability violated: %s on alive broker %s moved to %s",
+						was.GroupID, was.Broker, g.Broker)
+				}
+			}
+		}
+	}
+}
+
+func TestBalanceGroups_NewlyKnownGroupHashedAcrossAlive(t *testing.T) {
+	brokers := []string{"a", "b"}
+	prev := &kafkaapi.Assignment{ConsumerGroups: BalanceGroups(nil, brokers, []GroupSpec{{GroupID: "alpha"}})}
+
+	out := BalanceGroups(prev, brokers, []GroupSpec{{GroupID: "alpha"}, {GroupID: "beta"}})
+	if len(out) != 2 {
+		t.Fatalf("want 2, got %d", len(out))
+	}
+	// alpha stable.
+	for _, g := range out {
+		if g.GroupID == "alpha" && g.Broker != prev.ConsumerGroups[0].Broker {
+			t.Errorf("alpha should be stable %s, got %s", prev.ConsumerGroups[0].Broker, g.Broker)
+		}
+	}
+	// beta lands on a known broker.
+	for _, g := range out {
+		if g.GroupID == "beta" && g.Broker != "a" && g.Broker != "b" {
+			t.Errorf("beta landed on unknown broker %q", g.Broker)
+		}
+	}
+}
+
+func TestBalanceGroups_NoBrokersReturnsNil(t *testing.T) {
+	if out := BalanceGroups(nil, nil, []GroupSpec{{GroupID: "x"}}); out != nil {
+		t.Errorf("BalanceGroups with no brokers should be nil, got %+v", out)
+	}
+}
+
+func TestRendezvousPickGroupConsistent(t *testing.T) {
+	brokers := []string{"a", "b", "c"}
+	first := rendezvousPickGroup("payments", brokers)
+	scrambled := []string{"c", "a", "b"}
+	if rendezvousPickGroup("payments", scrambled) != first {
+		t.Errorf("rendezvous depends on broker order")
+	}
+}
+
+// sameGroupAssignments returns true when two slices represent the same
+// {groupID → (broker, epoch)} mapping, ignoring order.
+func sameGroupAssignments(a, b []kafkaapi.ConsumerGroupAssignment) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ma := map[string]kafkaapi.ConsumerGroupAssignment{}
+	mb := map[string]kafkaapi.ConsumerGroupAssignment{}
+	for _, g := range a {
+		ma[g.GroupID] = g
+	}
+	for _, g := range b {
+		mb[g.GroupID] = g
+	}
+	for k := range ma {
+		if ma[k].Broker != mb[k].Broker || ma[k].Epoch != mb[k].Epoch {
+			return false
+		}
+	}
+	return true
+}
+
 func itoa(v int32) string {
 	if v == 0 {
 		return "0"

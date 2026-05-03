@@ -182,3 +182,90 @@ func TestAssignmentLoopBootstrapsFromExistingFile(t *testing.T) {
 		t.Errorf("epoch should be preserved at 5, got %d", a.Partitions[0].Epoch)
 	}
 }
+
+// stubGroups is an in-memory GroupSource for tests.
+type stubGroups struct {
+	mu     sync.Mutex
+	groups []string
+}
+
+func (s *stubGroups) ActiveGroups() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.groups))
+	copy(out, s.groups)
+	return out
+}
+
+func (s *stubGroups) Set(g []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.groups = g
+}
+
+func TestAssignmentLoopWithGroupSourceEmitsConsumerGroups(t *testing.T) {
+	dir := t.TempDir()
+	store := assignment.NewFileStore(dir).WithPollInterval(20 * time.Millisecond)
+	topics := &stubTopics{topics: []TopicSpec{{Name: "events", PartitionCount: 1}}}
+	brokers := &stubBrokers{brokers: []string{"broker-0", "broker-1"}}
+	groups := &stubGroups{groups: []string{"payments", "billing"}}
+
+	loop := NewAssignmentLoop(store, nil, nil, topics, brokers, "broker-0").
+		WithGroupSource(groups)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() { _ = loop.Start(ctx, 1) }()
+
+	// Wait for the initial write.
+	deadline := time.Now().Add(2 * time.Second)
+	for loop.Snapshot() == nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	a := loop.Snapshot()
+	if a == nil {
+		t.Fatal("loop did not perform initial write")
+	}
+
+	// consumerGroups must have both groups, distributed across brokers.
+	if len(a.ConsumerGroups) != 2 {
+		t.Fatalf("ConsumerGroups: got %d, want 2; full: %+v", len(a.ConsumerGroups), a.ConsumerGroups)
+	}
+	gotIDs := map[string]bool{}
+	for _, g := range a.ConsumerGroups {
+		gotIDs[g.GroupID] = true
+		if g.Broker != "broker-0" && g.Broker != "broker-1" {
+			t.Errorf("group %s assigned to unknown broker %q", g.GroupID, g.Broker)
+		}
+		if g.Epoch != 1 {
+			t.Errorf("group %s: epoch=%d, want 1 (fresh)", g.GroupID, g.Epoch)
+		}
+	}
+	for _, want := range []string{"payments", "billing"} {
+		if !gotIDs[want] {
+			t.Errorf("ConsumerGroups missing %q", want)
+		}
+	}
+}
+
+func TestAssignmentLoopWithoutGroupSourceLeavesConsumerGroupsEmpty(t *testing.T) {
+	// Default constructor (no WithGroupSource) → ConsumerGroups stays nil/empty.
+	dir := t.TempDir()
+	store := assignment.NewFileStore(dir).WithPollInterval(20 * time.Millisecond)
+	topics := &stubTopics{topics: []TopicSpec{{Name: "events", PartitionCount: 1}}}
+	brokers := &stubBrokers{brokers: []string{"broker-0"}}
+
+	loop := NewAssignmentLoop(store, nil, nil, topics, brokers, "broker-0")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = loop.Start(ctx, 1) }()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for loop.Snapshot() == nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if a := loop.Snapshot(); a != nil && len(a.ConsumerGroups) != 0 {
+		t.Errorf("ConsumerGroups should be empty without GroupSource, got %+v", a.ConsumerGroups)
+	}
+}
