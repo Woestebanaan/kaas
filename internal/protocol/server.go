@@ -109,12 +109,15 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 			}
 			continue
 		}
-		listenerName := "internal"
+		// "mode" matches the Phase 10 plan name for skafka_external_connections_total.
+		// Maps the listener type onto its wire-protocol mode: the in-cluster
+		// listener is plaintext; the external listener is TLS-only.
+		mode := "plaintext"
 		if _, isTLS := conn.(*tls.Conn); isTLS {
-			listenerName = "external"
+			mode = "tls"
 		}
 		observability.Global().Connections.Add(context.Background(), 1,
-			metric.WithAttributes(attribute.String("listener", listenerName)))
+			metric.WithAttributes(attribute.String("mode", mode)))
 		s.wg.Add(1)
 		go s.serveConn(ctx, conn)
 	}
@@ -145,7 +148,14 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 			if p, err := s.authEngine.AuthenticateTLS(cn); err == nil {
 				state.Principal = &p
 				state.SASLDone = true
+				mx.AuthSuccess.Add(context.Background(), 1,
+					metric.WithAttributes(attribute.String("mechanism", "mtls")))
 			} else {
+				mx.AuthFailure.Add(context.Background(), 1,
+					metric.WithAttributes(
+						attribute.String("mechanism", "mtls"),
+						attribute.String("reason", "cert_rejected"),
+					))
 				slog.Warn("tls: rejected peer cert", "cn", cn, "err", err)
 			}
 		}

@@ -67,6 +67,11 @@ func (h *SaslAuthenticateHandler) Handle(conn *connstate.ConnState, version int1
 
 	// Reject PLAIN over non-TLS connections.
 	if conn != nil && conn.SASLMechanism == "PLAIN" && !conn.IsTLS {
+		observability.Global().AuthFailure.Add(context.Background(), 1,
+			metric.WithAttributes(
+				attribute.String("mechanism", "PLAIN"),
+				attribute.String("reason", "plaintext_connection"),
+			))
 		resp := &api.SaslAuthenticateResponse{
 			ErrorCode:    int16(codec.ErrNetworkException),
 			ErrorMessage: "PLAIN mechanism requires TLS",
@@ -84,6 +89,11 @@ func (h *SaslAuthenticateHandler) Handle(conn *connstate.ConnState, version int1
 		}
 		exch, err := h.auth.NewSASLExchange(mechanism)
 		if err != nil {
+			observability.Global().AuthFailure.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attribute.String("mechanism", mechanism),
+					attribute.String("reason", "unsupported_mechanism"),
+				))
 			resp := &api.SaslAuthenticateResponse{
 				ErrorCode:    int16(codec.ErrUnsupportedSaslMechanism),
 				ErrorMessage: err.Error(),

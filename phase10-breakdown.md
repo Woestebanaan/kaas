@@ -280,7 +280,30 @@ c. **ObservableGauges** (need a callback registry):
 **Test**: integration coverage already exists for failover scenarios
 (tests/controller-failover/); add metric assertions at the test seams.
 
-### Gap #4: Add labels to existing metrics (P1)
+### Gap #4: Add labels to existing metrics (P1) — DONE
+
+> **Status:** shipped. Audit found:
+>
+> - `auth_success_total` already had `mechanism` (Phase 7).
+> - `auth_failure_total` already had `mechanism` + `reason` (Phase 7),
+>   but the SASL handler was missing two failure paths
+>   (unsupported_mechanism, plaintext_connection) — both now emit.
+> - mTLS auth path in `protocol/server.go` was emitting neither
+>   AuthSuccess nor AuthFailure — added with `mechanism=mtls` and
+>   `reason=cert_rejected` on the failure side.
+> - `connections_total` was labelled `listener=internal|external`;
+>   renamed to `mode=plaintext|tls` to match the plan name. Listener
+>   semantics map 1:1 onto wire-protocol mode (internal=plaintext,
+>   external=TLS).
+> - `tls_handshakes_total{result}` and `acl_deny_total{principal,
+>   resource_type}` were already correctly labelled.
+> - `cert_reload_total` and `tls_handshakes_total` skip the `broker`
+>   label per the plan (OTel resource attribute already attaches
+>   broker_id).
+> - `fetch_records_total{consumer_group}` deferred — adds N×consumer_groups
+>   cardinality and is computed differently for lag anyway.
+
+### Gap #4 (original): Add labels to existing metrics (P1)
 
 Several emitted metrics drop labels the plan calls for. Adding
 labels widens cardinality, so each one is a judgment call:
