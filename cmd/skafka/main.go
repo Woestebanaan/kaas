@@ -257,6 +257,7 @@ func runBroker(ctx context.Context) {
 	// via WithCoordinator. In single-broker dev mode (no k8sClient or
 	// no dataDir) the runtime isn't started and the broker stays on
 	// the legacy lease+lock fallback path.
+	var rt *clusterRuntime
 	if k8sMode && dataDir != "" && k8sClient != nil && engine != nil {
 		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
 		heartbeatAddr := envOr("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094")
@@ -291,7 +292,7 @@ func runBroker(ctx context.Context) {
 		renewDeadline := envSecondsOr("SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS", 0)
 		retryPeriod := envSecondsOr("SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS", 0)
 
-		rt := startClusterRuntime(ctx, clusterRuntimeConfig{
+		rt = startClusterRuntime(ctx, clusterRuntimeConfig{
 			k8sClient:         k8sClient,
 			namespace:         namespace,
 			brokerIDStr:       brokerIDStr,
@@ -347,9 +348,33 @@ func runBroker(ctx context.Context) {
 	}
 
 	// Health probe HTTP server (Kubernetes livenessProbe/readinessProbe).
+	// /healthz returns the v3 runtime state (Phase 10 plan schema);
+	// /readyz gates on the listener being bound.
 	healthAddr := envOr("SKAFKA_HEALTH_ADDR", ":8080")
-	startHealthServer(ctx, healthAddr, func() bool {
-		return srv.Addr() != ""
+	listeners := []string{"internal"}
+	var tlsInfo *observability.TLSInfo
+	if srvCfg.TLSListenAddr != "" {
+		listeners = append(listeners, "external")
+		tlsInfo = &observability.TLSInfo{
+			Enabled:      true,
+			ExternalHost: os.Getenv("EXTERNAL_HOSTNAME_PATTERN"),
+		}
+	}
+	var healthSource observability.RuntimeState
+	if rt != nil {
+		healthSource = &healthRuntimeState{rt: rt}
+	}
+	healthBrokerID := ""
+	if k8sMode {
+		healthBrokerID = fmt.Sprintf("skafka-%d", brokerID)
+	}
+	startHealthServer(ctx, healthServerConfig{
+		addr:      healthAddr,
+		brokerID:  healthBrokerID,
+		listeners: listeners,
+		tls:       tlsInfo,
+		source:    healthSource,
+		ready:     func() bool { return srv.Addr() != "" },
 	})
 
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
@@ -546,22 +571,33 @@ func mustRestConfig() *rest.Config {
 	return cfg
 }
 
-// startHealthServer runs an HTTP server on addr with /healthz and /readyz endpoints.
-// ready is called on each /readyz hit; it should return true when the broker is
-// accepting client connections.
-func startHealthServer(ctx context.Context, addr string, ready func() bool) {
+// healthServerConfig is the inputs to startHealthServer. brokerID and
+// listeners label the response; tls is the external-listener summary;
+// source is the v3 RuntimeState (nil in local-dev). ready gates /readyz.
+type healthServerConfig struct {
+	addr      string
+	brokerID  string
+	listeners []string
+	tls       *observability.TLSInfo
+	source    observability.RuntimeState
+	ready     func() bool
+}
+
+// startHealthServer runs an HTTP server with the plan's /healthz JSON
+// schema and a /readyz that flips on cfg.ready(). The handler is a
+// thin wrapper around observability.HealthHandler — keeps the schema
+// definition in one place, with unit-test coverage there.
+func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.Handle("/healthz", observability.HealthHandler(cfg.brokerID, cfg.listeners, cfg.tls, cfg.source))
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !ready() {
+		if !cfg.ready() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: cfg.addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Warn("health server exited", "err", err)
@@ -573,7 +609,7 @@ func startHealthServer(ctx context.Context, addr string, ready func() bool) {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	slog.Info("health server listening", "addr", addr)
+	slog.Info("health server listening", "addr", cfg.addr)
 }
 
 func envOr(key, def string) string {

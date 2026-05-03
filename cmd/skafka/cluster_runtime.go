@@ -61,7 +61,10 @@ type clusterRuntimeConfig struct {
 // follow-up; the broker doesn't dial the controller's heartbeat server
 // from this initial cut.
 type clusterRuntime struct {
-	coord *broker.Coordinator
+	coord     *broker.Coordinator
+	ctrlWatch *broker.ControllerWatch
+	heart     *broker.HeartbeatClient
+	brokerID  string
 }
 
 // startClusterRuntime boots every v3 goroutine and returns a handle that
@@ -187,8 +190,116 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 		"heartbeat_addr", cfg.heartbeatAddr,
 	)
 
-	return &clusterRuntime{coord: coord}
+	return &clusterRuntime{
+		coord:     coord,
+		ctrlWatch: ctrlWatch,
+		heart:     heart,
+		brokerID:  cfg.brokerIDStr,
+	}
 }
+
+// healthRuntimeState adapts clusterRuntime to observability.RuntimeState
+// for the /healthz handler. Lives here so cmd/skafka stays the only
+// place that imports both packages — observability has no broker
+// dependency.
+type healthRuntimeState struct{ rt *clusterRuntime }
+
+func (s *healthRuntimeState) IsController() bool {
+	if s.rt == nil || s.rt.ctrlWatch == nil {
+		return false
+	}
+	return s.rt.ctrlWatch.CurrentHolder() == s.rt.brokerID
+}
+
+func (s *healthRuntimeState) ControllerID() string {
+	if s.rt == nil || s.rt.ctrlWatch == nil {
+		return ""
+	}
+	return s.rt.ctrlWatch.CurrentHolder()
+}
+
+func (s *healthRuntimeState) ControllerEpoch() int64 {
+	if s.rt == nil || s.rt.ctrlWatch == nil {
+		return 0
+	}
+	return s.rt.ctrlWatch.CurrentEpoch()
+}
+
+// HeartbeatRTTMs is wired in Phase 10 Gap #3b — needs the heartbeat
+// protocol to echo a send-time timestamp back. -1 → /healthz omits.
+func (s *healthRuntimeState) HeartbeatRTTMs() int64 { return -1 }
+
+func (s *healthRuntimeState) HeartbeatAgeMs() int64 {
+	if s.rt == nil || s.rt.heart == nil {
+		return -1
+	}
+	last := s.rt.heart.LastReceived()
+	if last.IsZero() {
+		return -1
+	}
+	return time.Since(last).Milliseconds()
+}
+
+func (s *healthRuntimeState) AssignmentVersion() uint64 {
+	if s.rt == nil || s.rt.coord == nil {
+		return 0
+	}
+	snap := s.rt.coord.Snapshot()
+	if snap == nil {
+		return 0
+	}
+	return uint64(snap.AssignmentVersion)
+}
+
+func (s *healthRuntimeState) AssignmentAgeMs() int64 {
+	if s.rt == nil || s.rt.coord == nil {
+		return -1
+	}
+	snap := s.rt.coord.Snapshot()
+	if snap == nil || snap.GeneratedAt.IsZero() {
+		return -1
+	}
+	return time.Since(snap.GeneratedAt).Milliseconds()
+}
+
+func (s *healthRuntimeState) PartitionsLed() int {
+	if s.rt == nil || s.rt.coord == nil {
+		return 0
+	}
+	snap := s.rt.coord.Snapshot()
+	if snap == nil {
+		return 0
+	}
+	n := 0
+	for _, p := range snap.Partitions {
+		if p.Broker == s.rt.brokerID && s.rt.coord.Owns(p.Topic, p.Partition) {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *healthRuntimeState) PartitionsAssigned() int {
+	if s.rt == nil || s.rt.coord == nil {
+		return 0
+	}
+	snap := s.rt.coord.Snapshot()
+	if snap == nil {
+		return 0
+	}
+	n := 0
+	for _, p := range snap.Partitions {
+		if p.Broker == s.rt.brokerID {
+			n++
+		}
+	}
+	return n
+}
+
+// PartitionsRecovering is wired in Phase 10 Gap #3 — needs takeover
+// instrumentation in TakeoverDriver. Until then, the broker reports
+// 0 here, which is correct in steady state.
+func (s *healthRuntimeState) PartitionsRecovering() int { return 0 }
 
 // topicSourceAdapter wraps *broker.TopicRegistry as controller.TopicSource.
 // Lives in cmd/skafka rather than internal/broker because internal/controller's

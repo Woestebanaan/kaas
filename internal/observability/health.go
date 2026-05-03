@@ -7,57 +7,109 @@ import (
 	"sync/atomic"
 )
 
-// HealthState is a snapshot returned by /healthz. The handler tallies the
-// current state each request — there is no caching and no ticking goroutine.
+// RuntimeState is the v3 broker runtime view that /healthz reports.
+// Implementations MUST be safe to call from any goroutine.
+//
+// A nil RuntimeState is acceptable — the handler returns zero values
+// for the runtime fields, which is the right answer in local-dev mode
+// where no controller / coordinator / heartbeat client is running.
+//
+// Methods that have no measurement yet should return -1 (for the
+// *Ms / latency fields) so the handler can render `null` in JSON
+// instead of a misleading zero. Counters return 0.
+type RuntimeState interface {
+	IsController() bool
+	ControllerID() string
+	ControllerEpoch() int64
+	HeartbeatRTTMs() int64
+	HeartbeatAgeMs() int64
+	AssignmentVersion() uint64
+	AssignmentAgeMs() int64
+	PartitionsLed() int
+	PartitionsAssigned() int
+	PartitionsRecovering() int
+}
+
+// HealthState matches the schema in skafka-plan-v3.md (Phase 10). The
+// json tags use the plan's field names verbatim so dashboards and
+// scripts written against the plan work unchanged.
 type HealthState struct {
 	Status    string   `json:"status"`
-	BrokerID  int32    `json:"broker_id,omitempty"`
+	BrokerID  string   `json:"broker_id,omitempty"`
 	Listeners []string `json:"listeners"`
 	TLS       *TLSInfo `json:"tls,omitempty"`
+
+	// v3 runtime fields. Zero-valued (or null via *int64 pointers) when
+	// no RuntimeState source is wired (local-dev) or when no measurement
+	// has happened yet.
+	IsController         bool   `json:"is_controller"`
+	ControllerID         string `json:"controller_id,omitempty"`
+	ControllerEpoch      int64  `json:"controller_epoch,omitempty"`
+	HeartbeatRTTMs       *int64 `json:"heartbeat_rtt_ms,omitempty"`
+	HeartbeatAgeMs       *int64 `json:"heartbeat_age_ms,omitempty"`
+	AssignmentVersion    uint64 `json:"assignment_version,omitempty"`
+	AssignmentAgeMs      *int64 `json:"assignment_age_ms,omitempty"`
+	PartitionsLed        int    `json:"partitions_led"`
+	PartitionsAssigned   int    `json:"partitions_assigned"`
+	PartitionsRecovering int    `json:"partitions_recovering"`
 }
 
-// TLSInfo reports TLS listener readiness. ExternalHost is the advertised external
-// hostname; empty until the operator injects it for the external listener.
+// TLSInfo reports TLS listener readiness.
 type TLSInfo struct {
-	Enabled        bool   `json:"enabled"`
-	ExternalHost   string `json:"external_host,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	ExternalHost string `json:"external_host,omitempty"`
 }
 
-// readySnapshot is the state for the /readyz handler: true iff the broker is
-// fully in-service (listener bound AND, in k8s mode, external host injected).
 var readySnapshot atomic.Bool
 
-// SetReady flips the /readyz state. Called by the broker main once all listeners
-// are up and any required env vars are present.
+// SetReady flips the /readyz state. Called by the broker main once all
+// listeners are up and any required env vars are present.
 func SetReady(v bool) { readySnapshot.Store(v) }
 
 // Ready reports the current /readyz state.
 func Ready() bool { return readySnapshot.Load() }
 
-// HealthHandler returns a JSON /healthz handler. brokerID may be 0 in local-dev.
-// listeners lists active listener names ("internal", "external").
-func HealthHandler(brokerID int32, listeners []string, tls *TLSInfo) http.HandlerFunc {
+// HealthHandler returns a JSON /healthz handler. brokerID is the v3
+// identifier ("skafka-0"); pass empty in local-dev. listeners enumerates
+// active listener names. source is the v3 runtime view; nil is fine.
+func HealthHandler(brokerID string, listeners []string, tls *TLSInfo, source RuntimeState) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		state := HealthState{
+		s := HealthState{
 			Status:    "ok",
 			BrokerID:  brokerID,
 			Listeners: listeners,
 			TLS:       tls,
 		}
+		if source != nil {
+			s.IsController = source.IsController()
+			s.ControllerID = source.ControllerID()
+			s.ControllerEpoch = source.ControllerEpoch()
+			if v := source.HeartbeatRTTMs(); v >= 0 {
+				s.HeartbeatRTTMs = &v
+			}
+			if v := source.HeartbeatAgeMs(); v >= 0 {
+				s.HeartbeatAgeMs = &v
+			}
+			s.AssignmentVersion = source.AssignmentVersion()
+			if v := source.AssignmentAgeMs(); v >= 0 {
+				s.AssignmentAgeMs = &v
+			}
+			s.PartitionsLed = source.PartitionsLed()
+			s.PartitionsAssigned = source.PartitionsAssigned()
+			s.PartitionsRecovering = source.PartitionsRecovering()
+		}
 		w.Header().Set("content-type", "application/json")
-		_ = json.NewEncoder(w).Encode(state)
+		_ = json.NewEncoder(w).Encode(s)
 	}
 }
 
-// ReadyHandler returns a JSON /readyz handler that respects the atomic readiness
-// flag and also requires EXTERNAL_ADVERTISED_HOST to be set when the external
-// listener is active.
+// ReadyHandler returns a JSON /readyz handler that respects the atomic
+// readiness flag and also requires EXTERNAL_HOSTNAME_PATTERN to be set
+// when the external listener is active — prevents incorrect Metadata
+// responses from reaching external clients during LB-IP discovery.
 func ReadyHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		ready := readySnapshot.Load()
-		// If the external listener is meant to be live, refuse readiness until
-		// the advertised host is injected — prevents incorrect Metadata responses
-		// from reaching external clients during LB-IP discovery.
 		if os.Getenv("SKAFKA_TLS_CERT_FILE") != "" && os.Getenv("EXTERNAL_HOSTNAME_PATTERN") == "" {
 			ready = false
 		}
