@@ -35,9 +35,9 @@ type KubernetesLeaseManager struct {
 	subscribers []chan LeaderChange
 }
 
-// parseOrdinalFromIdentity extracts the StatefulSet ordinal from an identity string
+// ParseOrdinalFromIdentity extracts the StatefulSet ordinal from an identity string
 // such as "broker-2" (returns 2) or "skafka-broker-3" (returns 3).
-func parseOrdinalFromIdentity(identity string) int32 {
+func ParseOrdinalFromIdentity(identity string) int32 {
 	parts := strings.Split(identity, "-")
 	if len(parts) == 0 {
 		return -1
@@ -63,7 +63,7 @@ func NewKubernetesLeaseManager(
 		client:           client,
 		namespace:        namespace,
 		selfID:           selfID,
-		selfOrdinal:      parseOrdinalFromIdentity(selfID),
+		selfOrdinal:      ParseOrdinalFromIdentity(selfID),
 		onStartedLeading: onStartedLeading,
 		onStoppedLeading: onStoppedLeading,
 		held:             make(map[string]struct{}),
@@ -145,7 +145,7 @@ func (m *KubernetesLeaseManager) Acquire(ctx context.Context, topic string, part
 				}
 			},
 			OnNewLeader: func(identity string) {
-				ordinal := parseOrdinalFromIdentity(identity)
+				ordinal := ParseOrdinalFromIdentity(identity)
 				m.mu.Lock()
 				m.leaders[key] = ordinal
 				m.mu.Unlock()
@@ -265,7 +265,7 @@ func (m *KubernetesLeaseManager) AcquireCoordinator(ctx context.Context, groupID
 				m.mu.Unlock()
 			},
 			OnNewLeader: func(identity string) {
-				ordinal := parseOrdinalFromIdentity(identity)
+				ordinal := ParseOrdinalFromIdentity(identity)
 				m.mu.Lock()
 				m.leaders[pkey] = ordinal
 				m.mu.Unlock()

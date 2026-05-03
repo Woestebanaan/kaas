@@ -4,54 +4,68 @@ import (
 	"context"
 	"sort"
 	"sync"
-	"time"
 
-	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
 
-// Manager handles coordinator election, group state, and offset storage for all
-// consumer groups this broker is coordinator for.
+// GroupAssignmentSource is the v3 contract Manager uses to decide who
+// coordinates each consumer group. It replaces the v2.6
+// per-group-Lease informer pattern: ownership is now a row in the
+// cluster controller's assignment.json, validated by the broker's
+// BrokerCoordinator, and exposed through this two-method interface.
+//
+// *internal/broker.Coordinator satisfies it structurally — no import
+// in this direction (broker already imports coordinator).
+type GroupAssignmentSource interface {
+	// OwnsGroup reports whether this broker is the assigned coordinator
+	// for groupID under the most recently applied assignment.
+	OwnsGroup(groupID string) bool
+	// GroupCoordinator returns the broker ID assigned to coordinate
+	// groupID. Second return is false when the group has no row in the
+	// current assignment (typically the first JoinGroup arrives before
+	// the controller has registered the group).
+	GroupCoordinator(groupID string) (brokerID string, ok bool)
+}
+
+// BrokerLookup maps a broker ID string to the (NodeID, host, port)
+// triple Kafka clients need to address it. v2.6 used ordinal-based
+// lookups; v3's controller-driven assignment uses string IDs (matching
+// the StatefulSet pod name), but Kafka's wire format keeps the int32
+// NodeID, so the lookup returns both.
+type BrokerLookup func(brokerID string) (nodeID int32, host string, port int32, ok bool)
+
+// Manager handles consumer group state and offset storage for groups
+// this broker is the assigned coordinator for. Coordinator selection
+// is the GroupAssignmentSource's job (Phase 5: the cluster controller
+// assigns groups via assignment.json, validated by BrokerCoordinator).
 type Manager struct {
-	ctx         context.Context
-	leases      lease.CoordinatorLeaseManager
-	lookupBroker func(ordinal int32) (host string, port int32, ok bool)
-	offsets     *OffsetStore
+	ctx          context.Context
+	groupSrc     GroupAssignmentSource
+	lookupBroker BrokerLookup
+	offsets      *OffsetStore
 
 	mu     sync.Mutex
 	groups map[string]*group
 }
 
-// NewManager creates a CoordinatorManager.
-// lookupBroker maps a node ordinal to its (host, port) for FindCoordinator responses.
+// NewManager creates a Manager. groupSrc is the source of truth for
+// "is this broker the coordinator for group G?" — typically a
+// *internal/broker.Coordinator. lookupBroker maps broker ID strings
+// to their (NodeID, host, port) for FindCoordinator responses.
 func NewManager(
 	ctx context.Context,
-	leases lease.CoordinatorLeaseManager,
-	lookupBroker func(ordinal int32) (host string, port int32, ok bool),
+	groupSrc GroupAssignmentSource,
+	lookupBroker BrokerLookup,
 	offsets *OffsetStore,
 ) *Manager {
 	return &Manager{
 		ctx:          ctx,
-		leases:       leases,
+		groupSrc:     groupSrc,
 		lookupBroker: lookupBroker,
 		offsets:      offsets,
 		groups:       make(map[string]*group),
 	}
-}
-
-// ensureAcquiring starts coordinator lease acquisition for groupID if not already started,
-// then waits (up to 5s) for any broker to hold the lease.
-func (m *Manager) ensureAcquiring(groupID string) {
-	m.mu.Lock()
-	_, known := m.groups[groupID]
-	m.mu.Unlock()
-	if !known {
-		_ = m.leases.AcquireCoordinator(m.ctx, groupID)
-	}
-	waitCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
-	defer cancel()
-	m.leases.WaitForCoordinator(waitCtx, groupID)
 }
 
 func (m *Manager) getOrCreate(groupID string) *group {
@@ -67,9 +81,13 @@ func (m *Manager) getOrCreate(groupID string) *group {
 	return g
 }
 
-// isCoordinator returns true if this broker holds the coordinator lease for groupID.
+// isCoordinator returns true if this broker is the assigned coordinator
+// for groupID under the cluster's current assignment.
 func (m *Manager) isCoordinator(groupID string) bool {
-	return m.leases.IsCoordinator(groupID)
+	if m.groupSrc == nil {
+		return false
+	}
+	return m.groupSrc.OwnsGroup(groupID)
 }
 
 // ---- API handler entry points ----
@@ -78,16 +96,21 @@ func (m *Manager) FindCoordinator(req *api.FindCoordinatorRequest) *api.FindCoor
 	resp := &api.FindCoordinatorResponse{}
 
 	lookupOne := func(groupID string) (int32, string, int32, int16) {
-		m.ensureAcquiring(groupID)
-		ordinal := m.leases.CoordinatorFor(groupID)
-		if ordinal < 0 {
+		if m.groupSrc == nil {
 			return 0, "", 0, int16(codec.ErrCoordinatorNotAvailable)
 		}
-		host, port, ok := m.lookupBroker(ordinal)
+		brokerID, ok := m.groupSrc.GroupCoordinator(groupID)
+		if !ok {
+			// Group not yet in the cluster assignment. The client should
+			// retry — the controller will register the group on the next
+			// recompute (driven by ActiveGroups in BrokerStatus).
+			return 0, "", 0, int16(codec.ErrCoordinatorNotAvailable)
+		}
+		nodeID, host, port, ok := m.lookupBroker(brokerID)
 		if !ok {
 			return 0, "", 0, int16(codec.ErrCoordinatorNotAvailable)
 		}
-		return ordinal, host, port, 0
+		return nodeID, host, port, 0
 	}
 
 	if len(req.CoordinatorKeys) > 0 {
@@ -114,7 +137,6 @@ func (m *Manager) FindCoordinator(req *api.FindCoordinatorRequest) *api.FindCoor
 }
 
 func (m *Manager) JoinGroup(req *api.JoinGroupRequest, clientID string) *api.JoinGroupResponse {
-	m.ensureAcquiring(req.GroupID)
 	if !m.isCoordinator(req.GroupID) {
 		return &api.JoinGroupResponse{ErrorCode: int16(codec.ErrNotCoordinator), GenerationID: -1}
 	}

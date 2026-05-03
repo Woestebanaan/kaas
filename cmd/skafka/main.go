@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -160,25 +161,33 @@ func runBroker(ctx context.Context) {
 			}
 		}
 
-		// Build coordinator manager.
+		// Build coordinator manager. Phase 5: GroupAssignmentSource replaces
+		// the v2.6 per-group Lease wiring. Until the runtime
+		// internal/broker.Coordinator is end-to-end wired into main.go (a
+		// follow-up to phase4 step 5/6), use LocalGroupSource — single
+		// broker is always coordinator. k8s-mode lookupBroker walks the
+		// brokerRegistry by parsing the trailing ordinal from the
+		// "skafka-N" identifier convention.
+		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
+		groupSrc := broker.NewLocalGroupSource(brokerIDStr)
+		var lookupBroker coordinator.BrokerLookup
 		if k8sMode {
-			lookupBroker := func(ordinal int32) (string, int32, bool) {
+			lookupBroker = func(id string) (int32, string, int32, bool) {
+				ord := lease.ParseOrdinalFromIdentity(id)
 				for _, ep := range brokerReg.All() {
-					if ep.NodeID == ordinal {
-						return ep.Host, ep.Port, true
+					if ep.NodeID == ord {
+						return ep.NodeID, ep.Host, ep.Port, true
 					}
 				}
-				return "", 0, false
+				return 0, "", 0, false
 			}
-			offsetStore := coordinator.NewOffsetStore(dataDir)
-			coordMgr = coordinator.NewManager(ctx, leaseManager.(*lease.KubernetesLeaseManager), lookupBroker, offsetStore)
 		} else {
-			// Local-dev: single broker is always coordinator.
-			localLeases := leaseManager.(*broker.LocalLeaseManager)
-			lookupBroker := func(_ int32) (string, int32, bool) { return host, portNum, true }
-			offsetStore := coordinator.NewOffsetStore(dataDir)
-			coordMgr = coordinator.NewManager(ctx, localLeases, lookupBroker, offsetStore)
+			lookupBroker = func(_ string) (int32, string, int32, bool) {
+				return brokerID, host, portNum, true
+			}
 		}
+		offsetStore := coordinator.NewOffsetStore(dataDir)
+		coordMgr = coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore)
 
 		store = engine
 		slog.Info("using disk storage", "dir", dataDir)
@@ -186,11 +195,16 @@ func runBroker(ctx context.Context) {
 		store = broker.NewMemoryStorage()
 		slog.Info("using in-memory storage")
 
-		// In-memory mode: wire coordinator with local leases (local-dev only).
-		localLeases := leaseManager.(*broker.LocalLeaseManager)
-		lookupBroker := func(_ int32) (string, int32, bool) { return host, portNum, true }
+		// In-memory mode: same LocalGroupSource pattern as the disk-backed
+		// path above. Phase 5: GroupAssignmentSource replaces v2.6 per-group
+		// Lease.
+		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
+		groupSrc := broker.NewLocalGroupSource(brokerIDStr)
+		lookupBroker := func(_ string) (int32, string, int32, bool) {
+			return brokerID, host, portNum, true
+		}
 		offsetStore := coordinator.NewOffsetStore("")
-		coordMgr = coordinator.NewManager(ctx, localLeases, lookupBroker, offsetStore)
+		coordMgr = coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore)
 	}
 
 	// --- Auth engine ---

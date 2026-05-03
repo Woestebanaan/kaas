@@ -7,30 +7,31 @@ import (
 	"time"
 
 	"github.com/woestebanaan/skafka/internal/coordinator"
-	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
-// alwaysCoordinator is a minimal CoordinatorLeaseManager stub that always reports
-// this broker as coordinator. Used for tests that focus on offset storage, not election.
-type alwaysCoordinator struct{}
+// alwaysGroupSource satisfies coordinator.GroupAssignmentSource by saying
+// "this broker is coordinator for every group". The Phase 5 rewire moved
+// coordinator selection from per-group Lease informers (the old
+// alwaysCoordinator stub here) onto this GroupAssignmentSource interface.
+type alwaysGroupSource struct{ brokerID string }
 
-func (a *alwaysCoordinator) AcquireCoordinator(_ context.Context, _ string) error { return nil }
-func (a *alwaysCoordinator) ReleaseCoordinator(_ string) error                    { return nil }
-func (a *alwaysCoordinator) IsCoordinator(_ string) bool                          { return true }
-func (a *alwaysCoordinator) CoordinatorFor(_ string) int32                        { return 0 }
-func (a *alwaysCoordinator) WaitForCoordinator(_ context.Context, _ string) bool  { return true }
+func (a *alwaysGroupSource) OwnsGroup(_ string) bool { return true }
+func (a *alwaysGroupSource) GroupCoordinator(_ string) (string, bool) {
+	return a.brokerID, true
+}
 
-var _ lease.CoordinatorLeaseManager = (*alwaysCoordinator)(nil)
+var _ coordinator.GroupAssignmentSource = (*alwaysGroupSource)(nil)
 
-// newTestCoordinator creates a coordinator backed by a fake Kubernetes client.
+// newTestCoordinator creates a Manager wired to an alwaysGroupSource —
+// the test focuses on group state and offset storage, not on coordinator
+// selection. fake.NewSimpleClientset is no longer needed because the
+// per-group Lease path is gone.
 func newTestCoordinator(t *testing.T, podName string) *coordinator.Manager {
 	t.Helper()
-	fakeClient := fake.NewSimpleClientset()
-	lm := lease.NewKubernetesLeaseManager(fakeClient, "default", podName, nil, nil)
-	lookup := func(_ int32) (string, int32, bool) { return "localhost", 9092, true }
-	return coordinator.NewManager(context.Background(), lm, lookup, coordinator.NewOffsetStore(t.TempDir()))
+	src := &alwaysGroupSource{brokerID: podName}
+	lookup := func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true }
+	return coordinator.NewManager(context.Background(), src, lookup, coordinator.NewOffsetStore(t.TempDir()))
 }
 
 // fastJoin builds a JoinGroupRequest with a short rebalance timeout so timer-based
@@ -223,8 +224,8 @@ func TestHeartbeatAndSessionTimeout(t *testing.T) {
 func TestOffsetCommitFetch(t *testing.T) {
 	dir := t.TempDir()
 	offsets := coordinator.NewOffsetStore(dir)
-	mgr := coordinator.NewManager(context.Background(), &alwaysCoordinator{},
-		func(_ int32) (string, int32, bool) { return "localhost", 9092, true },
+	mgr := coordinator.NewManager(context.Background(), &alwaysGroupSource{brokerID: "test"},
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
 		offsets)
 
 	commitReq := &api.OffsetCommitRequest{
@@ -268,8 +269,8 @@ func TestOffsetCommitFetch(t *testing.T) {
 	if err := offsets2.Load("commit-group"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	mgr2 := coordinator.NewManager(context.Background(), &alwaysCoordinator{},
-		func(_ int32) (string, int32, bool) { return "localhost", 9092, true }, offsets2)
+	mgr2 := coordinator.NewManager(context.Background(), &alwaysGroupSource{brokerID: "test"},
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true }, offsets2)
 	fetchResp2 := mgr2.OffsetFetch(fetchReq)
 	for _, p := range fetchResp2.Topics[0].Partitions {
 		if p.CommittedOffset != expected[p.PartitionIndex] {

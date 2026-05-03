@@ -179,6 +179,44 @@ func (c *Coordinator) LastHeartbeat() time.Time {
 	return c.heart.LastReceived()
 }
 
+// OwnsGroup reports whether this broker is the assigned coordinator for
+// groupID under the most recently applied assignment. Phase 5: replaces
+// the v2.6 per-group Lease IsCoordinator check.
+func (c *Coordinator) OwnsGroup(groupID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.current == nil {
+		return false
+	}
+	for _, g := range c.current.ConsumerGroups {
+		if g.GroupID == groupID {
+			return g.Broker == c.brokerID
+		}
+	}
+	return false
+}
+
+// GroupCoordinator returns the broker ID assigned to coordinate
+// groupID. Second return is false when the group has no row in the
+// current assignment — the controller hasn't registered it yet.
+// FindCoordinator surfaces that as CoordinatorNotAvailable so the
+// client retries; the next BrokerStatus heartbeat reports the group
+// in active_groups, the controller registers it, the client's next
+// FindCoordinator succeeds.
+func (c *Coordinator) GroupCoordinator(groupID string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.current == nil {
+		return "", false
+	}
+	for _, g := range c.current.ConsumerGroups {
+		if g.GroupID == groupID {
+			return g.Broker, true
+		}
+	}
+	return "", false
+}
+
 // Snapshot returns a defensive copy of the most recently applied
 // assignment, useful for diagnostics. Returns nil before any assignment
 // has been applied.

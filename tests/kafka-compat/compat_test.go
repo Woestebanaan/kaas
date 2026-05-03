@@ -53,7 +53,10 @@ func TestMain(m *testing.M) {
 	// this broker as the coordinator. Offset store goes to a tempdir so the
 	// __consumer_offsets/ tree doesn't leak into the working directory.
 	localLeases := broker.NewLocalLeaseManager()
-	lookupBroker := func(_ int32) (string, int32, bool) { return "127.0.0.1", int32(port), true }
+	groupSrc := broker.NewLocalGroupSource("skafka-0")
+	lookupBroker := func(_ string) (int32, string, int32, bool) {
+		return 0, "127.0.0.1", int32(port), true
+	}
 	offsetDir, err := os.MkdirTemp("", "skafka-compat-offsets-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "MkdirTemp: %v\n", err)
@@ -61,7 +64,7 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(offsetDir)
 	offsetStore := coordinator.NewOffsetStore(offsetDir)
-	coordMgr := coordinator.NewManager(ctx, localLeases, lookupBroker, offsetStore)
+	coordMgr := coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore)
 
 	brokerInfo := handlers.BrokerInfo{
 		NodeID:    0,

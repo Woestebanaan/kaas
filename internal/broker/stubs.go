@@ -177,6 +177,25 @@ func (l *LocalLeaseManager) WaitForCoordinator(_ context.Context, _ string) bool
 
 var _ lease.CoordinatorLeaseManager = (*LocalLeaseManager)(nil)
 
+// ---- LocalGroupSource ---- //
+
+// LocalGroupSource is a stub coordinator.GroupAssignmentSource for
+// single-broker dev / test setups: this broker is the assigned
+// coordinator for every group it's asked about. Replaces the v2.6
+// LocalLeaseManager.IsCoordinator path under the Phase 5 rewire.
+type LocalGroupSource struct {
+	BrokerID string
+}
+
+func NewLocalGroupSource(brokerID string) *LocalGroupSource {
+	return &LocalGroupSource{BrokerID: brokerID}
+}
+
+func (l *LocalGroupSource) OwnsGroup(_ string) bool { return true }
+func (l *LocalGroupSource) GroupCoordinator(_ string) (string, bool) {
+	return l.BrokerID, true
+}
+
 // ---- AllowAllAuthEngine ---- //
 
 // AllowAllAuthEngine authenticates every connection as ANONYMOUS and permits all operations.

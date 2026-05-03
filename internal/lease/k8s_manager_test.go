@@ -42,9 +42,9 @@ func TestParseOrdinalFromIdentityLocal(t *testing.T) {
 		{"bad", -1},
 	}
 	for _, tc := range cases {
-		got := parseOrdinalFromIdentity(tc.in)
+		got := ParseOrdinalFromIdentity(tc.in)
 		if got != tc.want {
-			t.Errorf("parseOrdinalFromIdentity(%q)=%d, want %d", tc.in, got, tc.want)
+			t.Errorf("ParseOrdinalFromIdentity(%q)=%d, want %d", tc.in, got, tc.want)
 		}
 	}
 }
