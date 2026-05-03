@@ -169,13 +169,6 @@ func (l *LocalLeaseManager) LeaderFor(_ string, _ int32) int32                 {
 func (l *LocalLeaseManager) WatchLeaders(_ context.Context) (<-chan lease.LeaderChange, error) {
 	return make(chan lease.LeaderChange), nil
 }
-func (l *LocalLeaseManager) AcquireCoordinator(_ context.Context, _ string) error { return nil }
-func (l *LocalLeaseManager) ReleaseCoordinator(_ string) error                    { return nil }
-func (l *LocalLeaseManager) IsCoordinator(_ string) bool                          { return true }
-func (l *LocalLeaseManager) CoordinatorFor(_ string) int32                        { return 0 }
-func (l *LocalLeaseManager) WaitForCoordinator(_ context.Context, _ string) bool  { return true }
-
-var _ lease.CoordinatorLeaseManager = (*LocalLeaseManager)(nil)
 
 // ---- LocalGroupSource ---- //
 

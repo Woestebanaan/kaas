@@ -17,15 +17,3 @@ type LeaseManager interface {
 	WatchLeaders(ctx context.Context) (<-chan LeaderChange, error)
 }
 
-// CoordinatorLeaseManager manages one Kubernetes Lease per consumer group.
-// The lease holder IS the coordinator for that group.
-type CoordinatorLeaseManager interface {
-	AcquireCoordinator(ctx context.Context, groupID string) error
-	ReleaseCoordinator(groupID string) error
-	IsCoordinator(groupID string) bool
-	// CoordinatorFor returns the node ordinal of the current coordinator, or -1 if unknown.
-	CoordinatorFor(groupID string) int32
-	// WaitForCoordinator blocks until any broker holds the coordinator lease for groupID,
-	// or the context is cancelled. Returns true if a coordinator became known.
-	WaitForCoordinator(ctx context.Context, groupID string) bool
-}
