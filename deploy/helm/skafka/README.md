@@ -157,3 +157,15 @@ annotation). Delete it manually if you want to reclaim the storage:
 ```bash
 kubectl -n kafka delete pvc my-skafka-skafka-data
 ```
+
+**Note:** the `KafkaCluster` CR has a finalizer that the operator must
+process to clean up the cert-manager Certificate and Gateway TLSRoutes.
+Because `helm uninstall` deletes the operator Deployment in parallel
+with the `KafkaCluster` CR, the operator may terminate before the
+finalizer fires, leaving the CR stuck in `Terminating`. Delete the CR
+explicitly first:
+
+```bash
+kubectl -n kafka delete kafkacluster my-skafka --wait
+helm uninstall my-skafka -n kafka
+```
