@@ -105,6 +105,34 @@ mtime as the fast-failover signal, and the default NFS attribute cache
 (60s) would delay every controller failover. `nconnect` raises throughput
 under concurrent fsyncs from multiple brokers.
 
+## External access
+
+The external listener uses **explicit per-broker hostnames** with a
+**SAN-per-broker certificate** — the chart materialises a single
+cert-manager `Certificate` whose `dnsNames` list includes
+`broker-0.kafka.example.com`, `broker-1.kafka.example.com`, …, plus
+the optional `bootstrapHostname`. Both choices are deliberate:
+
+- **Per-broker hostnames, not wildcard.** Wildcard hostnames
+  (`*.kafka.example.com`) would simplify DNS but require a DNS-01 ACME
+  challenge — which adds an external dependency on a DNS provider that
+  cert-manager can program. Explicit per-broker hostnames work with
+  HTTP-01 (Gateway-fronted) or any pre-existing DNS-managed by
+  whoever runs the cluster. The cost is one DNS record per broker
+  pod, only changing when `broker.replicaCount` changes.
+- **SAN-per-broker, not separate cert-per-broker.** Issuing one
+  certificate per broker would multiply ACME issuance cost and
+  rotation churn for no gain — every broker pod mounts the same
+  Secret, and the in-process TLS listener picks the right SNI from
+  the cert's SAN list. cert-manager rotates this single Secret
+  in-place; the broker fsnotify-watches the mount and hot-reloads
+  without a pod restart.
+
+If you scale `broker.replicaCount` up at runtime, the operator
+re-reconciles the `KafkaCluster` CR and updates the Certificate's
+`dnsNames` to add the new SAN; cert-manager then re-issues the cert.
+This is a one-time cost per scale event, not per request.
+
 ## Configuration
 
 See `values.yaml` for the full set of tunables. Common overrides:

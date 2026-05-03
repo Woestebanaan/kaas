@@ -13,6 +13,15 @@ Wait for the cert-manager Certificate to be ready:
 
   kubectl get certificate {{ include "skafka.fullname" . }}-broker-tls -n {{ .Release.Namespace }}
 
+{{- with .Values.listeners.external.bootstrapHostname }}
+Configure your Kafka clients with the bootstrap address:
+
+  {{ . }}:{{ $.Values.listeners.external.port }}
+
+It is also a SAN on the broker certificate, so any client that resolves it
+to one of the broker pods (e.g. a CNAME pointing at broker-0) will succeed
+the TLS handshake. Clients learn the full per-broker list from Metadata.
+{{- else }}
 Configure your Kafka clients with any one of the bootstrap servers:
   {{- range $i, $e := until (int .Values.broker.replicaCount) }}
   {{ printf $.Values.listeners.external.hostnamePattern $i }}:{{ $.Values.listeners.external.port }}
@@ -21,6 +30,7 @@ Configure your Kafka clients with any one of the bootstrap servers:
 Each address resolves to its own broker pod via SNI. Clients learn the full list
 from Metadata and use the Kafka protocol's standard retry behaviour for leader
 changes — no special client configuration needed.
+{{- end }}
 {{- else }}
 
 External access is disabled. In-cluster clients connect directly to:
