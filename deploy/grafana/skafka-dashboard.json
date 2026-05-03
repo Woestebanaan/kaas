@@ -106,6 +106,185 @@
         {"expr": "sum(increase(skafka_controller_failovers_total[1m]))", "legendFormat": "cluster"},
         {"expr": "sum by (broker_id) (increase(skafka_controller_failovers_total[1m]))", "legendFormat": "{{broker_id}}"}
       ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Controller failover duration p99 (s)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_controller_failover_duration_seconds_bucket[5m])))", "legendFormat": "p99"},
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_controller_failover_duration_seconds_bucket[5m])))", "legendFormat": "p50"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Current controller (per broker)",
+      "description": "1 = this broker holds the cluster controller lease. Sum across the fleet should always be 1 in steady state.",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 30},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "skafka_is_controller", "legendFormat": "{{broker_id}}"}
+      ],
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Broker count: alive vs assigned",
+      "description": "Divergence means the controller is catching up to a topology change. Should match in steady state.",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 30},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "max(skafka_broker_count_alive)", "legendFormat": "alive"},
+        {"expr": "max(skafka_broker_count_assigned)", "legendFormat": "assigned"}
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "assignment.json size",
+      "description": "Approaches the Kubernetes 1MB CR-status cap around 8000 partitions; CR mirror truncates above that.",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 30},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "max(skafka_assignment_file_size_bytes)"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 524288},
+            {"color": "red", "value": 838860}
+          ]}
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Assignment version per broker",
+      "description": "Each broker's last-applied version. A flat line on one broker while peers climb = stuck broker.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "skafka_assignment_version", "legendFormat": "{{broker_id}}"}
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "assignment.json write latency p50 / p99",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_assignment_file_write_latency_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_assignment_file_write_latency_seconds_bucket[5m])))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Heartbeat RTT p50 / p99",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_heartbeat_rtt_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_heartbeat_rtt_seconds_bucket[5m])))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Self-fence + heartbeat miss events (1m)",
+      "description": "Both should be zero in steady state. Spikes correlate with controller failover or heartbeat path latency.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (broker_id) (increase(skafka_self_fence_events_total[1m]))", "legendFormat": "self_fence {{broker_id}}"},
+        {"expr": "sum by (broker_id) (increase(skafka_heartbeat_misses_total[1m]))", "legendFormat": "miss {{broker_id}}"}
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Stale assignments rejected (1m)",
+      "description": "Non-zero means a partitioned ex-controller is still writing files. The epoch fence is doing its job — but operators should investigate.",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 52},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (broker_id) (increase(skafka_stale_assignments_rejected_total[1m]))", "legendFormat": "{{broker_id}}"}
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Assignment polls (change vs no-change, 1m)",
+      "description": "Most polls find no change (false). A burst of true labels = active assignment churn.",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 52},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (change_detected) (increase(skafka_assignment_polls_total[1m]))", "legendFormat": "change_detected={{change_detected}}"}
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "CR mirror writes by result (1m)",
+      "description": "Status updates to KafkaClusterAssignments. not_found is fine briefly during fresh install; persistent error is a problem.",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 52},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (result) (increase(skafka_assignment_cr_mirror_writes_total[1m]))", "legendFormat": "{{result}}"}
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Byte-opacity tripwires (MUST stay at zero)",
+      "description": "If either line leaves zero, code is decoding individual records or re-encoding RecordBatches — a violation of the v3.3 byte-mover invariant. Page on this.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 58},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(skafka_codec_record_decode_total)", "legendFormat": "record_decode"},
+        {"expr": "sum(skafka_codec_batch_reencode_total)", "legendFormat": "batch_reencode"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]}
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Partition high watermark by topic",
+      "description": "Per-leader HWM. Use `max by (topic, partition)` to dedupe across non-leader brokers reporting zero.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 66},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (topic) (max by (topic, partition) (skafka_partition_high_watermark))", "legendFormat": "{{topic}}"}
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Partition leader churn",
+      "description": "When skafka_partition_leader changes for a (topic, partition), this counter ticks. Steady = stable assignment; bursts = rebalance / failover.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 66},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(changes(skafka_partition_leader[5m]))", "legendFormat": "leader changes (5m)"}
+      ]
     }
   ],
   "__inputs": [

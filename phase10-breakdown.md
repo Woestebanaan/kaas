@@ -399,7 +399,25 @@ that decodes a record (e.g. for "smart" partitioning or some
 debugging helper) would silently break the byte-opacity contract;
 the tripwire makes that loud.
 
-### Gap #6: Update the Grafana dashboard for v3.3 panels (P1)
+### Gap #6: Update the Grafana dashboard for v3.3 panels (P1) — DONE
+
+> **Status:** shipped. `deploy/grafana/skafka-dashboard.json` grew
+> from 8 to 22 panels, organised in rows:
+>
+>   - y=22: Controller failovers + failover duration p99
+>   - y=30: Current controller (per broker), broker_alive vs assigned, assignment.json size (with 1MB cap thresholds)
+>   - y=36: Assignment version per broker, assignment.json write latency
+>   - y=44: Heartbeat RTT p50/p99, self-fence + miss events
+>   - y=52: Stale assignments rejected, assignment polls (change/no-change), CR mirror writes by result
+>   - y=58: Byte-opacity tripwires (full-width, red threshold at value=1)
+>   - y=66: Partition HWM by topic, partition leader churn
+>
+> Each panel has a description that explains what "good" looks like
+> and what an anomaly indicates — the dashboard doubles as runbook
+> documentation. The byte-opacity tripwire panel uses absolute
+> thresholds so any non-zero point lights up red.
+
+### Gap #6 (original): Update the Grafana dashboard for v3.3 panels (P1)
 
 `deploy/grafana/skafka-dashboard.json` has 9 panels for v2.6 metrics.
 The plan adds:
