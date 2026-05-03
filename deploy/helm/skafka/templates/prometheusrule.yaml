@@ -1,4 +1,4 @@
-{{- if and .Values.observability.metrics.enabled .Values.observability.alerts.enabled }}
+{{- if .Values.observability.alerts.enabled }}
 {{- /*
 Phase 10 Gap #7: PrometheusRule for skafka's load-bearing failure
 modes. Off by default — opt in via observability.alerts.enabled.

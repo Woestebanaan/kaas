@@ -19,11 +19,6 @@ spec:
       # follow Lease handoffs.
       port: {{ .Values.broker.ports.heartbeat }}
       targetPort: heartbeat
-    {{- if .Values.observability.metrics.enabled }}
-    - name: metrics
-      port: {{ .Values.observability.metrics.port }}
-      targetPort: metrics
-    {{- end }}
 ---
 apiVersion: v1
 kind: Service

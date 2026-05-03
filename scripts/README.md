@@ -29,13 +29,18 @@ spec: { partitions: 3 }
 EOF
 ```
 
-Skafka only picks up topics on startup. If you just created the topic, or
-if you've changed broker code:
+The broker watches KafkaTopic CRs at runtime (since v0.1.11-preview) — no
+restart needed when a topic is created or its partition count changes.
+Restart only when you've actually swapped the broker image:
 
 ```bash
 kubectl -n skafka rollout restart statefulset/skafka
 kubectl -n skafka rollout status  statefulset/skafka --timeout=120s
 ```
+
+A handful of sample topics (`events`, `audit-log`, `metrics`) already
+ship via `k3s-cluster/apps/skafka/test-data/`; override `TOPIC=events`
+to skip step 1 entirely.
 
 ### 2. Run
 
@@ -55,22 +60,43 @@ Uses `kafka-console-{producer,consumer}.sh` from `/opt/kafka/bin`.
 
 ### 3. If it fails — diagnose in this order
 
-1. **Which stage failed?** The script prints `preflight`, `producing`, then
-   `consuming`. Read its stderr dump first; it's the cheapest signal.
-2. **Broker logs:** `kubectl -n skafka logs statefulset/skafka --tail=300`.
+1. **Which stage failed?** The script prints `preflight`, `producing`,
+   `consuming`, `describe-configs`, `describe-log-dirs`, `list-topics`.
+   Read its stderr dump first; it's the cheapest signal.
+2. **Broker `/healthz`** (richer than logs for cluster-shape issues):
+   ```bash
+   kubectl -n skafka exec statefulset/skafka -- curl -s localhost:8080/healthz | jq
+   ```
+   Look at `is_controller`, `controller_id`, `heartbeat_age_ms`,
+   `assignment_version`, `partitions_led` vs `partitions_assigned`. A
+   stuck broker is usually visible here before the Kafka client notices.
+3. **Broker logs:** `kubectl -n skafka logs statefulset/skafka --tail=300`.
    Look for panics, "unsupported API key N", and decode errors.
-3. **Pod state:** `kubectl -n skafka get pods,events --sort-by=.lastTimestamp | tail -30`.
-4. **Topic state:** `kubectl -n skafka get kafkatopic smoke -o yaml`.
+4. **Metrics in Prometheus** — brokers push OTLP metrics into Prometheus's
+   native OTLP receiver. Query for tripwires, self-fence events, and
+   stale-assignment rejects (this pod is in-cluster, so the Service DNS
+   resolves directly):
+   ```bash
+   curl -sG 'http://prometheus.observability.svc.cluster.local:9090/api/v1/query' \
+     --data-urlencode 'query=skafka_codec_record_decode_total'
+   ```
+5. **Pod state:** `kubectl -n skafka get pods,events --sort-by=.lastTimestamp | tail -30`.
+6. **Topic state:** `kubectl -n skafka get kafkatopic smoke -o yaml`.
+7. **Cluster mirror:** `kubectl -n skafka get kafkaclusterassignments skafka -o yaml`
+   shows the controller's view (broker liveness, partition assignments).
 
 Common failure shapes:
 
-| Symptom                                      | Likely cause                              |
-| -------------------------------------------- | ----------------------------------------- |
-| Preflight fails immediately                  | Broker not listening / ApiVersions broken |
-| "Unsupported API key N" in broker logs       | Missing RPC; implement it                 |
-| Connection reset mid-frame                   | Panic in broker; check logs               |
-| Preflight + produce ok, consumer times out   | Append succeeded but Fetch is wrong       |
-| Test passes once, fails on rerun             | Offset/log persistence bug                |
+| Symptom                                      | Likely cause                                    |
+| -------------------------------------------- | ----------------------------------------------- |
+| Preflight fails immediately                  | Broker not listening / ApiVersions broken       |
+| "Unsupported API key N" in broker logs       | Missing RPC; implement it                       |
+| Connection reset mid-frame                   | Panic in broker; check logs                     |
+| Preflight + produce ok, consumer times out   | Append succeeded but Fetch is wrong             |
+| Test passes once, fails on rerun             | Offset/log persistence bug                      |
+| `is_controller=false` on every broker        | Lease election failing — check controller-Lease |
+| `partitions_led < partitions_assigned`       | Heartbeat stale or takeover stuck               |
+| `skafka_codec_record_decode_total > 0`       | Byte-opacity tripwire fired — page on this      |
 
 ### 4. Fix, then re-test
 

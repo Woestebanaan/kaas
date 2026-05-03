@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Round-trip smoke test for skafka: produce a unique message, consume it back.
+# Round-trip smoke test for skafka: produce N unique messages, consume them back.
 # Uses kafka-console-{producer,consumer}.sh from /opt/kafka/bin. Intended to be
 # run from inside the cluster (the in-cluster Service DNS is the default).
 set -euo pipefail
@@ -7,7 +7,8 @@ set -euo pipefail
 BOOTSTRAP="${BOOTSTRAP:-skafka.skafka.svc.cluster.local:9092}"
 TOPIC="${TOPIC:-smoke}"
 TIMEOUT_MS="${TIMEOUT_MS:-15000}"
-# Per-run token so we never pass on a stale message from an earlier run.
+COUNT="${COUNT:-1000}"
+# Per-run token so we never pass on stale messages from an earlier run.
 TOKEN="${TOKEN:-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}}"
 MESSAGE="${MESSAGE:-Hello world ${TOKEN}}"
 
@@ -20,6 +21,7 @@ fail() { printf '!! %s\n' "$*" >&2; exit 1; }
 log "bootstrap: ${BOOTSTRAP}"
 log "topic:     ${TOPIC}"
 log "token:     ${TOKEN}"
+log "count:     ${COUNT}"
 
 # --- 0. preflight ----------------------------------------------------------
 # Exercises ApiVersions + Metadata. Surfaces wire-protocol problems before we
@@ -35,12 +37,17 @@ fi
 # --- 1. produce ------------------------------------------------------------
 # enable.idempotence=false avoids InitProducerId (API key 22), which skafka
 # does not implement yet.
-log "producing: ${MESSAGE@Q}"
-if ! printf '%s\n' "${MESSAGE}" | kafka-console-producer.sh \
+# Every line carries the run TOKEN and a zero-padded sequence number so the
+# verify step can grep for exact-match presence of all COUNT messages.
+awk -v msg="${MESSAGE}" -v n="${COUNT}" 'BEGIN { for (i = 1; i <= n; i++) printf "%s seq=%06d\n", msg, i }' \
+    >"${TMP}/messages.in"
+log "producing: ${COUNT} messages (prefix ${MESSAGE@Q})"
+if ! kafka-console-producer.sh \
         --bootstrap-server "${BOOTSTRAP}" \
         --topic "${TOPIC}" \
         --producer-property enable.idempotence=false \
         --producer-property acks=1 \
+        <"${TMP}/messages.in" \
         >"${TMP}/produce.out" 2>"${TMP}/produce.err"; then
     cat "${TMP}/produce.err" >&2
     fail "producer failed"
@@ -105,15 +112,23 @@ if ! grep -Fxq -- "${TOPIC}" "${TMP}/topics.out"; then
 fi
 
 # --- 4. verify -------------------------------------------------------------
-if ! grep -Fxq -- "${MESSAGE}" "${TMP}/consume.out"; then
+# Every produced line must appear in the consumer output. Using -Fxc with the
+# produced lines as patterns counts how many consume.out lines exact-match one
+# of our messages — equals COUNT iff all were delivered (TOKEN keeps us from
+# colliding with leftovers from earlier runs).
+matched=$(grep -Fxc -f "${TMP}/messages.in" "${TMP}/consume.out" 2>/dev/null || true)
+matched=${matched:-0}
+if [ "${matched}" -lt "${COUNT}" ]; then
     {
-        echo "expected line: ${MESSAGE@Q}"
+        echo "expected ${COUNT} messages, only matched ${matched} in consumer output"
+        echo "--- first 5 missing ---"
+        grep -Fxv -f "${TMP}/consume.out" "${TMP}/messages.in" | head -n 5 || true
         echo "--- consumer stdout (last 50 lines) ---"
         tail -n 50 "${TMP}/consume.out" || true
         echo "--- consumer stderr (last 50 lines) ---"
         tail -n 50 "${TMP}/consume.err" || true
     } >&2
-    fail "expected message not found in consumer output"
+    fail "not all produced messages found in consumer output (${matched}/${COUNT})"
 fi
 
 log "PASS: round-trip successful"

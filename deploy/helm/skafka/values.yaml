@@ -107,24 +107,20 @@ autoscaling:
   targetConsumerLagMessages: 100000
 
 observability:
-  # Prometheus scrape endpoint on every broker / operator pod. Cheap, always on.
-  metrics:
-    enabled: true
-    port: 9464
-    # Create a Prometheus Operator ServiceMonitor (requires the CRD installed).
-    serviceMonitor:
-      enabled: false
-      labels: {}
-      interval: 30s
-      scrapeTimeout: 10s
-
-  # OTLP push for traces (and optionally metrics). Off by default; point at an
-  # OpenTelemetry Collector to enable.
+  # OTLP push exporters. Each signal is gated independently — metrics push to
+  # Prometheus's native OTLP/HTTP receiver; traces push to an OTel Collector
+  # over OTLP/gRPC.
   otlp:
-    enabled: false
-    endpoint: "otel-collector.observability.svc.cluster.local:4317"
-    insecure: true
+    metrics:
+      enabled: false
+      # Full URL to Prometheus's OTLP receiver (requires
+      # --web.enable-otlp-receiver). Path must end in /v1/metrics.
+      endpoint: "http://prometheus.observability.svc.cluster.local:9090/api/v1/otlp/v1/metrics"
     traces:
+      enabled: false
+      # host:port (gRPC); a scheme prefix is stripped automatically.
+      endpoint: "otel-collector.observability.svc.cluster.local:4317"
+      insecure: true
       # 0.0 = off; 1.0 = every trace. Production default 0.1.
       samplerRatio: 0.1
 

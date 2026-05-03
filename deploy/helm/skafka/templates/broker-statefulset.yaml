@@ -52,10 +52,6 @@ spec:
               containerPort: {{ .Values.broker.ports.health }}
             - name: heartbeat
               containerPort: {{ .Values.broker.ports.heartbeat }}
-            {{- if .Values.observability.metrics.enabled }}
-            - name: metrics
-              containerPort: {{ .Values.observability.metrics.port }}
-            {{- end }}
           env:
             - name: MY_POD_NAME
               valueFrom:
@@ -98,19 +94,19 @@ spec:
             - name: SKAFKA_AUTH_DISABLED
               value: "true"
             {{- end }}
-            {{- if .Values.observability.metrics.enabled }}
-            - name: SKAFKA_METRICS_ADDR
-              value: ":{{ .Values.observability.metrics.port }}"
-            {{- end }}
             - name: SKAFKA_LOG_LEVEL
               value: {{ .Values.observability.logs.level | quote }}
             - name: SKAFKA_LOG_FORMAT
               value: {{ .Values.observability.logs.format | quote }}
-            {{- if .Values.observability.otlp.enabled }}
+            {{- if .Values.observability.otlp.metrics.enabled }}
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: {{ .Values.observability.otlp.metrics.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.observability.otlp.traces.enabled }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.observability.otlp.endpoint | quote }}
+              value: {{ .Values.observability.otlp.traces.endpoint | quote }}
             - name: OTEL_EXPORTER_OTLP_INSECURE
-              value: "{{ .Values.observability.otlp.insecure }}"
+              value: "{{ .Values.observability.otlp.traces.insecure }}"
             - name: OTEL_TRACES_SAMPLER_ARG
               value: "{{ .Values.observability.otlp.traces.samplerRatio }}"
             {{- end }}
