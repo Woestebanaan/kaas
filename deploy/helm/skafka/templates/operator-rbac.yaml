@@ -14,7 +14,7 @@ metadata:
   labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
 rules:
   - apiGroups: [skafka.io]
-    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls, kafkaclusters]
+    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls, kafkaclusters, kafkaclusterassignments]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [skafka.io]
     resources:
@@ -23,6 +23,7 @@ rules:
       - kafkausergroups/status
       - kafkaacls/status
       - kafkaclusters/status
+      - kafkaclusterassignments/status
       - kafkatopics/finalizers
       - kafkausers/finalizers
       - kafkausergroups/finalizers
