@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,13 +61,21 @@ type Config struct {
 	SegmentBytes       int64 // roll to a new segment at this size (default 1 GB)
 	IndexIntervalBytes int64 // write an index entry every N bytes of log data (default 4096)
 	RetentionMs        int64 // delete segments older than this (default 7 days)
+	// FlushIntervalMessages caps how many records can sit in the OS write-back
+	// cache before the engine forces an fsync(2). Skafka is RF=1, so the
+	// storage layer is the entire durability story — the default of 1 trades
+	// ~1ms/batch for honest acks=all semantics. Operators on slow NFS or with
+	// replication-equivalent guarantees from below can relax this; 0 disables
+	// message-driven flushing entirely (sync only at segment roll).
+	FlushIntervalMessages int64
 }
 
 func DefaultConfig() Config {
 	return Config{
-		SegmentBytes:       1 << 30,
-		IndexIntervalBytes: 4096,
-		RetentionMs:        7 * 24 * int64(time.Hour/time.Millisecond),
+		SegmentBytes:          1 << 30,
+		IndexIntervalBytes:    4096,
+		RetentionMs:           7 * 24 * int64(time.Hour/time.Millisecond),
+		FlushIntervalMessages: 1,
 	}
 }
 
@@ -94,6 +103,46 @@ type partitionState struct {
 	segments []segmentMeta // closed segments, sorted by baseOffset
 	logStart int64
 	highWater int64
+	epoch    int64 // current leader epoch, persisted in manifest.json
+	// pendingFlushRecords counts records appended since the last fsync.
+	// flushLocked checks against Config.FlushIntervalMessages and resets to 0.
+	pendingFlushRecords int64
+}
+
+// persistManifestLocked writes manifest.json from the partition's current
+// in-memory state. Caller must hold ps.mu.
+func (ps *partitionState) persistManifestLocked() error {
+	return writeManifest(ps.dir, &Manifest{
+		Epoch:          ps.epoch,
+		HighWatermark:  ps.highWater,
+		LogStartOffset: ps.logStart,
+	})
+}
+
+// flushLocked fsyncs the active segment's log + index files and writes the
+// manifest, then resets the pending-record counter. Caller must hold ps.mu.
+// A flush failure surfaces to the caller — the alternative is silently
+// returning a successful Append for data that may not be durable, which is
+// the bug the flush policy exists to prevent.
+func (ps *partitionState) flushLocked() error {
+	if ps.active == nil {
+		return nil
+	}
+	if ps.active.logFile != nil {
+		if err := ps.active.logFile.Sync(); err != nil {
+			return fmt.Errorf("storage: fsync log: %w", err)
+		}
+	}
+	if ps.active.indexFile != nil {
+		if err := ps.active.indexFile.Sync(); err != nil {
+			return fmt.Errorf("storage: fsync index: %w", err)
+		}
+	}
+	if err := ps.persistManifestLocked(); err != nil {
+		return err
+	}
+	ps.pendingFlushRecords = 0
+	return nil
 }
 
 // NewDiskStorageEngine opens (or creates) the data directory and loads all existing partitions.
@@ -170,11 +219,22 @@ func (e *DiskStorageEngine) CreatePartition(topic string, partition int32) error
 }
 
 // openPartition reads segment files on disk and sets up in-memory state.
+//
+// State recovery order: (1) manifest.json — authoritative for {epoch, hwm,
+// logStartOffset} when present; (2) segment scan — used to derive a fresh
+// HWM and logStartOffset when the manifest is missing; (3) legacy
+// .leader-epoch — read once for epoch only, then the manifest is written
+// over the top so subsequent opens are fast.
 func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 	dir := filepath.Join(e.dataDir, topic, strconv.Itoa(int(partition)))
 	segs, err := listSegments(dir)
 	if err != nil {
 		return err
+	}
+
+	manifest, manifestErr := readManifest(dir)
+	if manifestErr != nil && !errors.Is(manifestErr, fs.ErrNotExist) {
+		return fmt.Errorf("storage: read manifest %s: %w", dir, manifestErr)
 	}
 
 	var ps *partitionState
@@ -186,22 +246,47 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		ps = &partitionState{dir: dir, active: seg}
 	} else {
 		last := segs[len(segs)-1]
-		active, hwm, err := openActiveSegmentFromDisk(last)
+		active, scannedHWM, err := openActiveSegmentFromDisk(last)
 		if err != nil {
 			return fmt.Errorf("open active segment base=%d: %w", last.baseOffset, err)
 		}
 		closed := segs[:len(segs)-1]
-		logStart := last.baseOffset
+		scannedLogStart := last.baseOffset
 		if len(closed) > 0 {
-			logStart = closed[0].baseOffset
+			scannedLogStart = closed[0].baseOffset
 		}
 		ps = &partitionState{
 			dir:       dir,
 			active:    active,
 			segments:  closed,
-			logStart:  logStart,
-			highWater: hwm,
+			logStart:  scannedLogStart,
+			highWater: scannedHWM,
 		}
+	}
+
+	if manifest != nil {
+		ps.epoch = manifest.Epoch
+		// Manifest HWM/logStartOffset are authoritative when present, but
+		// reconcile against the segment scan: if the manifest claims an HWM
+		// past the highest scanned offset (e.g. truncated active segment), the
+		// scan wins because the data is what's actually on disk.
+		if manifest.HighWatermark > 0 && manifest.HighWatermark <= ps.highWater {
+			ps.highWater = manifest.HighWatermark
+		}
+		if manifest.LogStartOffset > ps.logStart {
+			ps.logStart = manifest.LogStartOffset
+		}
+	}
+
+	// First open under v3.3 storage: persist a manifest so subsequent opens
+	// don't pay a full segment scan. Best-effort — a write failure here is
+	// not fatal because openPartition() will fall back to scanning again.
+	if manifest == nil || manifest.HighWatermark != ps.highWater || manifest.LogStartOffset != ps.logStart {
+		_ = writeManifest(dir, &Manifest{
+			Epoch:          ps.epoch,
+			HighWatermark:  ps.highWater,
+			LogStartOffset: ps.logStart,
+		})
 	}
 
 	e.mu.Lock()
@@ -273,9 +358,17 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 		return -1, err
 	}
 	ps.highWater = baseOffset + int64(lastOffsetDelta) + 1
+	ps.pendingFlushRecords += int64(lastOffsetDelta) + 1
 
 	if ps.active.logSize >= e.cfg.SegmentBytes {
 		if err := e.rollSegment(ps); err != nil {
+			return -1, err
+		}
+		// rollSegment fsyncs the previous segment via roll() and persists
+		// the manifest, so the pending counter is fully discharged.
+		ps.pendingFlushRecords = 0
+	} else if e.cfg.FlushIntervalMessages > 0 && ps.pendingFlushRecords >= e.cfg.FlushIntervalMessages {
+		if err := ps.flushLocked(); err != nil {
 			return -1, err
 		}
 	}
@@ -303,6 +396,11 @@ func (e *DiskStorageEngine) rollSegment(ps *partitionState) error {
 	_ = ps.active.close()
 	ps.segments = append(ps.segments, closed)
 	ps.active = newSeg
+
+	// Roll is a natural manifest checkpoint: the previous segment is now
+	// closed and the HWM is at a stable boundary. A failure here is not
+	// fatal — the next TakeOver / open will rebuild from a segment scan.
+	_ = ps.persistManifestLocked()
 	return nil
 }
 
@@ -442,9 +540,11 @@ func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newE
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	diskEpoch, err := readLeaderEpoch(ps.dir)
-	if err != nil && !os.IsNotExist(err) {
-		return 0, fmt.Errorf("storage: read leader epoch: %w", err)
+	diskEpoch := ps.epoch
+	if m, err := readManifest(ps.dir); err == nil {
+		diskEpoch = m.Epoch
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return 0, fmt.Errorf("storage: read manifest: %w", err)
 	}
 
 	if diskEpoch < newEpoch {
@@ -458,8 +558,9 @@ func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newE
 		ps.highWater = hwm
 	}
 
-	if err := writeLeaderEpoch(ps.dir, newEpoch); err != nil {
-		return 0, err
+	ps.epoch = newEpoch
+	if err := ps.persistManifestLocked(); err != nil {
+		return 0, fmt.Errorf("storage: write manifest: %w", err)
 	}
 	return ps.highWater, nil
 }

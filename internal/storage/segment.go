@@ -439,21 +439,3 @@ func rebuildIndex(seg *activeSegment, indexIntervalBytes int64) error {
 	return seg.indexFile.Sync()
 }
 
-// readLeaderEpoch reads the leader epoch from the .leader-epoch file.
-func readLeaderEpoch(dir string) (int64, error) {
-	data, err := os.ReadFile(filepath.Join(dir, ".leader-epoch"))
-	if err != nil {
-		return 0, err
-	}
-	if len(data) < 8 {
-		return 0, nil
-	}
-	return int64(binary.BigEndian.Uint64(data[0:8])), nil
-}
-
-// writeLeaderEpoch writes the leader epoch to the .leader-epoch file.
-func writeLeaderEpoch(dir string, epoch int64) error {
-	data := make([]byte, 8)
-	binary.BigEndian.PutUint64(data, uint64(epoch))
-	return os.WriteFile(filepath.Join(dir, ".leader-epoch"), data, 0644)
-}

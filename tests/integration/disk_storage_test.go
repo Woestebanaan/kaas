@@ -414,6 +414,151 @@ func TestAppendAssignsOffsets(t *testing.T) {
 	}
 }
 
+// TestFlushPolicyManifestSurvivesCrash verifies the flush policy: when
+// FlushIntervalMessages is 1 (default), every Append should leave the
+// manifest's HWM matching the in-memory HWM, so a crash that loses the
+// engine struct is still recoverable from the on-disk state.
+func TestFlushPolicyManifestSurvivesCrash(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	cfg := storage.DefaultConfig()
+	if cfg.FlushIntervalMessages != 1 {
+		t.Fatalf("DefaultConfig.FlushIntervalMessages=%d, want 1", cfg.FlushIntervalMessages)
+	}
+	e, err := storage.NewDiskStorageEngine(
+		dir,
+		&stubLeaseManager{leader: true},
+		&stubLock{locked: true},
+		cfg,
+	)
+	if err != nil {
+		t.Fatalf("NewDiskStorageEngine: %v", err)
+	}
+	if err := e.CreatePartition("topic", 0); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+
+	// Single Append, then read manifest off disk WITHOUT a clean close —
+	// simulates the broker process being SIGKILL'd between batches.
+	if _, err := e.Append(ctx, "topic", 0, 0, makeBatch(0, 5)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	data, err := os.ReadFile(dir + "/topic/0/manifest.json")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"highWatermark":5`)) {
+		t.Errorf("manifest does not record HWM=5 after first Append: %s", data)
+	}
+}
+
+// TestFlushPolicyDisabledDelaysSync verifies that
+// FlushIntervalMessages=0 disables message-driven flushing — manifest only
+// gets refreshed at segment roll. Useful guardrail so the config knob isn't
+// silently ignored.
+func TestFlushPolicyDisabledDelaysSync(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	cfg := storage.DefaultConfig()
+	cfg.FlushIntervalMessages = 0 // disable
+	e, err := storage.NewDiskStorageEngine(
+		dir,
+		&stubLeaseManager{leader: true},
+		&stubLock{locked: true},
+		cfg,
+	)
+	if err != nil {
+		t.Fatalf("NewDiskStorageEngine: %v", err)
+	}
+	if err := e.CreatePartition("topic", 0); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+
+	// First Append creates the manifest at openPartition with HWM=0.
+	// With flushing disabled, subsequent Appends do NOT update the manifest
+	// until the segment rolls — so the on-disk HWM stays at 0.
+	if _, err := e.Append(ctx, "topic", 0, 0, makeBatch(0, 3)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	data, err := os.ReadFile(dir + "/topic/0/manifest.json")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"highWatermark":0`)) {
+		t.Errorf("manifest should still show HWM=0 with FlushIntervalMessages=0; got: %s", data)
+	}
+}
+
+// TestManifestPersistedAcrossRestart verifies the v3.3 per-partition manifest
+// is written on first open + on roll, and is consulted (instead of a full
+// segment scan) when the engine is reopened against the same data dir.
+func TestManifestPersistedAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	engine := newEngine(t, dir)
+
+	if err := engine.CreatePartition("topic", 0); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(int64(i*10), 10)); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	// Manifest should now exist on disk for the partition.
+	manifestPath := dir + "/topic/0/manifest.json"
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("manifest.json missing after appends: %v", err)
+	}
+
+	// Reopen — the engine should pick up state from manifest + segments.
+	engine2 := newEngine(t, dir)
+	if err := engine2.CreatePartition("topic", 0); err != nil {
+		t.Fatalf("reopen CreatePartition: %v", err)
+	}
+	hwm2, err := engine2.HighWatermark("topic", 0)
+	if err != nil {
+		t.Fatalf("reopen HighWatermark: %v", err)
+	}
+	if hwm2 != 50 {
+		t.Errorf("reopen HWM=%d, want 50", hwm2)
+	}
+}
+
+// TestTakeOverWritesManifestEpoch verifies TakeOver(epoch) persists the new
+// epoch via manifest.json so a subsequent reopen sees it without scanning.
+func TestTakeOverWritesManifestEpoch(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	engine := newEngine(t, dir)
+	if err := engine.CreatePartition("topic", 0); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 3)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	if _, err := engine.TakeOver(ctx, "topic", 0, 7); err != nil {
+		t.Fatalf("TakeOver: %v", err)
+	}
+
+	// Read manifest directly off disk and confirm the epoch landed.
+	data, err := os.ReadFile(dir + "/topic/0/manifest.json")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"epoch":7`)) {
+		t.Errorf("manifest does not record epoch=7: %s", data)
+	}
+
+	// And the legacy .leader-epoch file should have been cleaned up.
+	if _, err := os.Stat(dir + "/topic/0/.leader-epoch"); !os.IsNotExist(err) {
+		t.Errorf("legacy .leader-epoch still present after TakeOver: err=%v", err)
+	}
+}
+
 // batchTotalSizeCheck is a white-box sanity check: the wire size must match what
 // EncodeRecordBatch produces.
 func TestBatchHeaderParsing(t *testing.T) {
