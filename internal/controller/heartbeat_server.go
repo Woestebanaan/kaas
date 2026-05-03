@@ -43,6 +43,10 @@ type clientState struct {
 	lastSeen     time.Time
 	lastVersion  uint64
 	activeGroups []string // most recently reported in BrokerStatus.active_groups
+	// lastBrokerTSMs is the broker's BrokerStatus.timestamp_ms from the
+	// most recently received message. Echoed back in the next outbound
+	// ControllerCommand so the broker can compute heartbeat RTT.
+	lastBrokerTSMs int64
 }
 
 // NewHeartbeatServer constructs a server. pingInterval (default 1s) is how
@@ -125,6 +129,7 @@ func (s *HeartbeatServer) recvLoop(
 			cur.lastSeen = time.Now()
 			cur.lastVersion = msg.GetLastSeenAssignmentVersion()
 			cur.activeGroups = append(cur.activeGroups[:0], msg.GetActiveGroups()...)
+			cur.lastBrokerTSMs = msg.GetTimestampMs()
 		}
 		s.mu.Unlock()
 	}
@@ -153,9 +158,13 @@ func (s *HeartbeatServer) sendLoop(
 				return err
 			}
 		case t := <-tick.C:
+			s.mu.Lock()
+			echoTS := state.lastBrokerTSMs
+			s.mu.Unlock()
 			if err := stream.Send(&heartbeatpb.ControllerCommand{
-				TimestampMs: t.UnixMilli(),
-				Type:        heartbeatpb.ControllerCommand_PING,
+				TimestampMs:             t.UnixMilli(),
+				Type:                    heartbeatpb.ControllerCommand_PING,
+				BrokerStatusTimestampMs: echoTS,
 			}); err != nil {
 				if errors.Is(err, io.EOF) {
 					return nil

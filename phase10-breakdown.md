@@ -199,6 +199,26 @@ the right call (one event per failover, not per partition).
 **Test**: spot-check via `internal/observability/metrics_test.go`
 that each instrument records ≥1 sample under a synthetic harness.
 
+### Gap #3b: Broker-side counters — DONE
+
+> **Status:** shipped. Five instruments wired:
+>
+> - `HeartbeatRTT` — histogram. Required a proto extension:
+>   `ControllerCommand.broker_status_timestamp_ms` echoes the
+>   most recent `BrokerStatus.timestamp_ms` the controller saw.
+>   Broker computes RTT = now - echo on every PING. Skipped when
+>   echo is zero (first PING after stream open, before the
+>   controller has seen any BrokerStatus).
+> - `HeartbeatMisses` — incremented at `produce.checkOwnership`
+>   when `heartbeatFresh()` returns false. Hot-path, but only
+>   under outage; in steady state, zero emissions.
+> - `SelfFenceEvents` — same site as HeartbeatMisses. Each
+>   rejected produce on stale heartbeat = one self-fence event.
+> - `AssignmentPolls{change_detected}` — emitted in Coordinator's
+>   Watch loop. `applyIfNew` now returns a bool to drive the label.
+> - `StaleAssignmentsRejected` — incremented in the epoch-fence
+>   path inside applyIfNew when `a.ControllerEpoch < leaseEpoch`.
+
 ### Gap #3a: Controller-side counters — DONE
 
 > **Status:** shipped. Added 7 instruments and wired each at its

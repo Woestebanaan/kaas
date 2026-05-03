@@ -157,6 +157,9 @@ func (h *ProduceHandler) checkOwnership(topic string, partition int32) (bool, ui
 		// stops acking writes within heartbeatTimeout, regardless of what
 		// the (possibly stale) assignment file says it owns.
 		if !heartbeatFresh(h.coord) {
+			mx := observability.Global()
+			mx.HeartbeatMisses.Add(context.Background(), 1)
+			mx.SelfFenceEvents.Add(context.Background(), 1)
 			return false, 0
 		}
 		epoch, _ := h.coord.CurrentEpoch(topic, partition)

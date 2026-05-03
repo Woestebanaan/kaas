@@ -62,4 +62,12 @@ message ControllerCommand {
 
   // Populated when type == ASSIGNMENT_CHANGED.
   uint64 assignment_version = 3;
+
+  // Echo of the most recent BrokerStatus.timestamp_ms the controller
+  // received from this broker. The broker computes RTT as
+  // (now - broker_status_timestamp_ms) for the heartbeat metrics — proves
+  // the round-trip succeeded and surfaces controller-side latency.
+  // Zero when the controller has not yet received a BrokerStatus on this
+  // stream (first PING after stream open).
+  int64 broker_status_timestamp_ms = 4;
 }

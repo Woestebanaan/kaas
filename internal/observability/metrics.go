@@ -68,11 +68,18 @@ type Metrics struct {
 	ControllerFailoverDuration metric.Float64Histogram
 
 	// Assignment loop (controller-side).
-	AssignmentChanges          metric.Int64Counter   // recomputeAndWrite calls
-	AssignmentFileWrites       metric.Int64Counter   // FileStore.Write attempts (label: result=ok|error)
+	AssignmentChanges          metric.Int64Counter // recomputeAndWrite calls
+	AssignmentFileWrites       metric.Int64Counter // FileStore.Write attempts (label: result=ok|error)
 	AssignmentFileWriteLatency metric.Float64Histogram
-	AssignmentPushes           metric.Int64Counter   // PushAssignmentChanged broadcasts
-	CRMirrorWrites             metric.Int64Counter   // K8sMirror.Mirror attempts (label: result=ok|error)
+	AssignmentPushes           metric.Int64Counter // PushAssignmentChanged broadcasts
+	CRMirrorWrites             metric.Int64Counter // K8sMirror.Mirror attempts (label: result=ok|error)
+
+	// Broker-side heartbeat + assignment polling.
+	HeartbeatRTT             metric.Float64Histogram // round-trip time, computed via the proto's broker_status_timestamp_ms echo
+	HeartbeatMisses          metric.Int64Counter     // count of "no PING received in N seconds" detections
+	SelfFenceEvents          metric.Int64Counter     // count of self-fence triggers (Coordinator marks itself stale)
+	AssignmentPolls          metric.Int64Counter     // every fsutil mtime poll iteration (label: change_detected=true|false)
+	StaleAssignmentsRejected metric.Int64Counter     // assignment.json files dropped because controllerEpoch is behind
 
 	// Consumer groups.
 	GroupRebalances metric.Int64Counter
@@ -170,6 +177,27 @@ func newMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.CRMirrorWrites, err = m.Int64Counter("skafka.assignment.cr.mirror.writes",
 		metric.WithDescription("KafkaClusterAssignments CR Status update attempts (result=ok|error)")); err != nil {
+		return nil, err
+	}
+	if mx.HeartbeatRTT, err = m.Float64Histogram("skafka.heartbeat.rtt",
+		metric.WithDescription("Broker→controller→broker heartbeat round-trip"),
+		metric.WithUnit("s")); err != nil {
+		return nil, err
+	}
+	if mx.HeartbeatMisses, err = m.Int64Counter("skafka.heartbeat.misses",
+		metric.WithDescription("Heartbeats not received within heartbeatTimeout")); err != nil {
+		return nil, err
+	}
+	if mx.SelfFenceEvents, err = m.Int64Counter("skafka.self.fence.events",
+		metric.WithDescription("Times this broker self-fenced due to stale heartbeat")); err != nil {
+		return nil, err
+	}
+	if mx.AssignmentPolls, err = m.Int64Counter("skafka.assignment.polls",
+		metric.WithDescription("assignment.json mtime poll iterations (change_detected=true|false)")); err != nil {
+		return nil, err
+	}
+	if mx.StaleAssignmentsRejected, err = m.Int64Counter("skafka.stale.assignments.rejected",
+		metric.WithDescription("assignment.json reads dropped because controllerEpoch was behind")); err != nil {
 		return nil, err
 	}
 	if mx.GroupRebalances, err = m.Int64Counter("skafka.group.rebalances",

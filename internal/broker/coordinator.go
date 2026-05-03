@@ -5,7 +5,11 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/woestebanaan/skafka/internal/assignment"
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
@@ -77,7 +81,13 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ch:
-			c.applyIfNew(ctx)
+			changed := c.applyIfNew(ctx)
+			label := "false"
+			if changed {
+				label = "true"
+			}
+			observability.Global().AssignmentPolls.Add(ctx, 1,
+				metric.WithAttributes(attribute.String("change_detected", label)))
 		}
 	}
 }
@@ -91,13 +101,14 @@ func (c *Coordinator) Stop() error {
 
 // applyIfNew reads the current assignment file, validates it against the
 // controller Lease epoch, dedups against lastAppliedVersion, and dispatches
-// handlers when a fresh version is observed.
-func (c *Coordinator) applyIfNew(ctx context.Context) {
+// handlers when a fresh version is observed. Returns true if a new
+// assignment was applied (used by AssignmentPolls's change_detected label).
+func (c *Coordinator) applyIfNew(ctx context.Context) bool {
 	a, err := c.store.Read(ctx)
 	if err != nil {
 		// fs.ErrNotExist on a fresh cluster is fine; other errors mean the
 		// next Watch tick will retry.
-		return
+		return false
 	}
 
 	// Epoch fence: reject files written by a controller older than the one
@@ -105,7 +116,8 @@ func (c *Coordinator) applyIfNew(ctx context.Context) {
 	// stale-controller race (and how the epoch fence resolves it)".
 	leaseEpoch := c.leases.CurrentEpoch()
 	if a.ControllerEpoch < leaseEpoch {
-		return
+		observability.Global().StaleAssignmentsRejected.Add(ctx, 1)
+		return false
 	}
 
 	// Version dedup: assignmentVersion is monotonic within a single
@@ -114,7 +126,7 @@ func (c *Coordinator) applyIfNew(ctx context.Context) {
 	if a.AssignmentVersion <= c.lastAppliedVersion && c.current != nil &&
 		c.current.ControllerEpoch == a.ControllerEpoch {
 		c.mu.Unlock()
-		return
+		return false
 	}
 	prev := c.current
 	c.current = a
@@ -126,6 +138,7 @@ func (c *Coordinator) applyIfNew(ctx context.Context) {
 	for _, h := range handlers {
 		h(ctx, prev, a)
 	}
+	return true
 }
 
 // rebuildOwnership refreshes the topic/partition → epoch map from the

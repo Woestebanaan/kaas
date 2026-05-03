@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/pkg/heartbeatpb"
 )
 
@@ -175,7 +176,20 @@ func (c *HeartbeatClient) runOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		c.lastReceived.Store(time.Now().UnixNano())
+		now := time.Now()
+		c.lastReceived.Store(now.UnixNano())
+
+		// Heartbeat RTT: when the controller's PING echoes back the
+		// broker_status_timestamp_ms we sent in our last BrokerStatus,
+		// (now - that) is the round-trip. Skip when zero — the very
+		// first PING after stream open precedes any BrokerStatus the
+		// controller has time to record.
+		if echo := cmd.GetBrokerStatusTimestampMs(); echo > 0 {
+			rtt := now.Sub(time.UnixMilli(echo)).Seconds()
+			if rtt >= 0 {
+				observability.Global().HeartbeatRTT.Record(streamCtx, rtt)
+			}
+		}
 
 		c.mu.Lock()
 		h := c.onCommand

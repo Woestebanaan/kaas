@@ -294,8 +294,15 @@ type ControllerCommand struct {
 	Type        ControllerCommand_Type `protobuf:"varint,2,opt,name=type,proto3,enum=skafka.heartbeat.v1.ControllerCommand_Type" json:"type,omitempty"`
 	// Populated when type == ASSIGNMENT_CHANGED.
 	AssignmentVersion uint64 `protobuf:"varint,3,opt,name=assignment_version,json=assignmentVersion,proto3" json:"assignment_version,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Echo of the most recent BrokerStatus.timestamp_ms the controller
+	// received from this broker. The broker computes RTT as
+	// (now - broker_status_timestamp_ms) for the heartbeat metrics — proves
+	// the round-trip succeeded and surfaces controller-side latency.
+	// Zero when the controller has not yet received a BrokerStatus on this
+	// stream (first PING after stream open).
+	BrokerStatusTimestampMs int64 `protobuf:"varint,4,opt,name=broker_status_timestamp_ms,json=brokerStatusTimestampMs,proto3" json:"broker_status_timestamp_ms,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *ControllerCommand) Reset() {
@@ -349,6 +356,13 @@ func (x *ControllerCommand) GetAssignmentVersion() uint64 {
 	return 0
 }
 
+func (x *ControllerCommand) GetBrokerStatusTimestampMs() int64 {
+	if x != nil {
+		return x.BrokerStatusTimestampMs
+	}
+	return 0
+}
+
 var File_heartbeat_proto protoreflect.FileDescriptor
 
 const file_heartbeat_proto_rawDesc = "" +
@@ -372,11 +386,12 @@ const file_heartbeat_proto_rawDesc = "" +
 	"\x05READY\x10\x00\x12\x0e\n" +
 	"\n" +
 	"RECOVERING\x10\x01\x12\t\n" +
-	"\x05ERROR\x10\x02\"\xdd\x01\n" +
+	"\x05ERROR\x10\x02\"\x9a\x02\n" +
 	"\x11ControllerCommand\x12!\n" +
 	"\ftimestamp_ms\x18\x01 \x01(\x03R\vtimestampMs\x12?\n" +
 	"\x04type\x18\x02 \x01(\x0e2+.skafka.heartbeat.v1.ControllerCommand.TypeR\x04type\x12-\n" +
-	"\x12assignment_version\x18\x03 \x01(\x04R\x11assignmentVersion\"5\n" +
+	"\x12assignment_version\x18\x03 \x01(\x04R\x11assignmentVersion\x12;\n" +
+	"\x1abroker_status_timestamp_ms\x18\x04 \x01(\x03R\x17brokerStatusTimestampMs\"5\n" +
 	"\x04Type\x12\b\n" +
 	"\x04PING\x10\x00\x12\v\n" +
 	"\aLEAVING\x10\x01\x12\x16\n" +
