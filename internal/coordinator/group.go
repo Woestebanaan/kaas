@@ -341,6 +341,33 @@ type memberSnapshot struct {
 	assignment      []byte
 }
 
+// shutdown stops every outstanding timer and unblocks any pending
+// SyncGroup waiters. Called by Manager.RelinquishGroup when the
+// controller reassigns the group to another broker.
+func (g *group) shutdown() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, m := range g.members {
+		if m.heartbeatTimer != nil {
+			m.heartbeatTimer.Stop()
+			m.heartbeatTimer = nil
+		}
+	}
+	if g.rebalanceTimer != nil {
+		g.rebalanceTimer.Stop()
+		g.rebalanceTimer = nil
+	}
+	if g.currentSync != nil {
+		select {
+		case <-g.currentSync.done:
+		default:
+			close(g.currentSync.done)
+		}
+		g.currentSync = nil
+	}
+	g.members = nil
+}
+
 // resetHeartbeatTimer resets (or starts) the session timeout timer for a member.
 // Must be called with g.mu held.
 func (g *group) resetHeartbeatTimer(m *groupMember) {

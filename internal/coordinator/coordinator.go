@@ -81,6 +81,26 @@ func (m *Manager) getOrCreate(groupID string) *group {
 	return g
 }
 
+// RelinquishGroup drops in-memory state for groupID. Called by
+// GroupTakeoverDriver when the cluster controller reassigns the group
+// to another broker. Pending offset commits remain on disk for the new
+// coordinator to load lazily on its first JoinGroup. Idempotent: a
+// second call after a group is already gone is a no-op.
+//
+// v1 deliberately does NOT migrate group state across brokers — the
+// new coordinator starts the state machine at Empty, and Kafka
+// clients re-join organically on the next heartbeat. Acceptable cost:
+// one rebalance round trip per coordinator transition. v2 will add
+// state-transfer if the latency hurts.
+func (m *Manager) RelinquishGroup(groupID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if g, ok := m.groups[groupID]; ok {
+		g.shutdown()
+		delete(m.groups, groupID)
+	}
+}
+
 // isCoordinator returns true if this broker is the assigned coordinator
 // for groupID under the cluster's current assignment.
 func (m *Manager) isCoordinator(groupID string) bool {
