@@ -22,7 +22,6 @@ import (
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8spkg "github.com/woestebanaan/skafka/internal/k8s"
 	"github.com/woestebanaan/skafka/internal/lease"
-	"github.com/woestebanaan/skafka/internal/lock"
 	"github.com/woestebanaan/skafka/internal/protocol"
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	"github.com/woestebanaan/skafka/internal/observability"
@@ -68,7 +67,6 @@ func runBroker(ctx context.Context) {
 
 	var (
 		leaseManager lease.LeaseManager
-		partLock     lock.PartitionLock
 		brokerSource handlers.BrokerSource
 		brokerID     int32
 		k8sClient    kubernetes.Interface
@@ -110,7 +108,6 @@ func runBroker(ctx context.Context) {
 			src.ExtPort = extPort
 		}
 		brokerSource = src
-		partLock = lock.NewFlockLock(dataDir)
 
 		// Callbacks are wired after DiskStorageEngine is created; use placeholders for now.
 		leaseManager = lease.NewKubernetesLeaseManager(k8sClient, namespace, identity.PodName, nil, nil)
@@ -121,13 +118,6 @@ func runBroker(ctx context.Context) {
 		brokerID = 0
 		leaseManager = broker.NewLocalLeaseManager()
 		brokerSource = handlers.BrokerInfo{NodeID: 0, Host: host, Port: portNum, ClusterID: clusterID}
-		// Disk-backed local-dev still needs a real flock so the engine and the
-		// produce handler share the same lock state.
-		if dataDir != "" {
-			partLock = lock.NewFlockLock(dataDir)
-		} else {
-			partLock = broker.NewLocalPartitionLock()
-		}
 		slog.Info("local-dev mode (single broker)")
 	}
 
@@ -135,12 +125,10 @@ func runBroker(ctx context.Context) {
 	var store storage.StorageEngine
 	var engine *storage.DiskStorageEngine
 	if dataDir != "" {
-		// Reuse partLock so engine.TakeoverPartition and handler.IsLocked share
-		// the same in-memory `held` map. Two FlockLock instances would each
-		// track their own state and the produce handler would always see the
-		// partition as unlocked.
+		// Phase 4 dropped the flock parameter — single-writer enforcement is
+		// now BrokerCoordinator.Owns + epoch-prefixed segment filenames.
 		var err error
-		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, partLock, storage.DefaultConfig())
+		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, storage.DefaultConfig())
 		if err != nil {
 			slog.Error("open disk storage", "dir", dataDir, "err", err)
 			os.Exit(1)
@@ -233,7 +221,6 @@ func runBroker(ctx context.Context) {
 		broker.Config{BrokerID: brokerID, Host: host, Port: portNum, ClusterID: clusterID},
 		store,
 		leaseManager,
-		partLock,
 		authEngine,
 		brokerSource,
 		coordMgr,

@@ -9,7 +9,6 @@ import (
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/lease"
-	"github.com/woestebanaan/skafka/internal/lock"
 	"github.com/woestebanaan/skafka/internal/storage"
 )
 
@@ -178,17 +177,6 @@ func (l *LocalLeaseManager) WaitForCoordinator(_ context.Context, _ string) bool
 
 var _ lease.CoordinatorLeaseManager = (*LocalLeaseManager)(nil)
 
-// ---- LocalPartitionLock ---- //
-
-// LocalPartitionLock is a stub: always reports locked (single broker, no contention).
-type LocalPartitionLock struct{}
-
-func NewLocalPartitionLock() *LocalPartitionLock { return &LocalPartitionLock{} }
-
-func (l *LocalPartitionLock) Lock(_ string, _ int32) error    { return nil }
-func (l *LocalPartitionLock) Unlock(_ string, _ int32) error  { return nil }
-func (l *LocalPartitionLock) IsLocked(_ string, _ int32) bool { return true }
-
 // ---- AllowAllAuthEngine ---- //
 
 // AllowAllAuthEngine authenticates every connection as ANONYMOUS and permits all operations.
@@ -248,6 +236,5 @@ func (e *denyAllExchange) Principal() auth.Principal { return auth.Principal{} }
 // Verify interfaces at compile time.
 var _ storage.StorageEngine = (*MemoryStorage)(nil)
 var _ lease.LeaseManager = (*LocalLeaseManager)(nil)
-var _ lock.PartitionLock = (*LocalPartitionLock)(nil)
 var _ auth.AuthEngine = (*AllowAllAuthEngine)(nil)
 var _ auth.AuthEngine = (*DenyAllAuthEngine)(nil)

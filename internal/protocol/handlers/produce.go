@@ -12,7 +12,6 @@ import (
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/lease"
-	"github.com/woestebanaan/skafka/internal/lock"
 	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
@@ -23,25 +22,24 @@ import (
 type ProduceHandler struct {
 	store  storage.StorageEngine
 	leases lease.LeaseManager
-	locks  lock.PartitionLock
 	auth   auth.AuthEngine
 
-	// coord is the v3 BrokerCoordinator. When set, it replaces the legacy
-	// leases+locks ownership check on the produce hot path: Owns +
-	// IsHeartbeatFresh + CurrentEpoch fold the per-partition Lease, the
-	// flock check, and epoch acquisition into one source of truth. When
-	// nil, the handler falls back to the v2.6 path. The fallback goes
-	// away with internal/lock/ in step 9.
+	// coord is the v3 BrokerCoordinator. When set, it replaces the
+	// per-partition Lease ownership check on the produce hot path: Owns +
+	// IsHeartbeatFresh + CurrentEpoch are the single source of truth for
+	// "may this broker append to this partition?". When nil, the handler
+	// falls back to the v2.6 lease.IsLeader check. flock is gone — single-
+	// writer enforcement is now epoch-prefixed segment filenames + the
+	// coordinator-owned ownership decision.
 	coord kafkaapi.BrokerCoordinator
 }
 
 func NewProduceHandler(
 	store storage.StorageEngine,
 	leases lease.LeaseManager,
-	locks lock.PartitionLock,
 	authEng auth.AuthEngine,
 ) *ProduceHandler {
-	return &ProduceHandler{store: store, leases: leases, locks: locks, auth: authEng}
+	return &ProduceHandler{store: store, leases: leases, auth: authEng}
 }
 
 // WithCoordinator switches the handler over to the v3 BrokerCoordinator path.
@@ -165,9 +163,6 @@ func (h *ProduceHandler) checkOwnership(topic string, partition int32) (bool, ui
 		return true, epoch
 	}
 	if !h.leases.IsLeader(topic, partition) {
-		return false, 0
-	}
-	if !h.locks.IsLocked(topic, partition) {
 		return false, 0
 	}
 	return true, 0

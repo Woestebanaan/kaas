@@ -79,7 +79,6 @@ func TestMain(m *testing.M) {
 		},
 		broker.NewMemoryStorage(),
 		localLeases,
-		broker.NewLocalPartitionLock(),
 		broker.NewAllowAllAuthEngine(),
 		brokerInfo,
 		coordMgr,

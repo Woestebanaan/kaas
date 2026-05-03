@@ -180,15 +180,15 @@ func TestCheckOwnership_NoHeartbeatYet(t *testing.T) {
 }
 
 func TestCheckOwnership_LegacyPathWhenNoCoordinator(t *testing.T) {
-	// With coord==nil the handler must fall back to lease+lock, even
-	// though we're testing inside a unit test with stubs.
+	// With coord==nil the handler must fall back to lease.IsLeader.
+	// flock is gone in Phase 4; the only remaining v2.6-compatible gate
+	// is the per-partition Kubernetes Lease.
 	leases := &legacyLeases{leader: true}
-	locks := &legacyLocks{locked: true}
-	h := &ProduceHandler{leases: leases, locks: locks}
+	h := &ProduceHandler{leases: leases}
 
 	ok, epoch := h.checkOwnership("events", 0)
 	if !ok {
-		t.Fatal("legacy path should succeed when leases+locks both hold")
+		t.Fatal("legacy path should succeed when lease holds")
 	}
 	if epoch != 0 {
 		t.Errorf("legacy path must pass epoch=0 (no fence configured); got %d", epoch)
@@ -201,7 +201,7 @@ func TestCheckOwnership_LegacyPathWhenNoCoordinator(t *testing.T) {
 	}
 }
 
-// legacyLeases / legacyLocks are minimal stubs for the v2.6 fallback path.
+// legacyLeases is a minimal stub for the v2.6 fallback path.
 type legacyLeases struct{ leader bool }
 
 func (l *legacyLeases) Acquire(_ context.Context, _ string, _ int32) error { return nil }

@@ -14,12 +14,10 @@ import (
 	"time"
 
 	"github.com/woestebanaan/skafka/internal/lease"
-	"github.com/woestebanaan/skafka/internal/lock"
 )
 
 var (
 	ErrNotLeader     = errors.New("storage: not leader for partition")
-	ErrLockNotHeld   = errors.New("storage: filesystem lock not held")
 	ErrEpochMismatch = errors.New("storage: epoch behind current partition leader")
 )
 
@@ -86,10 +84,17 @@ type PartitionID struct {
 }
 
 // DiskStorageEngine implements StorageEngine using Kafka-compatible log segment files.
+//
+// As of Phase 4, single-writer enforcement is no longer flock-based: the
+// BrokerCoordinator owns the ownership decision (it consults the
+// authoritative assignment.json), and segment filenames embed the leader
+// epoch (`{epoch:08x}-{base_offset:020d}.log`) so two leaders at different
+// epochs physically can't target the same file. The leases field stays
+// for v2.6 callers (TakeoverPartition is still wired into older paths)
+// but new v3 code goes through TakeOver.
 type DiskStorageEngine struct {
 	dataDir string
 	leases  lease.LeaseManager
-	locks   lock.PartitionLock
 	cfg     Config
 
 	mu         sync.RWMutex
@@ -146,14 +151,13 @@ func (ps *partitionState) flushLocked() error {
 }
 
 // NewDiskStorageEngine opens (or creates) the data directory and loads all existing partitions.
-func NewDiskStorageEngine(dataDir string, leases lease.LeaseManager, locks lock.PartitionLock, cfg Config) (*DiskStorageEngine, error) {
+func NewDiskStorageEngine(dataDir string, leases lease.LeaseManager, cfg Config) (*DiskStorageEngine, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, err
 	}
 	e := &DiskStorageEngine{
 		dataDir:    dataDir,
 		leases:     leases,
-		locks:      locks,
 		cfg:        cfg,
 		partitions: make(map[string]*partitionState),
 	}
@@ -342,9 +346,6 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 	if !e.leases.IsLeader(topic, partition) {
 		return -1, ErrNotLeader
 	}
-	if !e.locks.IsLocked(topic, partition) {
-		return -1, ErrLockNotHeld
-	}
 
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
@@ -526,15 +527,14 @@ func (e *DiskStorageEngine) LogStartOffset(topic string, partition int32) (int64
 	return ls, nil
 }
 
-// RelinquishPartition releases the filesystem lock for a partition. Called when this
-// broker loses the Kubernetes Lease so no further writes are accepted.
-func (e *DiskStorageEngine) RelinquishPartition(topic string, partition int32) {
-	_ = e.locks.Unlock(topic, partition)
-}
+// RelinquishPartition is now a no-op kept for v2.6 caller compatibility.
+// Single-writer enforcement moved to BrokerCoordinator.Owns + epoch-prefixed
+// segment filenames in Phase 4; flock is no longer the safety boundary.
+func (e *DiskStorageEngine) RelinquishPartition(_ string, _ int32) {}
 
-// TakeoverPartition is called when this broker becomes leader. It acquires the
-// filesystem lock, validates the log (truncating any partial writes from the
-// previous leader), writes the new epoch, and marks the partition writable.
+// TakeoverPartition is called when this broker becomes leader. It validates
+// the log (truncating any partial writes from the previous leader), writes
+// the new epoch, and marks the partition writable.
 //
 // Retained for the v2.6 per-partition Lease callback wiring in cmd/skafka.
 // New code should prefer TakeOver, which returns the recovered high watermark
@@ -547,10 +547,6 @@ func (e *DiskStorageEngine) TakeoverPartition(topic string, partition int32, new
 // takeoverInternal is the shared implementation behind TakeoverPartition (v2.6
 // callers) and TakeOver (v3 callers). Returns the recovered high watermark.
 func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newEpoch int64) (int64, error) {
-	if err := e.locks.Lock(topic, partition); err != nil {
-		return 0, fmt.Errorf("storage: acquire fs lock: %w", err)
-	}
-
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
 		return 0, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
@@ -591,10 +587,12 @@ func (e *DiskStorageEngine) TakeOver(_ context.Context, topic string, partition 
 	return e.takeoverInternal(topic, partition, int64(epoch))
 }
 
-// Relinquish implements the v3 StorageEngine contract. It releases the
-// filesystem lock; the partition becomes read-only on this broker.
-func (e *DiskStorageEngine) Relinquish(topic string, partition int32) error {
-	return e.locks.Unlock(topic, partition)
+// Relinquish implements the v3 StorageEngine contract. The partition becomes
+// read-only on this broker. With flock removed in Phase 4, this is a no-op
+// at the storage layer — the BrokerCoordinator.Owns check on the produce
+// hot path is the only enforcement point.
+func (e *DiskStorageEngine) Relinquish(_ string, _ int32) error {
+	return nil
 }
 
 // AllPartitions returns all known partitions — used by the retention cleaner.

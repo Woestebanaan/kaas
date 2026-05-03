@@ -1,4 +1,7 @@
-// Package broker wires the protocol layer to the storage, lease, lock, and auth interfaces.
+// Package broker wires the protocol layer to the storage, lease, and auth
+// interfaces. Phase 4 dropped the flock parameter from all constructors —
+// single-writer enforcement is now BrokerCoordinator.Owns + epoch-prefixed
+// segment filenames; see phase4-breakdown.md.
 package broker
 
 import (
@@ -8,7 +11,6 @@ import (
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8sbroker "github.com/woestebanaan/skafka/internal/k8s"
 	"github.com/woestebanaan/skafka/internal/lease"
-	"github.com/woestebanaan/skafka/internal/lock"
 	"github.com/woestebanaan/skafka/internal/protocol"
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	"github.com/woestebanaan/skafka/internal/storage"
@@ -31,7 +33,6 @@ type Broker struct {
 	cfg     Config
 	store   storage.StorageEngine
 	leases  lease.LeaseManager
-	locks   lock.PartitionLock
 	auth    auth.AuthEngine
 	topics  *TopicRegistry
 	brokers handlers.BrokerSource
@@ -42,7 +43,6 @@ func New(
 	cfg Config,
 	store storage.StorageEngine,
 	leases lease.LeaseManager,
-	locks lock.PartitionLock,
 	authEng auth.AuthEngine,
 ) *Broker {
 	info := handlers.BrokerInfo{
@@ -55,7 +55,6 @@ func New(
 		cfg:     cfg,
 		store:   store,
 		leases:  leases,
-		locks:   locks,
 		auth:    authEng,
 		topics:  NewTopicRegistry(),
 		brokers: info,
@@ -68,7 +67,6 @@ func NewWithBrokerSource(
 	cfg Config,
 	store storage.StorageEngine,
 	leases lease.LeaseManager,
-	locks lock.PartitionLock,
 	authEng auth.AuthEngine,
 	brokers handlers.BrokerSource,
 	coord *coordinator.Manager,
@@ -77,7 +75,6 @@ func NewWithBrokerSource(
 		cfg:     cfg,
 		store:   store,
 		leases:  leases,
-		locks:   locks,
 		auth:    authEng,
 		topics:  NewTopicRegistry(),
 		brokers: brokers,
@@ -98,7 +95,7 @@ func (b *Broker) RemoveTopic(name string) {
 
 // RegisterHandlers wires all API key handlers into d and returns d.
 func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
-	d.Register(0, 3, 9, handlers.NewProduceHandler(b.store, b.leases, b.locks, b.auth))
+	d.Register(0, 3, 9, handlers.NewProduceHandler(b.store, b.leases, b.auth))
 	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.auth))
 	d.Register(2, 1, 7, handlers.NewListOffsetsHandler(b.store, b.leases))
 	// Metadata: cap at v10. v11 removed IncludeClusterAuthorizedOperations,

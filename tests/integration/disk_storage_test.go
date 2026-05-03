@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/woestebanaan/skafka/internal/lease"
-	"github.com/woestebanaan/skafka/internal/lock"
 	"github.com/woestebanaan/skafka/internal/storage"
 	"github.com/woestebanaan/skafka/tests/testutil/recordbatch"
 )
@@ -28,23 +27,17 @@ func (s *stubLeaseManager) WatchLeaders(_ context.Context) (<-chan lease.LeaderC
 	return make(chan lease.LeaderChange), nil
 }
 
-type stubLock struct{ locked bool }
-
-func (s *stubLock) Lock(_ string, _ int32) error    { return nil }
-func (s *stubLock) Unlock(_ string, _ int32) error  { return nil }
-func (s *stubLock) IsLocked(_ string, _ int32) bool { return s.locked }
-
-// compile-time interface checks
+// compile-time interface check
 var _ lease.LeaseManager = (*stubLeaseManager)(nil)
-var _ lock.PartitionLock = (*stubLock)(nil)
 
-// newEngine creates a DiskStorageEngine that always considers itself leader+locked.
+// newEngine creates a DiskStorageEngine that always considers itself leader.
+// Phase 4 dropped the flock parameter — single-writer enforcement is now
+// BrokerCoordinator.Owns + epoch-prefixed segment filenames.
 func newEngine(t *testing.T, dir string) *storage.DiskStorageEngine {
 	t.Helper()
 	e, err := storage.NewDiskStorageEngine(
 		dir,
 		&stubLeaseManager{leader: true},
-		&stubLock{locked: true},
 		storage.DefaultConfig(),
 	)
 	if err != nil {
@@ -171,29 +164,6 @@ func TestReadFromOffset(t *testing.T) {
 	}
 }
 
-func TestTwoLockEnforcement(t *testing.T) {
-	dir := t.TempDir()
-	ctx := context.Background()
-
-	e, err := storage.NewDiskStorageEngine(
-		dir,
-		&stubLeaseManager{leader: true},
-		&stubLock{locked: false}, // lock not held
-		storage.DefaultConfig(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := e.CreatePartition("topic", 0); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = e.Append(ctx, "topic", 0, 0, makeBatch(0, 1))
-	if err != storage.ErrLockNotHeld {
-		t.Errorf("expected ErrLockNotHeld, got %v", err)
-	}
-}
-
 func TestRecoveryAfterPartialWrite(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
@@ -305,7 +275,7 @@ func TestSegmentRollAndRead(t *testing.T) {
 	cfg := storage.DefaultConfig()
 	cfg.SegmentBytes = 512
 
-	engine, err := storage.NewDiskStorageEngine(dir, &stubLeaseManager{leader: true}, &stubLock{locked: true}, cfg)
+	engine, err := storage.NewDiskStorageEngine(dir, &stubLeaseManager{leader: true}, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +450,6 @@ func TestFlushPolicyManifestSurvivesCrash(t *testing.T) {
 	e, err := storage.NewDiskStorageEngine(
 		dir,
 		&stubLeaseManager{leader: true},
-		&stubLock{locked: true},
 		cfg,
 	)
 	if err != nil {
@@ -517,7 +486,6 @@ func TestFlushPolicyDisabledDelaysSync(t *testing.T) {
 	e, err := storage.NewDiskStorageEngine(
 		dir,
 		&stubLeaseManager{leader: true},
-		&stubLock{locked: true},
 		cfg,
 	)
 	if err != nil {
