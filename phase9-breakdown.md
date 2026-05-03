@@ -139,7 +139,32 @@ and makes the external listener config day-2 editable without
   reconciler should clean up child resources on delete — verify the
   finalizer codepath actually does this.
 
-### Gap #2: External listener integration test (P0)
+### Gap #2 + #3: External listener integration test + NOT_LEADER end-to-end (P0) — DONE
+
+> **Status:** shipped as `tests/kafka-compat/external_listener_test.go`.
+> Two tests:
+>
+> - `TestExternalListenerPerBrokerHostnames` — bootstraps from
+>   `broker-0.localhost`, produces records to two partitions whose
+>   leaders live on different brokers, and asserts the franz-go dialer
+>   was called for *both* `broker-0.localhost` and `broker-1.localhost`.
+>   That trace is what proves the per-broker hostname routing works:
+>   franz-go could only have learned the second hostname from the
+>   Metadata response over the TLS listener.
+> - `TestExternalListenerNotLeaderRedirect` — sends a hand-built
+>   ProduceRequest for partition 1 directly to broker-0 via
+>   `cl.Broker(0).Request()` and asserts ErrorCode 6
+>   (NOT_LEADER_OR_FOLLOWER). Exercises the
+>   `internal/protocol/handlers/produce.go` ownership check on the
+>   wrong-broker path that real clients use to trigger a Metadata
+>   refresh + retry.
+>
+> `tests/testutil/tlscerts/tlscerts.go` gained `NewBundleWithSANs`
+> for the multi-SAN server cert (broker-0.localhost +
+> broker-1.localhost + 127.0.0.1). The original `NewBundle` is now a
+> thin wrapper around it.
+
+### Gap #2 (original): External listener integration test (P0)
 
 There is no end-to-end test that drives a Kafka client through the TLS
 listener with a per-broker hostname pattern and verifies:

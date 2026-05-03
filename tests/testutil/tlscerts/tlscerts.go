@@ -36,6 +36,15 @@ type Bundle struct {
 // CN baked into the client cert; the broker's mTLS path looks this up
 // against credentials.json's tlsCN map to derive the principal.
 func NewBundle(serverHost, clientCN string) (*Bundle, error) {
+	return NewBundleWithSANs([]string{serverHost}, clientCN)
+}
+
+// NewBundleWithSANs is like NewBundle but lets the server cert carry
+// multiple SAN entries — needed for the per-broker external listener
+// test where one cert serves SNI for broker-0.localhost,
+// broker-1.localhost, etc. Each SAN that parses as an IP is added as
+// an IP SAN; everything else becomes a DNS SAN.
+func NewBundleWithSANs(serverSANs []string, clientCN string) (*Bundle, error) {
 	// --- CA ---
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -64,7 +73,16 @@ func NewBundle(serverHost, clientCN string) (*Bundle, error) {
 	pool.AddCert(caCert)
 
 	// --- Server cert (signed by CA) ---
-	serverPEM, serverKeyPEM, err := signLeaf(caCert, caKey, "skafka-server", []string{serverHost}, []net.IP{net.ParseIP(serverHost)}, x509.ExtKeyUsageServerAuth)
+	var dnsNames []string
+	var ipSANs []net.IP
+	for _, s := range serverSANs {
+		if ip := net.ParseIP(s); ip != nil {
+			ipSANs = append(ipSANs, ip)
+		} else {
+			dnsNames = append(dnsNames, s)
+		}
+	}
+	serverPEM, serverKeyPEM, err := signLeaf(caCert, caKey, "skafka-server", dnsNames, ipSANs, x509.ExtKeyUsageServerAuth)
 	if err != nil {
 		return nil, fmt.Errorf("server: %w", err)
 	}
