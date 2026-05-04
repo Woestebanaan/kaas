@@ -32,14 +32,10 @@ func (h *ListOffsetsHandler) Handle(_ *connstate.ConnState, version int16, body 
 		for _, p := range topic.Partitions {
 			pr := api.ListOffsetsPartitionResponse{PartitionIndex: p.PartitionIndex}
 
-			if !h.leases.IsLeader(topic.Name, p.PartitionIndex) {
-				pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
-				pr.Offset = -1
-				pr.Timestamp = -1
-				topicResp.Partitions = append(topicResp.Partitions, pr)
-				continue
-			}
-
+			// Engine returns ErrUnknownTopicOrPartition (or similar) when
+			// we don't have the partition open — i.e., TakeOver hasn't
+			// run, i.e., we're not the leader per assignment.json. That
+			// replaces the legacy lease.IsLeader gate (gh #75).
 			var offset int64
 			switch {
 			case p.Timestamp == -2: // earliest

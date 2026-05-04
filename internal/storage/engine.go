@@ -349,10 +349,13 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 		return hwm, nil
 	}
 
-	if !e.leases.IsLeader(topic, partition) {
-		return -1, ErrNotLeader
-	}
-
+	// Ownership check is the caller's responsibility (ProduceHandler
+	// gates on coord.Owns + heartbeat freshness in the v3 path; the
+	// v2.6 single-broker path uses LocalLeaseManager which always says
+	// yes). The engine's truth is "is the partition open?" — i.e., did
+	// TakeOver run for it. Without that, getPartition fails and we
+	// surface "unknown partition" rather than re-checking the legacy
+	// per-partition Lease (which gh #75 stopped acquiring).
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
 		return -1, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)

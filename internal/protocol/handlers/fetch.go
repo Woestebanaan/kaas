@@ -72,16 +72,15 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 				PreferredReadReplica: -1,
 			}
 
-			if !h.leases.IsLeader(topic.Name, p.PartitionIndex) {
-				pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
-				pr.HighWatermark = -1
-				topicResp.Partitions = append(topicResp.Partitions, pr)
-				continue
-			}
-
+			// Leadership truth is "has the engine opened this partition
+			// (i.e., has TakeOver run for it)?" — surfaced via the
+			// HighWatermark call below returning ErrUnknownTopicOrPartition
+			// when we're not the leader. Pre-gh #75 we double-checked
+			// via lease.IsLeader; that check now always returns false
+			// because the per-partition Lease isn't acquired anymore.
 			hwm, err := h.store.HighWatermark(topic.Name, p.PartitionIndex)
 			if err != nil {
-				pr.ErrorCode = int16(codec.ErrUnknownTopicOrPartition)
+				pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
 				pr.HighWatermark = -1
 				topicResp.Partitions = append(topicResp.Partitions, pr)
 				continue

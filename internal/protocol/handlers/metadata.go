@@ -157,12 +157,23 @@ func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body 
 		topic := api.MetadataTopic{Name: entry.Name, ErrorCode: 0}
 		for p := int32(0); p < entry.Partitions; p++ {
 			leaderID := h.leaders.LeaderFor(entry.Name, p)
+			// Replicas/ISR must include the leader, otherwise modern
+			// admin/consumer clients refuse to send listOffsets etc. to
+			// it ("Timed out waiting for a node assignment"). Skafka has
+			// no replication, so the replica set is just the leader.
+			// When leadership is unknown (controller hasn't recomputed
+			// since topic add) fall back to self so the response stays
+			// well-formed; the client will retry on its next refresh.
+			replicaID := leaderID
+			if replicaID < 0 {
+				replicaID = h.brokers.Self().NodeID
+			}
 			topic.Partitions = append(topic.Partitions, api.MetadataPartition{
 				PartitionIndex:  p,
 				LeaderID:        leaderID,
 				LeaderEpoch:     0,
-				ReplicaNodes:    []int32{h.brokers.Self().NodeID},
-				IsrNodes:        []int32{h.brokers.Self().NodeID},
+				ReplicaNodes:    []int32{replicaID},
+				IsrNodes:        []int32{replicaID},
 				OfflineReplicas: []int32{},
 			})
 		}
