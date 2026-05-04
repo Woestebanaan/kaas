@@ -91,6 +91,25 @@ func TestCoordinatorAppliesAndDispatches(t *testing.T) {
 	if _, ok := c.CurrentEpoch("events", 1); ok {
 		t.Errorf("CurrentEpoch(events,1) should be (0,false) — not owned")
 	}
+
+	// LeaderFor must return the assigned broker's ordinal — not "this
+	// broker's view of leadership". Critical for the Metadata handler:
+	// if Coordinator.LeaderFor went silent on partitions led elsewhere,
+	// we'd reproduce the gh #75 split-brain symptom in the response.
+	// sampleAssignment uses "broker-7" for events/0 and "other-broker"
+	// for events/1. ParseOrdinalFromIdentity strips trailing dashes so
+	// the ordinals are 7 and -1 respectively (-1 because "broker" is
+	// not numeric — that's the unknown-broker sentinel and matches what
+	// the Metadata handler expects from a missing partition).
+	if got := c.LeaderFor("events", 0); got != 7 {
+		t.Errorf("LeaderFor(events,0) = %d, want 7", got)
+	}
+	if got := c.LeaderFor("events", 1); got != -1 {
+		t.Errorf("LeaderFor(events,1) = %d, want -1 (other-broker has no parseable ordinal)", got)
+	}
+	if got := c.LeaderFor("nonexistent", 0); got != -1 {
+		t.Errorf("LeaderFor(nonexistent,0) = %d, want -1", got)
+	}
 }
 
 func TestCoordinatorRejectsStaleControllerEpoch(t *testing.T) {

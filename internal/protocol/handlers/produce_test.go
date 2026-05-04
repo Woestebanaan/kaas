@@ -24,6 +24,7 @@ func (s *stubCoord) Start(_ context.Context) error                        { retu
 func (s *stubCoord) Stop() error                                          { return nil }
 func (s *stubCoord) OnAssignmentChange(_ kafkaapi.AssignmentChangeHandler) {}
 func (s *stubCoord) LastHeartbeat() time.Time                             { return s.lastHeartbeat }
+func (s *stubCoord) LeaderFor(_ string, _ int32) int32                    { return 0 }
 
 func (s *stubCoord) Owns(topic string, partition int32) bool {
 	_, ok := s.owns[stubKey(topic, partition)]

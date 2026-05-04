@@ -132,7 +132,16 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// v10 keeps the flag available, which is what callers actually want.
 	// The only thing we give up is v11/v12 UUID-based topic IDs (a KRaft
 	// transition feature skafka does not need).
-	d.Register(3, 1, 10, handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, b.leases))
+	// Metadata's leader source: prefer the v3 BrokerCoordinator
+	// (assignment.json-driven) when wired, fall back to the legacy
+	// per-partition LeaseManager. The Lease path can disagree with the
+	// controller's CR for freshly-added topics or during failover —
+	// using assignment.json eliminates that split-brain (gh #75).
+	var leaderSrc handlers.PartitionLeaderSource = b.leases
+	if b.brokerCoord != nil {
+		leaderSrc = b.brokerCoord
+	}
+	d.Register(3, 1, 10, handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, leaderSrc))
 	d.Register(8, 2, 8, handlers.NewOffsetCommitHandler(b.coord))
 	d.Register(9, 1, 8, handlers.NewOffsetFetchHandler(b.coord))
 	d.Register(10, 0, 4, handlers.NewFindCoordinatorHandler(b.coord))

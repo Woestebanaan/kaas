@@ -79,6 +79,14 @@ type BrokerCoordinator interface {
 	// given partition under the most recently applied assignment.
 	Owns(topic string, partition int32) bool
 
+	// LeaderFor returns the broker ordinal that leads the given
+	// partition under the most recently applied assignment, or -1 when
+	// the partition is unknown. Used by the Metadata handler to point
+	// clients at the controller-assigned leader (assignment.json) rather
+	// than at the per-partition Lease holder, which can disagree on
+	// freshly-added topics or during failover (gh #75).
+	LeaderFor(topic string, partition int32) int32
+
 	// CurrentEpoch returns the leadership epoch this broker holds for the
 	// given partition. The boolean is false if this broker does not own
 	// the partition.

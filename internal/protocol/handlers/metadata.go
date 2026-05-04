@@ -4,10 +4,19 @@ import (
 	"fmt"
 
 	"github.com/woestebanaan/skafka/internal/connstate"
-	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
+
+// PartitionLeaderSource resolves which broker leads (topic, partition).
+// Returns -1 when the partition is unknown. Both *broker.Coordinator
+// (assignment.json-driven, v3 path) and lease.LeaseManager (legacy
+// per-partition Lease, dev/fallback) satisfy this interface implicitly,
+// so callers can swap implementations without touching the metadata
+// handler — gh #75 architectural cleanup.
+type PartitionLeaderSource interface {
+	LeaderFor(topic string, partition int32) int32
+}
 
 // BrokerEndpoint is one broker in the cluster as seen by the Metadata handler.
 // Host/Port are the internal (in-cluster) address. ExternalHost/ExternalPort are
@@ -73,22 +82,31 @@ type MetadataHandler struct {
 	brokers   BrokerSource
 	clusterID string
 	topics    TopicSource
-	leases    lease.LeaseManager
+	leaders   PartitionLeaderSource
 }
 
-func NewMetadataHandler(self BrokerInfo, topics TopicSource, leases lease.LeaseManager) *MetadataHandler {
+func NewMetadataHandler(self BrokerInfo, topics TopicSource, leaders PartitionLeaderSource) *MetadataHandler {
 	return &MetadataHandler{
 		brokers:   self,
 		clusterID: self.ClusterID,
 		topics:    topics,
-		leases:    leases,
+		leaders:   leaders,
 	}
 }
 
 // NewMetadataHandlerWithSource creates a MetadataHandler with a dynamic broker source.
 // Used in Kubernetes mode where multiple brokers are known via EndpointSlice.
-func NewMetadataHandlerWithSource(brokers BrokerSource, clusterID string, topics TopicSource, leases lease.LeaseManager) *MetadataHandler {
-	return &MetadataHandler{brokers: brokers, clusterID: clusterID, topics: topics, leases: leases}
+func NewMetadataHandlerWithSource(brokers BrokerSource, clusterID string, topics TopicSource, leaders PartitionLeaderSource) *MetadataHandler {
+	return &MetadataHandler{brokers: brokers, clusterID: clusterID, topics: topics, leaders: leaders}
+}
+
+// WithLeaderSource swaps the partition-leader source after construction.
+// cmd/skafka uses this to point Metadata at the v3 BrokerCoordinator
+// once the cluster runtime starts; until then (and in single-broker
+// dev mode) the original lease-backed source is fine.
+func (h *MetadataHandler) WithLeaderSource(s PartitionLeaderSource) *MetadataHandler {
+	h.leaders = s
+	return h
 }
 
 func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -138,7 +156,7 @@ func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body 
 	for _, entry := range entries {
 		topic := api.MetadataTopic{Name: entry.Name, ErrorCode: 0}
 		for p := int32(0); p < entry.Partitions; p++ {
-			leaderID := h.leases.LeaderFor(entry.Name, p)
+			leaderID := h.leaders.LeaderFor(entry.Name, p)
 			topic.Partitions = append(topic.Partitions, api.MetadataPartition{
 				PartitionIndex:  p,
 				LeaderID:        leaderID,

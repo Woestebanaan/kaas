@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/woestebanaan/skafka/internal/assignment"
+	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
@@ -161,6 +162,34 @@ func (c *Coordinator) Owns(topic string, partition int32) bool {
 	defer c.mu.RUnlock()
 	_, ok := c.ownership[partitionKey(topic, partition)]
 	return ok
+}
+
+// LeaderFor returns the broker ordinal that leads (topic, partition)
+// under the most recently applied assignment. Returns -1 when the
+// partition is not in the current assignment (unknown topic, or the
+// controller hasn't recomputed since the topic was added).
+//
+// This is the assignment-driven replacement for the old per-partition
+// Lease.LeaderFor lookup: the per-partition Lease holder and the CR's
+// assigned broker could disagree (gh #75 split-brain), but assignment.json
+// is the controller's single source of truth.
+func (c *Coordinator) LeaderFor(topic string, partition int32) int32 {
+	c.mu.RLock()
+	a := c.current
+	c.mu.RUnlock()
+	if a == nil {
+		return -1
+	}
+	for _, p := range a.Partitions {
+		if p.Topic == topic && p.Partition == partition {
+			ord := lease.ParseOrdinalFromIdentity(p.Broker)
+			if ord < 0 {
+				return -1
+			}
+			return ord
+		}
+	}
+	return -1
 }
 
 // CurrentEpoch returns the leadership epoch this broker holds for (topic,
