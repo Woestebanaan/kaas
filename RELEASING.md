@@ -52,9 +52,9 @@ Images are built `linux/amd64` only.
    git tag v0.1.4-preview
    git push origin v0.1.4-preview
    ```
-4. Approve the run. The workflow uses the `release` GitHub Environment, so
-   the job pauses for manual approval before pushing artifacts.
-5. After the run completes, verify the artifacts exist:
+   The release workflow runs automatically on the tag push; no manual
+   approval gate.
+4. After the run completes, verify the artifacts exist:
    ```bash
    # chart
    helm pull oci://ghcr.io/woestebanaan/charts/skafka --version 0.1.4-preview

@@ -2,7 +2,6 @@ name: release
 
 # Triggered by semver tags. Publishes both container images and the Helm chart
 # to GHCR. Guardrails:
-#   - environment: release requires manual approval
 #   - pre-release tags (v*-*) publish to separate image names
 #
 # Runs on the Woestebanaan/skafka ARC runner set (apps/arc-runners in the
