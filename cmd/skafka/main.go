@@ -20,6 +20,7 @@ import (
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/broker"
+	"github.com/woestebanaan/skafka/internal/controller"
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8spkg "github.com/woestebanaan/skafka/internal/k8s"
 	"github.com/woestebanaan/skafka/internal/lease"
@@ -149,8 +150,7 @@ func runBroker(ctx context.Context) {
 		}
 
 		if k8sMode {
-			numBrokers := brokerReg.Count()
-			k8sTopics = acquireK8sPartitions(ctx, k8sClient, namespace, leaseManager, engine, brokerID, numBrokers)
+			k8sTopics = acquireK8sPartitions(ctx, k8sClient, namespace, leaseManager, engine, brokerReg, brokerID)
 
 			// Satisfy the StatefulSet's skafka.io/PartitionsReady gate now that the
 			// initial partition acquisition pass has run. Without this patch the
@@ -401,11 +401,43 @@ type topicSpec struct {
 	Partitions int32
 }
 
+// brokerIDsFromReg renders BrokerRegistry endpoints into the
+// "skafka-N" identifiers the controller's balancer / RendezvousPick
+// expect. Same shape as cluster_runtime's brokerSourceAdapter; kept
+// inline here so main.go doesn't have to share state with the runtime.
+func brokerIDsFromReg(reg *k8spkg.BrokerRegistry) []string {
+	if reg == nil {
+		return nil
+	}
+	eps := reg.All()
+	ids := make([]string, 0, len(eps))
+	for _, ep := range eps {
+		ids = append(ids, fmt.Sprintf("skafka-%d", ep.NodeID))
+	}
+	return ids
+}
+
+// preferredHolder is the on-broker side of the controller's balancer:
+// returns true when the local broker is the rendezvous-hash-elected
+// preferred Lease holder for (topic, partition). Used by the topic
+// watcher to decide who tries to acquire the per-partition Lease first.
+//
+// Replaces k8spkg.Preferred (FNV-mod) — that algorithm did NOT match the
+// controller's rendezvous-hash, so the per-partition Lease holder ended
+// up disagreeing with assignment.json's leader (gh #75).
+func preferredHolder(topic string, partition int32, selfBrokerID string, brokerIDs []string) bool {
+	if len(brokerIDs) == 0 {
+		return true
+	}
+	return controller.RendezvousPick(topic, partition, brokerIDs) == selfBrokerID
+}
+
 // acquireK8sPartitions enumerates KafkaTopic CRDs, creates partition dirs, kicks off
 // Lease acquisition, and returns the discovered topics so callers can register them
 // with the in-memory TopicRegistry.
 func acquireK8sPartitions(ctx context.Context, k8sClient kubernetes.Interface, namespace string,
-	lm lease.LeaseManager, engine *storage.DiskStorageEngine, selfOrdinal int32, numBrokers int) []topicSpec {
+	lm lease.LeaseManager, engine *storage.DiskStorageEngine, brokerReg *k8spkg.BrokerRegistry,
+	selfOrdinal int32) []topicSpec {
 
 	scheme := runtime.NewScheme()
 	if err := operatorv1.AddToScheme(scheme); err != nil {
@@ -424,10 +456,12 @@ func acquireK8sPartitions(ctx context.Context, k8sClient kubernetes.Interface, n
 		return nil
 	}
 
+	selfBrokerID := fmt.Sprintf("skafka-%d", selfOrdinal)
+	brokerIDs := brokerIDsFromReg(brokerReg)
 	for _, topic := range topicList.Items {
 		for p := int32(0); p < topic.Spec.Partitions; p++ {
 			_ = engine.CreatePartition(topic.Name, p)
-			if k8spkg.Preferred(topic.Name, p, selfOrdinal, numBrokers) {
+			if preferredHolder(topic.Name, p, selfBrokerID, brokerIDs) {
 				_ = lm.Acquire(ctx, topic.Name, p)
 			}
 		}
@@ -469,12 +503,13 @@ func startTopicWatcher(
 		switch ev.Type {
 		case k8spkg.TopicAdded:
 			slog.Info("kafkatopic added", "topic", ev.Name, "partitions", ev.Partitions)
-			numBrokers := brokerReg.Count()
+			selfBrokerID := fmt.Sprintf("skafka-%d", selfOrdinal)
+			brokerIDs := brokerIDsFromReg(brokerReg)
 			for p := int32(0); p < ev.Partitions; p++ {
 				if err := engine.CreatePartition(ev.Name, p); err != nil {
 					slog.Warn("topic watcher: create partition", "topic", ev.Name, "partition", p, "err", err)
 				}
-				if k8spkg.Preferred(ev.Name, p, selfOrdinal, numBrokers) {
+				if preferredHolder(ev.Name, p, selfBrokerID, brokerIDs) {
 					_ = lm.Acquire(ctx, ev.Name, p)
 				}
 			}
@@ -492,12 +527,13 @@ func startTopicWatcher(
 
 		case k8spkg.TopicModified:
 			slog.Info("kafkatopic expanded", "topic", ev.Name, "old", ev.OldPartitions, "new", ev.Partitions)
-			numBrokers := brokerReg.Count()
+			selfBrokerID := fmt.Sprintf("skafka-%d", selfOrdinal)
+			brokerIDs := brokerIDsFromReg(brokerReg)
 			for p := ev.OldPartitions; p < ev.Partitions; p++ {
 				if err := engine.CreatePartition(ev.Name, p); err != nil {
 					slog.Warn("topic watcher: create partition", "topic", ev.Name, "partition", p, "err", err)
 				}
-				if k8spkg.Preferred(ev.Name, p, selfOrdinal, numBrokers) {
+				if preferredHolder(ev.Name, p, selfBrokerID, brokerIDs) {
 					_ = lm.Acquire(ctx, ev.Name, p)
 				}
 			}

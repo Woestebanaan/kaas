@@ -97,6 +97,15 @@ func Balance(
 	return out
 }
 
+// RendezvousPick is the public form of rendezvousPick. Exposed so the
+// broker-side topic-watcher (cmd/skafka/main.go) can pre-compute the
+// same preferred Lease holder the controller's balancer would assign —
+// the two paths must agree, otherwise per-partition Lease holder and
+// assignment.json disagree (gh #75 split-brain).
+func RendezvousPick(topic string, partition int32, brokers []string) string {
+	return rendezvousPick(topic, partition, brokers)
+}
+
 // rendezvousPick is highest-random-weight hashing: hash(topic, partition,
 // broker) for each broker, return the broker with the highest hash.
 // Deterministic given the same (topic, partition, brokers); minimal churn
