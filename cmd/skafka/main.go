@@ -493,10 +493,20 @@ func startTopicWatcher(
 
 		case k8spkg.TopicDeleted:
 			slog.Info("kafkatopic deleted", "topic", ev.Name, "partitions", ev.Partitions)
-			b.RemoveTopic(ev.Name)
+			// Close the partition log file handles BEFORE we drop the
+			// topic from the registry. On NFS, an open file under a
+			// directory the operator wants to unlinkat turns into a
+			// .nfsXXXX silly-rename that EBUSYs the parent unlink
+			// indefinitely (gh #76). The topic_watcher fires this
+			// event the moment the CR's deletionTimestamp is set, so
+			// we close ahead of the operator's finalizer reconcile.
 			for p := int32(0); p < ev.Partitions; p++ {
+				if err := engine.ClosePartition(ev.Name, p); err != nil {
+					slog.Warn("topic watcher: close partition", "topic", ev.Name, "partition", p, "err", err)
+				}
 				_ = lm.Release(ev.Name, p)
 			}
+			b.RemoveTopic(ev.Name)
 			rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicDeleted, ev.Name)
 		}
 	}

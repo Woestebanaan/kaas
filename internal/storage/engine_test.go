@@ -26,6 +26,46 @@ func (n *neverLeaderLeases) WatchLeaders(_ context.Context) (<-chan lease.Leader
 	return make(chan lease.LeaderChange), nil
 }
 
+// TestClosePartitionDropsFileHandles guards gh #76: ClosePartition
+// must close the partition's open log/index file handles and remove
+// it from the engine's in-memory map so the operator's finalizer can
+// unlink the directory without hitting NFS .nfsXXXX silly-rename
+// EBUSY. Idempotent — calling on an already-closed partition is a
+// no-op.
+func TestClosePartitionDropsFileHandles(t *testing.T) {
+	dir := t.TempDir()
+	leases := &neverLeaderLeases{}
+	e, err := NewDiskStorageEngine(dir, leases, DefaultConfig())
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.CreatePartition("t", 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := e.TakeOver(context.Background(), "t", 0, 1); err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+	if _, ok := e.getPartition("t", 0); !ok {
+		t.Fatal("partition should be in the engine map after TakeOver")
+	}
+
+	if err := e.ClosePartition("t", 0); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, ok := e.getPartition("t", 0); ok {
+		t.Error("partition still in engine map after ClosePartition")
+	}
+
+	// Idempotent — second close is a no-op, no error.
+	if err := e.ClosePartition("t", 0); err != nil {
+		t.Errorf("second close: %v", err)
+	}
+	// And ClosePartition on a never-opened partition is also a no-op.
+	if err := e.ClosePartition("nonexistent", 0); err != nil {
+		t.Errorf("close on unknown partition: %v", err)
+	}
+}
+
 // TestEngineAppendDoesNotConsultLeaseIsLeader guards the gh #75 / 0.1.16
 // regression fix: the storage engine's Append must NOT gate on
 // lease.LeaseManager.IsLeader. Post-#75, no broker acquires per-partition

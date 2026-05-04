@@ -604,6 +604,39 @@ func (e *DiskStorageEngine) Relinquish(_ string, _ int32) error {
 	return nil
 }
 
+// ClosePartition closes the partition's open log + index file handles
+// and forgets it from the in-memory map. Used by the broker on
+// KafkaTopic deletion: NFS silly-renames open files into .nfsXXXX
+// entries that EBUSY the operator's unlinkat on the parent dir
+// (gh #76). Closing the handles before the operator's finalizer
+// reconciles lets NFS drop the silly-renames so the directory can be
+// removed cleanly.
+//
+// Idempotent — re-calling on an already-closed partition is a no-op.
+// Errors from the underlying segment close are surfaced; the broker
+// logs them but doesn't retry, since the operator's finalizer will
+// retry the unlink on its own reconcile cadence.
+func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error {
+	e.mu.Lock()
+	key := e.partKey(topic, partition)
+	ps, ok := e.partitions[key]
+	if !ok {
+		e.mu.Unlock()
+		return nil
+	}
+	delete(e.partitions, key)
+	e.mu.Unlock()
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.active == nil {
+		return nil
+	}
+	err := ps.active.close()
+	ps.active = nil
+	return err
+}
+
 // AllPartitions returns all known partitions — used by the retention cleaner.
 func (e *DiskStorageEngine) AllPartitions() []PartitionID {
 	e.mu.RLock()

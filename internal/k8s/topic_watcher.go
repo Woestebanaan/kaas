@@ -45,8 +45,9 @@ type TopicWatcher struct {
 	onEvent   func(TopicEvent)
 	backoff   time.Duration
 
-	mu    sync.Mutex
-	cache map[string]int32
+	mu          sync.Mutex
+	cache       map[string]int32
+	terminating map[string]struct{} // gh #76: track CRs we've already fired TopicDeleted for while finalizers churn, suppress duplicates
 }
 
 // NewTopicWatcher builds a watcher bound to the KafkaTopic CRD in namespace.
@@ -60,11 +61,12 @@ func NewTopicWatcher(cfg *rest.Config, namespace string, onEvent func(TopicEvent
 		return nil, err
 	}
 	return &TopicWatcher{
-		client:    c,
-		namespace: namespace,
-		onEvent:   onEvent,
-		backoff:   time.Second,
-		cache:     make(map[string]int32),
+		client:      c,
+		namespace:   namespace,
+		onEvent:     onEvent,
+		backoff:     time.Second,
+		cache:       make(map[string]int32),
+		terminating: make(map[string]struct{}),
 	}, nil
 }
 
@@ -164,12 +166,48 @@ func (w *TopicWatcher) consume(ctx context.Context, watcher watch.Interface) err
 // processEvent applies a single watch event to the cache and fires onEvent if
 // the observation diverges from cached state. Exposed for unit tests.
 func (w *TopicWatcher) processEvent(eventType watch.EventType, t *operatorv1.KafkaTopic) {
+	// A CR with a non-nil deletionTimestamp is being torn down — fire
+	// TopicDeleted now (rather than waiting for the K8s Deleted event
+	// after finalizers clear) so the broker can close its log file
+	// handles before the operator's finalizer tries to unlink the
+	// partition dirs. On NFS, those open handles turn into .nfsXXXX
+	// silly-renames that EBUSY the unlinkat (gh #76). Suppressed
+	// across repeated Modified events for the same Terminating CR via
+	// the terminating set.
+	if t.DeletionTimestamp != nil {
+		w.handleTerminating(t)
+		return
+	}
 	switch eventType {
 	case watch.Added, watch.Modified:
 		w.handleUpsert(t)
 	case watch.Deleted:
 		w.handleDelete(t)
 	}
+}
+
+// handleTerminating fires TopicDeleted once for a Terminating CR.
+// Falls back to spec.partitions when cache is empty (broker just
+// started, missed the Added event for a topic that's already
+// Terminating).
+func (w *TopicWatcher) handleTerminating(t *operatorv1.KafkaTopic) {
+	w.mu.Lock()
+	if _, alreadyFired := w.terminating[t.Name]; alreadyFired {
+		w.mu.Unlock()
+		return
+	}
+	last, existed := w.cache[t.Name]
+	delete(w.cache, t.Name)
+	w.terminating[t.Name] = struct{}{}
+	w.mu.Unlock()
+
+	if !existed {
+		last = t.Spec.Partitions
+	}
+	if last <= 0 {
+		return
+	}
+	w.fire(TopicEvent{Type: TopicDeleted, Name: t.Name, Partitions: last})
 }
 
 func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
@@ -197,6 +235,7 @@ func (w *TopicWatcher) handleDelete(t *operatorv1.KafkaTopic) {
 	w.mu.Lock()
 	last, existed := w.cache[t.Name]
 	delete(w.cache, t.Name)
+	delete(w.terminating, t.Name)
 	w.mu.Unlock()
 	if !existed {
 		return
