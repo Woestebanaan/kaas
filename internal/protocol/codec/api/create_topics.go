@@ -2,7 +2,7 @@ package api
 
 import "github.com/woestebanaan/skafka/internal/protocol/codec"
 
-// CreateTopicsRequest (key 19, v0–v7).
+// CreateTopicsRequest (key 19, v0–v6).
 type CreateTopicsRequest struct {
 	Topics    []CreatableTopic
 	TimeoutMs int32
@@ -27,7 +27,7 @@ type CreateableTopicConfig struct {
 	Value string // nullable
 }
 
-// CreateTopicsResponse (key 19, v0–v7).
+// CreateTopicsResponse (key 19, v0–v6).
 type CreateTopicsResponse struct {
 	ThrottleTimeMs int32 // v2+
 	Topics         []CreatableTopicResult

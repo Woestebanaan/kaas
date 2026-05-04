@@ -143,7 +143,13 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(15, 0, 5, handlers.NewDescribeGroupsHandler(b.coord))
 	d.Register(16, 0, 4, handlers.NewListGroupsHandler(b.coord))
 	d.Register(17, 0, 1, handlers.NewSaslHandshakeHandler())
-	d.Register(19, 0, 7, handlers.NewCreateTopicsHandler(b.topics))
+	// CreateTopics is capped at v6: v7 added the topic_id UUID
+	// (KIP-516) to CreatableTopicResult, which our encoder doesn't
+	// write — modern Java admin clients hit BufferUnderflowException
+	// reading the missing 16 bytes (gh #73). Same shape as the
+	// Metadata v10 cap above. Real fix is to encode topic_id and
+	// raise back to v7+.
+	d.Register(19, 0, 6, handlers.NewCreateTopicsHandler(b.topics))
 	d.Register(20, 0, 6, handlers.NewDeleteTopicsHandler(b.topics))
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
