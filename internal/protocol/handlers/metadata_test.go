@@ -40,6 +40,33 @@ func (stubTopics) Get(name string) (int32, bool) {
 }
 func (stubTopics) All() []TopicEntry { return []TopicEntry{{Name: "t", Partitions: 1}} }
 
+// stubLeaderSource returns a fixed leader per partition; substitutable
+// via a map. -1 means "unknown" (the gh #75 fallback path).
+type stubLeaderSource struct{ leaders map[int32]int32 }
+
+func (s stubLeaderSource) LeaderFor(_ string, partition int32) int32 {
+	if v, ok := s.leaders[partition]; ok {
+		return v
+	}
+	return -1
+}
+
+// multiPartTopics is a TopicSource for tests that want >1 partition.
+type multiPartTopics struct {
+	name       string
+	partitions int32
+}
+
+func (m multiPartTopics) Get(name string) (int32, bool) {
+	if name == m.name {
+		return m.partitions, true
+	}
+	return 0, false
+}
+func (m multiPartTopics) All() []TopicEntry {
+	return []TopicEntry{{Name: m.name, Partitions: m.partitions}}
+}
+
 // ---- tests ----
 
 // Metadata response on the internal listener must advertise the internal headless DNS,
@@ -123,6 +150,72 @@ func TestMetadataHandlerExternalFallback(t *testing.T) {
 	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerExternal})
 	if resp.Brokers[0].Host != "localhost" {
 		t.Errorf("fallback: Host=%q, want localhost", resp.Brokers[0].Host)
+	}
+}
+
+// TestMetadataHandlerLeaderFromSource guards gh #75: the handler must
+// route partition leadership lookups through PartitionLeaderSource and
+// emit Replicas/ISR containing the leader (not the responding broker).
+// Pre-fix, Replicas was always self.NodeID — that broke the Java
+// AdminClient's listOffsets path with "Timed out waiting for a node
+// assignment" because Leader was no longer in the Replicas list once
+// Coordinator and Lease started disagreeing.
+func TestMetadataHandlerLeaderFromSource(t *testing.T) {
+	src := stubBrokerSource{
+		self: BrokerEndpoint{NodeID: 0, Host: "skafka-0", Port: 9092},
+		all: []BrokerEndpoint{
+			{NodeID: 0, Host: "skafka-0", Port: 9092},
+			{NodeID: 1, Host: "skafka-1", Port: 9092},
+			{NodeID: 2, Host: "skafka-2", Port: 9092},
+		},
+	}
+	topics := multiPartTopics{name: "kperf", partitions: 3}
+	leaders := stubLeaderSource{leaders: map[int32]int32{0: 1, 1: 2, 2: 0}}
+	h := NewMetadataHandlerWithSource(src, "test", topics, leaders)
+
+	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerInternal})
+	if len(resp.Topics) != 1 {
+		t.Fatalf("topics=%d, want 1", len(resp.Topics))
+	}
+	want := map[int32]int32{0: 1, 1: 2, 2: 0}
+	for _, p := range resp.Topics[0].Partitions {
+		expected := want[p.PartitionIndex]
+		if p.LeaderID != expected {
+			t.Errorf("partition %d Leader=%d, want %d (gh #75)", p.PartitionIndex, p.LeaderID, expected)
+		}
+		// Replicas/ISR must contain the leader so the Java AdminClient
+		// can route listOffsets etc. to it.
+		if len(p.ReplicaNodes) != 1 || p.ReplicaNodes[0] != expected {
+			t.Errorf("partition %d Replicas=%v, want [%d]", p.PartitionIndex, p.ReplicaNodes, expected)
+		}
+		if len(p.IsrNodes) != 1 || p.IsrNodes[0] != expected {
+			t.Errorf("partition %d Isr=%v, want [%d]", p.PartitionIndex, p.IsrNodes, expected)
+		}
+	}
+}
+
+// TestMetadataHandlerUnknownLeaderFallsBackToSelf covers the brief
+// window between a topic's CR appearing and the controller's first
+// recompute that includes it. LeaderFor returns -1; the response must
+// stay well-formed so the client can retry on its next refresh.
+func TestMetadataHandlerUnknownLeaderFallsBackToSelf(t *testing.T) {
+	src := stubBrokerSource{
+		self: BrokerEndpoint{NodeID: 7, Host: "skafka-7", Port: 9092},
+		all:  []BrokerEndpoint{{NodeID: 7, Host: "skafka-7", Port: 9092}},
+	}
+	leaders := stubLeaderSource{leaders: map[int32]int32{}} // every lookup returns -1
+	h := NewMetadataHandlerWithSource(src, "test", stubTopics{}, leaders)
+
+	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerInternal})
+	if len(resp.Topics) != 1 || len(resp.Topics[0].Partitions) != 1 {
+		t.Fatalf("unexpected topics shape: %+v", resp.Topics)
+	}
+	p := resp.Topics[0].Partitions[0]
+	if p.LeaderID != -1 {
+		t.Errorf("LeaderID=%d, want -1 when unknown", p.LeaderID)
+	}
+	if len(p.ReplicaNodes) != 1 || p.ReplicaNodes[0] != 7 {
+		t.Errorf("Replicas=%v, want [7] (self fallback)", p.ReplicaNodes)
 	}
 }
 
