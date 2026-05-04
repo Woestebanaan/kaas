@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -22,6 +23,7 @@ import (
 	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/storage"
 	"github.com/woestebanaan/skafka/pkg/heartbeatpb"
+	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
 // clusterRuntimeConfig captures the inputs the v3 runtime needs from main.go.
@@ -73,6 +75,31 @@ type clusterRuntime struct {
 	dataDir   string
 	brokerReg *k8spkg.BrokerRegistry
 	engine    *storage.DiskStorageEngine
+
+	// activeLoop is the AssignmentLoop owned by onAcquired while this
+	// broker holds the controller Lease. NotifyTopicChange uses it to
+	// trigger a recompute when the topic_watcher fires (gh #74). Set
+	// before loop.Start, cleared after it returns.
+	mu         sync.Mutex
+	activeLoop *controller.AssignmentLoop
+}
+
+// NotifyTopicChange asks the controller's AssignmentLoop to recompute
+// because a KafkaTopic CR was added / modified / deleted. No-op on
+// non-controller brokers (activeLoop is nil) and on a nil receiver
+// (single-broker dev mode where the runtime never starts). Safe to call
+// from any goroutine.
+func (r *clusterRuntime) NotifyTopicChange(ctx context.Context, reason kafkaapi.AssignmentChangeReason, topic string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	loop := r.activeLoop
+	r.mu.Unlock()
+	if loop == nil {
+		return
+	}
+	_ = loop.UpdateAssignment(ctx, kafkaapi.AssignmentChange{Reason: reason, Topic: topic})
 }
 
 // startClusterRuntime boots every v3 goroutine and returns a handle that
@@ -122,6 +149,19 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 
 	coord := broker.NewCoordinator(cfg.brokerIDStr, store, ctrlWatch, heart)
 	go func() { _ = coord.Start(ctx) }()
+
+	// Build the runtime handle early so the onAcquired closure below can
+	// reach back into it (to publish/withdraw the active AssignmentLoop
+	// pointer used by NotifyTopicChange).
+	rt := &clusterRuntime{
+		coord:     coord,
+		ctrlWatch: ctrlWatch,
+		heart:     heart,
+		brokerID:  cfg.brokerIDStr,
+		dataDir:   cfg.dataDir,
+		brokerReg: cfg.brokerReg,
+		engine:    cfg.engine,
+	}
 
 	// Periodic upstream BrokerStatus tick: every heartbeatInterval, send
 	// the broker's current view of the cluster — last-applied
@@ -179,6 +219,18 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 			topicSrc, brokerSrc, cfg.brokerIDStr,
 		).WithGroupSource(heartSrv)
 
+		// Publish the loop pointer so NotifyTopicChange (called from the
+		// topic-watcher goroutine in main.go) can queue recomputes while
+		// we hold the Lease. Withdraw it on the way out.
+		rt.mu.Lock()
+		rt.activeLoop = loop
+		rt.mu.Unlock()
+		defer func() {
+			rt.mu.Lock()
+			rt.activeLoop = nil
+			rt.mu.Unlock()
+		}()
+
 		if err := loop.Start(leaderCtx, epoch); err != nil {
 			slog.Error("controller: assignment loop exited", "err", err)
 		}
@@ -199,15 +251,7 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 		"heartbeat_addr", cfg.heartbeatAddr,
 	)
 
-	return &clusterRuntime{
-		coord:     coord,
-		ctrlWatch: ctrlWatch,
-		heart:     heart,
-		brokerID:  cfg.brokerIDStr,
-		dataDir:   cfg.dataDir,
-		brokerReg: cfg.brokerReg,
-		engine:    cfg.engine,
-	}
+	return rt
 }
 
 // healthRuntimeState adapts clusterRuntime to observability.RuntimeState

@@ -28,6 +28,7 @@ import (
 	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/storage"
 	operatorv1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
+	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
 func main() {
@@ -246,17 +247,16 @@ func runBroker(ctx context.Context) {
 		b.AddTopic(t.Name, t.Partitions)
 	}
 
-	// Watch KafkaTopic CRs so topics created after startup become visible
-	// without a broker restart, and partition expansions are picked up.
-	if k8sMode && dataDir != "" {
-		startTopicWatcher(ctx, namespace, b, engine, leaseManager, brokerReg, brokerID, k8sTopics)
-	}
-
 	// v3 cluster runtime must boot BEFORE RegisterHandlers so the
 	// BrokerCoordinator is available for the produce handler to pick up
 	// via WithCoordinator. In single-broker dev mode (no k8sClient or
 	// no dataDir) the runtime isn't started and the broker stays on
 	// the legacy lease+lock fallback path.
+	//
+	// It also boots before the topic watcher so the watcher's onEvent
+	// callback can notify the controller's AssignmentLoop on KafkaTopic
+	// adds/modifies/deletes — fixes the gap where new topics never made
+	// it into assignment.json (gh #74).
 	var rt *clusterRuntime
 	if k8sMode && dataDir != "" && k8sClient != nil && engine != nil {
 		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
@@ -314,6 +314,14 @@ func runBroker(ctx context.Context) {
 		// callback registered by observability.Bootstrap. Until this
 		// runs, gauges report zero.
 		observability.SetGaugeSource(&runtimeGaugeSource{rt: rt})
+	}
+
+	// Watch KafkaTopic CRs so topics created after startup become visible
+	// without a broker restart, partition expansions are picked up, and
+	// the controller (when this broker holds the Lease) recomputes the
+	// assignment for the new topic shape.
+	if k8sMode && dataDir != "" {
+		startTopicWatcher(ctx, namespace, b, engine, leaseManager, brokerReg, brokerID, k8sTopics, rt)
 	}
 
 	d := protocol.NewDispatcher()
@@ -455,6 +463,7 @@ func startTopicWatcher(
 	brokerReg *k8spkg.BrokerRegistry,
 	selfOrdinal int32,
 	primed []topicSpec,
+	rt *clusterRuntime,
 ) {
 	onEvent := func(ev k8spkg.TopicEvent) {
 		switch ev.Type {
@@ -475,6 +484,11 @@ func startTopicWatcher(
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
+			// Triggers an assignment recompute on whichever broker is
+			// currently controller. No-op on non-controller brokers and
+			// when the v3 runtime is disabled. Without this, new topics
+			// don't appear in assignment.json — gh #74.
+			rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicCreated, ev.Name)
 
 		case k8spkg.TopicModified:
 			slog.Info("kafkatopic expanded", "topic", ev.Name, "old", ev.OldPartitions, "new", ev.Partitions)
@@ -493,6 +507,7 @@ func startTopicWatcher(
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
+			rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicResized, ev.Name)
 
 		case k8spkg.TopicDeleted:
 			slog.Info("kafkatopic deleted", "topic", ev.Name, "partitions", ev.Partitions)
@@ -500,6 +515,7 @@ func startTopicWatcher(
 			for p := int32(0); p < ev.Partitions; p++ {
 				_ = lm.Release(ev.Name, p)
 			}
+			rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicDeleted, ev.Name)
 		}
 	}
 
