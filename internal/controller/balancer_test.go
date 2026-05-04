@@ -7,6 +7,30 @@ import (
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
+// TestRendezvousPickAgreesWithBalance guards gh #75: the exported
+// RendezvousPick must produce the same broker per (topic, partition)
+// that Balance() assigns. The broker's topic_watcher uses
+// RendezvousPick to decide who acquires the per-partition Lease first;
+// if those two paths disagreed, the Lease holder and assignment.json
+// could end up pointing at different brokers and produce requests
+// would fail with NotLeaderOrFollowerException for that partition
+// (the original kperf-0 split-brain symptom).
+func TestRendezvousPickAgreesWithBalance(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	topics := []TopicSpec{
+		{Name: "events", PartitionCount: 9},
+		{Name: "kperf", PartitionCount: 3},
+		{Name: "audit-log", PartitionCount: 1},
+	}
+	for _, p := range Balance(nil, brokers, topics) {
+		got := RendezvousPick(p.Topic, p.Partition, brokers)
+		if got != p.Broker {
+			t.Errorf("%s/%d: Balance assigned %q, RendezvousPick returns %q (gh #75)",
+				p.Topic, p.Partition, p.Broker, got)
+		}
+	}
+}
+
 func TestBalance_FreshClusterDistributesEvenly(t *testing.T) {
 	brokers := []string{"a", "b", "c"}
 	topics := []TopicSpec{{Name: "events", PartitionCount: 9}}

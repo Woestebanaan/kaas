@@ -79,9 +79,18 @@ type clusterRuntime struct {
 	// activeLoop is the AssignmentLoop owned by onAcquired while this
 	// broker holds the controller Lease. NotifyTopicChange uses it to
 	// trigger a recompute when the topic_watcher fires (gh #74). Set
-	// before loop.Start, cleared after it returns.
+	// before loop.Start, cleared after it returns. Stored behind a
+	// minimal interface so cluster_runtime_test.go can substitute a
+	// fake sink without spinning up the real assignment loop.
 	mu         sync.Mutex
-	activeLoop *controller.AssignmentLoop
+	activeLoop assignmentSink
+}
+
+// assignmentSink is the slice of *controller.AssignmentLoop that
+// NotifyTopicChange depends on. *controller.AssignmentLoop satisfies
+// this interface implicitly.
+type assignmentSink interface {
+	UpdateAssignment(ctx context.Context, change kafkaapi.AssignmentChange) error
 }
 
 // NotifyTopicChange asks the controller's AssignmentLoop to recompute
