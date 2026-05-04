@@ -240,6 +240,16 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 			rt.mu.Unlock()
 		}()
 
+		// Watch for broker join/leave so we recompute when the cluster
+		// shape changes — without this, killing a broker leaves its
+		// partitions assigned to a dead pod and producers hang on
+		// retries until the StatefulSet recreates the broker (gh #77).
+		// Polls AliveBrokers cheaply (in-memory), diffs against the
+		// previous snapshot, queues an UpdateAssignment when the set
+		// changes. Coalescing in the loop collapses bursts (e.g. all
+		// brokers turning over during a rollout) into one recompute.
+		go watchBrokerSet(leaderCtx, brokerSrc, loop)
+
 		if err := loop.Start(leaderCtx, epoch); err != nil {
 			slog.Error("controller: assignment loop exited", "err", err)
 		}
@@ -518,6 +528,80 @@ func (a *brokerSourceAdapter) AliveBrokers() []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// watchBrokerSet polls the BrokerSource at a fixed cadence and queues
+// an UpdateAssignment whenever the alive-broker set changes. Used by
+// the controller side of the cluster runtime to detect broker joins
+// and deaths without relying on a callback from the heartbeat server
+// or the Endpoint slice watcher (the loop's recompute reads fresh
+// inputs from BrokerSource anyway, so polling is sufficient and avoids
+// a coordination contract that didn't exist before — gh #77).
+//
+// Reason is set to BrokerJoined / BrokerDead based on the diff
+// direction; both ultimately drop into the same recompute path. The
+// watcher lives for as long as this broker holds the controller Lease
+// (ctx is the leaderCtx).
+func watchBrokerSet(ctx context.Context, src controller.BrokerSource, loop assignmentSink) {
+	const pollInterval = 2 * time.Second
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	prev := setOf(src.AliveBrokers())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cur := setOf(src.AliveBrokers())
+			added, removed := diffSets(prev, cur)
+			if len(added) == 0 && len(removed) == 0 {
+				continue
+			}
+			reason := kafkaapi.AssignmentReasonBrokerJoined
+			brokerID := pickAny(added)
+			if len(removed) > 0 {
+				reason = kafkaapi.AssignmentReasonBrokerDead
+				brokerID = pickAny(removed)
+			}
+			slog.Info("broker set changed; triggering recompute",
+				"added", added, "removed", removed)
+			_ = loop.UpdateAssignment(ctx, kafkaapi.AssignmentChange{
+				Reason:   reason,
+				BrokerID: brokerID,
+			})
+			prev = cur
+		}
+	}
+}
+
+func setOf(ids []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+func diffSets(prev, cur map[string]struct{}) (added, removed []string) {
+	for k := range cur {
+		if _, ok := prev[k]; !ok {
+			added = append(added, k)
+		}
+	}
+	for k := range prev {
+		if _, ok := cur[k]; !ok {
+			removed = append(removed, k)
+		}
+	}
+	return added, removed
+}
+
+func pickAny(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
 }
 
 // runHeartbeatPump sends a periodic upstream BrokerStatus to the
