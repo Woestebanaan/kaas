@@ -197,6 +197,72 @@ func TestDeleteRecords_CompletePurgeReclaimsActive(t *testing.T) {
 	}
 }
 
+// TestDeleteRecords_RepurgeReclaimsStrandedActive guards the
+// idempotent-purge path: when a partition was purged on a previous
+// (pre-v0.1.37) broker version that didn't reclaim the active
+// segment, a re-purge on the new code must finish the job. The
+// "target ≤ logStart" branch can't return early — it has to fall
+// through to the active-segment reclamation block.
+//
+// We simulate the stranded state by manually advancing logStart to
+// HWM (without touching the active segment), then call DeleteRecords
+// again with the same offset and assert the active was reclaimed.
+func TestDeleteRecords_RepurgeReclaimsStrandedActive(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.FlushIntervalMessages = 1
+
+	e, err := NewDiskStorageEngine(dir, &neverLeaderLeases{}, cfg)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.CreatePartition("t", 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := e.TakeOver(context.Background(), "t", 0, 1); err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		batch := &recordbatch.RecordBatch{
+			BaseOffset: 0, LastOffsetDelta: 0,
+			ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
+			Records: []recordbatch.Record{{
+				OffsetDelta: 0,
+				Value:       make([]byte, 4096),
+			}},
+		}
+		if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	// Simulate the pre-v0.1.37 stranded state by reaching into the
+	// engine and bumping logStart without touching the active segment.
+	ps, _ := e.getPartition("t", 0)
+	ps.mu.Lock()
+	ps.logStart = ps.highWater
+	ps.mu.Unlock()
+
+	sizeBefore := e.PartitionSize("t", 0)
+	if sizeBefore < 40*1024 {
+		t.Fatalf("PartitionSize before re-purge = %d, expected ≥ ~40 KiB stranded", sizeBefore)
+	}
+
+	// Re-purge: target == HWM == logStart. Old code would short-circuit;
+	// new code falls through and reclaims.
+	if _, err := e.DeleteRecords("t", 0, -1); err != nil {
+		t.Fatalf("DeleteRecords (re-purge): %v", err)
+	}
+
+	sizeAfter := e.PartitionSize("t", 0)
+	if sizeAfter > 8*1024 {
+		t.Errorf("PartitionSize after re-purge = %d, expected ~empty (≤ 8 KiB); stranded active was not reclaimed",
+			sizeAfter)
+	}
+	t.Logf("PartitionSize: %d → %d after re-purge", sizeBefore, sizeAfter)
+}
+
 // TestDeleteRecords_OutOfRange guards the error path for offsets past
 // HWM — an admin tool that asks to truncate beyond what exists must
 // see ErrOffsetOutOfRange, not silent acceptance.

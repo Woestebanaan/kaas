@@ -710,11 +710,17 @@ func (e *DiskStorageEngine) DeleteRecords(topic string, partition int32, targetO
 	if target > ps.highWater {
 		return ps.logStart, ErrOffsetOutOfRange
 	}
-	if target <= ps.logStart {
-		return ps.logStart, nil
+	// target <= logStart means the caller is asking to truncate to a
+	// point we've already truncated past. Don't move logStart, but we
+	// still fall through to the reclamation check below: a previous
+	// purge may have stranded the active segment on disk if it ran
+	// against a broker that didn't have the active-segment-reclaim
+	// path (pre-v0.1.37). A second "Purge messages" click then
+	// finishes the job. Idempotent — when there's nothing stranded,
+	// the reclamation block is a no-op.
+	if target > ps.logStart {
+		ps.logStart = target
 	}
-
-	ps.logStart = target
 
 	// Drop closed segments entirely below the new logStart. A segment
 	// is "entirely below" when the next segment's baseOffset (or, for
