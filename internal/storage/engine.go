@@ -131,11 +131,19 @@ func (ps *partitionState) persistManifestLocked() error {
 	})
 }
 
-// flushLocked fsyncs the active segment's log + index files and writes the
+// flushLocked fsyncs the active segment's log file and writes the
 // manifest, then resets the pending-record counter. Caller must hold ps.mu.
 // A flush failure surfaces to the caller — the alternative is silently
 // returning a successful Append for data that may not be durable, which is
 // the bug the flush policy exists to prevent.
+//
+// The index file is intentionally NOT fsynced here (gh #81). Index entries
+// are a hint for binary search during Fetch — they're rebuildable from the
+// log on demand. Skipping the per-batch index fsync removes an entire NFS
+// COMMIT round-trip from the Produce hot path; on broker startup, the
+// active segment's index is rebuilt unconditionally (openPartition →
+// rebuildIndex) to absorb any unpersisted entries lost on crash. Closed
+// segments still have a durable index because roll() syncs both files.
 func (ps *partitionState) flushLocked() error {
 	if ps.active == nil {
 		return nil
@@ -146,17 +154,12 @@ func (ps *partitionState) flushLocked() error {
 			return fmt.Errorf("storage: fsync log: %w", err)
 		}
 	}
-	if ps.active.indexFile != nil {
-		if err := ps.active.indexFile.Sync(); err != nil {
-			return fmt.Errorf("storage: fsync index: %w", err)
-		}
-	}
 	if err := ps.persistManifestLocked(); err != nil {
 		return err
 	}
-	// FsyncLatency covers both log + index Sync + manifest write — the
-	// user-observable durability cost. Caller (Append) already accounts
-	// for total request time via WriteLatency in produce.go.
+	// FsyncLatency covers log Sync + manifest write — the user-observable
+	// durability cost. Caller (Append) already accounts for total request
+	// time via WriteLatency in produce.go.
 	observability.Global().FsyncLatency.Record(context.Background(), time.Since(start).Seconds())
 	ps.pendingFlushRecords = 0
 	return nil
@@ -274,6 +277,14 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		active, scannedHWM, err := openActiveSegmentFromDisk(last)
 		if err != nil {
 			return fmt.Errorf("open active segment base=%d: %w", last.baseOffset, err)
+		}
+		// gh #81: the active segment's index isn't fsynced per Produce
+		// (only the log is). After a crash, the index file may be missing
+		// the tail entries that were buffered in OS cache. Rebuild
+		// unconditionally on open — bounded by SegmentBytes (≤ 1 GiB) and
+		// runs once per partition at startup, not on the hot path.
+		if err := rebuildIndex(active, e.cfg.IndexIntervalBytes); err != nil {
+			return fmt.Errorf("rebuild index for base=%d: %w", last.baseOffset, err)
 		}
 		closed := segs[:len(segs)-1]
 		scannedLogStart := last.baseOffset
