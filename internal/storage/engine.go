@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -280,11 +281,25 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		}
 		// gh #81: the active segment's index isn't fsynced per Produce
 		// (only the log is). After a crash, the index file may be missing
-		// the tail entries that were buffered in OS cache. Rebuild
-		// unconditionally on open — bounded by SegmentBytes (≤ 1 GiB) and
-		// runs once per partition at startup, not on the hot path.
-		if err := rebuildIndex(active, e.cfg.IndexIntervalBytes); err != nil {
-			return fmt.Errorf("rebuild index for base=%d: %w", last.baseOffset, err)
+		// the tail entries that were buffered in OS cache. Cheap check:
+		// read the last index entry's logPos; rebuild only if it lags
+		// the log end by more than the index interval. Brokers upgrading
+		// from 0.1.26 (which fsynced the index per record) skip the
+		// rebuild entirely — their indexes are already current — keeping
+		// startup fast on large partitions.
+		current, lastLogPos, lastRelOffset, err := indexIsCurrent(active, e.cfg.IndexIntervalBytes)
+		if err != nil {
+			return fmt.Errorf("inspect index for base=%d: %w", last.baseOffset, err)
+		}
+		if current {
+			active.lastIndexedLogPos = lastLogPos
+			_ = lastRelOffset // future use; relOffset is informational here
+		} else {
+			slog.Info("rebuilding stale index", "topic", topic, "partition", partition,
+				"base", last.baseOffset, "logSize", active.logSize, "lastIndexedLogPos", lastLogPos)
+			if err := rebuildIndex(active, e.cfg.IndexIntervalBytes); err != nil {
+				return fmt.Errorf("rebuild index for base=%d: %w", last.baseOffset, err)
+			}
 		}
 		closed := segs[:len(segs)-1]
 		scannedLogStart := last.baseOffset
