@@ -92,33 +92,38 @@ func createSegment(dir string, baseOffset, epoch int64) (*activeSegment, error) 
 	}, nil
 }
 
-// openActiveSegmentFromDisk opens an existing segment and scans it to recover state.
-// Returns the segment and the recovered high watermark.
-func openActiveSegmentFromDisk(meta segmentMeta) (*activeSegment, int64, error) {
+// openActiveSegment opens an existing segment's log+index files and reads
+// their on-disk sizes. It does NOT scan the log to recompute the high
+// watermark — that's the caller's choice (manifest fast path vs full
+// scan fallback). Cheap: a couple of file opens + Seek-to-end. Used on
+// broker startup so partition open is O(1) per partition rather than
+// O(log_size); recoverSegment + rebuildIndex run later in
+// takeoverInternal when this broker is about to become leader.
+func openActiveSegment(meta segmentMeta) (*activeSegment, error) {
 	lf, err := os.OpenFile(meta.logPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	idxf, err := os.OpenFile(meta.indexPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		_ = lf.Close()
-		return nil, 0, err
+		return nil, err
 	}
 
 	logSize, err := lf.Seek(0, io.SeekEnd)
 	if err != nil {
 		_ = lf.Close()
 		_ = idxf.Close()
-		return nil, 0, err
+		return nil, err
 	}
 	idxSize, err := idxf.Seek(0, io.SeekEnd)
 	if err != nil {
 		_ = lf.Close()
 		_ = idxf.Close()
-		return nil, 0, err
+		return nil, err
 	}
 
-	seg := &activeSegment{
+	return &activeSegment{
 		baseOffset:        meta.baseOffset,
 		logFile:           lf,
 		indexFile:         idxf,
@@ -126,19 +131,28 @@ func openActiveSegmentFromDisk(meta segmentMeta) (*activeSegment, int64, error) 
 		indexPath:         meta.indexPath,
 		logSize:           logSize,
 		lastIndexedLogPos: idxSize / 8 * 4096, // rough estimate; exact value not critical for appends
-	}
+	}, nil
+}
 
-	// Scan forward to recover highWatermark and lastOffset.
-	hwm, err := scanHighWatermark(lf, meta.baseOffset)
+// openActiveSegmentFromDisk opens an existing segment and scans it to
+// recover state. Returns the segment and the recovered high watermark.
+// Used on the cold path when no manifest is present (legacy / fresh
+// deployment) — startup-time callers prefer openActiveSegment + the
+// manifest's HighWatermark to avoid the full-log scan.
+func openActiveSegmentFromDisk(meta segmentMeta) (*activeSegment, int64, error) {
+	seg, err := openActiveSegment(meta)
 	if err != nil {
-		_ = lf.Close()
-		_ = idxf.Close()
+		return nil, 0, err
+	}
+	hwm, err := scanHighWatermark(seg.logFile, meta.baseOffset)
+	if err != nil {
+		_ = seg.logFile.Close()
+		_ = seg.indexFile.Close()
 		return nil, 0, err
 	}
 	if hwm > meta.baseOffset {
 		seg.lastOffset = hwm - 1
 	}
-
 	return seg, hwm, nil
 }
 

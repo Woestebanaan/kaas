@@ -274,19 +274,42 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		ps = &partitionState{dir: dir, active: seg, epoch: seedEpoch}
 	} else {
 		last := segs[len(segs)-1]
-		active, scannedHWM, err := openActiveSegmentFromDisk(last)
-		if err != nil {
-			return fmt.Errorf("open active segment base=%d: %w", last.baseOffset, err)
+		var active *activeSegment
+		var hwm int64
+		// Fast path: trust the manifest. The manifest is rewritten on
+		// every flushLocked, so its HWM matches what's on disk in
+		// steady state. The only mismatch case — log fsynced but
+		// manifest write failed/skipped before crash — is caught at
+		// takeover time: takeoverInternal calls recoverSegment which
+		// CRC-walks the log and truncates partial writes, then
+		// rebuildIndex repopulates the index. Until takeover this
+		// broker isn't serving Fetch for the partition anyway, so a
+		// briefly-stale HWM has no observable effect.
+		//
+		// Cold path (manifest absent / zero HWM, e.g. legacy data, or
+		// the very first open after a fresh chart install): fall back
+		// to the full log scan. That path is bounded by SegmentBytes
+		// and rare — manifests are written eagerly.
+		if manifest != nil && manifest.HighWatermark > last.baseOffset {
+			active, err = openActiveSegment(last)
+			if err != nil {
+				return fmt.Errorf("open active segment base=%d: %w", last.baseOffset, err)
+			}
+			hwm = manifest.HighWatermark
+			if hwm > last.baseOffset {
+				active.lastOffset = hwm - 1
+			}
+		} else {
+			active, hwm, err = openActiveSegmentFromDisk(last)
+			if err != nil {
+				return fmt.Errorf("open active segment base=%d: %w", last.baseOffset, err)
+			}
 		}
-		// gh #81: no rebuild needed on startup. Every entry already on
-		// disk points at a valid batch boundary that was successfully
-		// written and fsynced; missing TAIL entries that were lost in
-		// OS cache at crash-time just leave the index slightly sparse
-		// — Fetch handles this by linear-scanning forward from the
-		// nearest indexed offset. Truncation-after-crash is the only
-		// case where the index could point past valid data, and that
-		// path already calls rebuildIndex inside takeoverInternal
-		// (right after recoverSegment).
+		// gh #81: no index rebuild on startup. Existing entries point
+		// at valid batch boundaries; missing tail entries leave the
+		// index sparse but correct. takeoverInternal calls rebuildIndex
+		// when this broker is about to become leader, and it's only at
+		// that point we need a complete index for Fetch seeks.
 		closed := segs[:len(segs)-1]
 		scannedLogStart := last.baseOffset
 		if len(closed) > 0 {
@@ -297,7 +320,7 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 			active:    active,
 			segments:  closed,
 			logStart:  scannedLogStart,
-			highWater: scannedHWM,
+			highWater: hwm,
 		}
 	}
 
