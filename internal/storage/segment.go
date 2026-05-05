@@ -461,50 +461,6 @@ func recoverSegment(seg *activeSegment) (int64, error) {
 	return hwm, nil
 }
 
-// indexIsCurrent reports whether seg's existing .index file is "close
-// enough" to the log's current size that no rebuild is needed. We read
-// the last 8-byte entry to find the logPos of the last batch that was
-// indexed; if the gap to logSize is small (< 2× indexIntervalBytes),
-// the broker's normal append path will catch up on the next batch and
-// the index is consistent for current Fetch reads.
-//
-// This is the upgrade-friendly path (gh #81): brokers coming from
-// 0.1.26 (which fsynced the index per record) have indexes that are
-// always current, so this check returns true and the expensive scan
-// is skipped. After a real crash on 0.1.27+ where un-fsynced tail
-// entries were lost, the gap will be large and rebuild kicks in.
-//
-// Returns (current, lastLogPos, lastIndexedRelOffset, err). lastLogPos
-// and lastIndexedRelOffset let the caller seed seg.lastIndexedLogPos
-// without re-scanning when current=true.
-func indexIsCurrent(seg *activeSegment, indexIntervalBytes int64) (bool, int64, int32, error) {
-	idxSize, err := seg.indexFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return false, 0, 0, err
-	}
-	if idxSize == 0 {
-		// Empty index. If the log is also empty this is a fresh
-		// segment — current. Otherwise a rebuild is needed.
-		return seg.logSize == 0, 0, 0, nil
-	}
-	// Read the last 8-byte entry: (relOffset:4, logPos:4).
-	entry := make([]byte, 8)
-	if _, err := seg.indexFile.ReadAt(entry, idxSize-8); err != nil {
-		return false, 0, 0, fmt.Errorf("read last index entry: %w", err)
-	}
-	relOffset := int32(binary.BigEndian.Uint32(entry[0:4]))
-	logPos := int64(binary.BigEndian.Uint32(entry[4:8]))
-	// "Close enough" = the gap between the last indexed batch's logPos
-	// and the actual log end is bounded. The append path writes a new
-	// index entry every indexIntervalBytes of log advance; tolerating
-	// up to 2× that gap absorbs normal in-flight state without false
-	// positives.
-	if seg.logSize-logPos > 2*indexIntervalBytes {
-		return false, logPos, relOffset, nil
-	}
-	return true, logPos, relOffset, nil
-}
-
 // rebuildIndex rewrites the .index file by scanning the .log file from the beginning.
 func rebuildIndex(seg *activeSegment, indexIntervalBytes int64) error {
 	if err := seg.indexFile.Truncate(0); err != nil {

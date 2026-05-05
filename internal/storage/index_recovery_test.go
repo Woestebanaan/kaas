@@ -10,17 +10,21 @@ import (
 	"github.com/woestebanaan/skafka/tests/testutil/recordbatch"
 )
 
-// TestOpenPartitionRebuildsIndex guards gh #81: the index file is no
-// longer fsynced per Produce, so on broker restart the active segment's
-// index may be missing the tail entries that were buffered in OS cache
-// at crash time. openPartition compensates by rebuilding the active
-// segment's index unconditionally — Fetch reads the index for binary
-// search, so a stale or short index would surface as wrong-offset reads.
+// TestOpenPartitionToleratesEmptyIndex guards gh #81: the index file is
+// no longer fsynced per Produce, so on broker restart the active
+// segment's index may be missing tail entries (or be empty entirely if
+// nothing made it to disk). openPartition must succeed regardless.
+// Existing index entries on disk always point at valid log positions
+// because they were only written after the corresponding batch was
+// fsynced; missing tail entries just leave the index sparse. Fetch
+// linear-scans forward from the nearest indexed offset.
 //
-// We force the worst case by truncating the index file to zero on disk
-// after appends, then re-opening the engine. Rebuild must repopulate
-// the index entries from the (still durable) log.
-func TestOpenPartitionRebuildsIndex(t *testing.T) {
+// We simulate the worst case by truncating the index file to zero on
+// disk after appends, then re-opening the engine. Open must succeed
+// without scanning the entire log on the hot startup path — that kept
+// large partitions from coming back inside the kubelet's liveness
+// probe deadline (skafka-2 CrashLoopBackoff after the v0.1.27 rollout).
+func TestOpenPartitionToleratesEmptyIndex(t *testing.T) {
 	dir := t.TempDir()
 	leases := &neverLeaderLeases{}
 
@@ -105,14 +109,10 @@ func TestOpenPartitionRebuildsIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if indexAfter.Size() == 0 {
-		t.Errorf("index still empty after reopen; expected rebuild from log. before=%d after=%d",
-			indexBefore.Size(), indexAfter.Size())
-	}
-	// Index entries are 8 bytes each. We don't pin an exact count
-	// because IndexIntervalBytes can land entries on slightly
-	// different log positions across runs, but the rebuild should
-	// produce *some* entries from the 20 batches at 64-byte interval.
+	// Index size on reopen is irrelevant to correctness — what matters
+	// is that the engine opened without error. The append path will
+	// repopulate index entries as new batches arrive. Just guard that
+	// nothing exotic happened on disk (size remains a multiple of 8).
 	if indexAfter.Size()%8 != 0 {
 		t.Errorf("index size %d is not a multiple of 8 (8B per entry)",
 			indexAfter.Size())

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -279,28 +278,15 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		if err != nil {
 			return fmt.Errorf("open active segment base=%d: %w", last.baseOffset, err)
 		}
-		// gh #81: the active segment's index isn't fsynced per Produce
-		// (only the log is). After a crash, the index file may be missing
-		// the tail entries that were buffered in OS cache. Cheap check:
-		// read the last index entry's logPos; rebuild only if it lags
-		// the log end by more than the index interval. Brokers upgrading
-		// from 0.1.26 (which fsynced the index per record) skip the
-		// rebuild entirely — their indexes are already current — keeping
-		// startup fast on large partitions.
-		current, lastLogPos, lastRelOffset, err := indexIsCurrent(active, e.cfg.IndexIntervalBytes)
-		if err != nil {
-			return fmt.Errorf("inspect index for base=%d: %w", last.baseOffset, err)
-		}
-		if current {
-			active.lastIndexedLogPos = lastLogPos
-			_ = lastRelOffset // future use; relOffset is informational here
-		} else {
-			slog.Info("rebuilding stale index", "topic", topic, "partition", partition,
-				"base", last.baseOffset, "logSize", active.logSize, "lastIndexedLogPos", lastLogPos)
-			if err := rebuildIndex(active, e.cfg.IndexIntervalBytes); err != nil {
-				return fmt.Errorf("rebuild index for base=%d: %w", last.baseOffset, err)
-			}
-		}
+		// gh #81: no rebuild needed on startup. Every entry already on
+		// disk points at a valid batch boundary that was successfully
+		// written and fsynced; missing TAIL entries that were lost in
+		// OS cache at crash-time just leave the index slightly sparse
+		// — Fetch handles this by linear-scanning forward from the
+		// nearest indexed offset. Truncation-after-crash is the only
+		// case where the index could point past valid data, and that
+		// path already calls rebuildIndex inside takeoverInternal
+		// (right after recoverSegment).
 		closed := segs[:len(segs)-1]
 		scannedLogStart := last.baseOffset
 		if len(closed) > 0 {
