@@ -128,7 +128,14 @@ func (w *TopicWatcher) reconcile(ctx context.Context) (string, error) {
 	for i := range list.Items {
 		t := &list.Items[i]
 		seen[t.Name] = struct{}{}
-		w.handleUpsert(t)
+		// Route through processEvent so Terminating CRs (with a non-nil
+		// deletionTimestamp) reach handleTerminating during the initial
+		// reconcile, not just during watch events. Without this, a
+		// broker that comes up while topics are already mid-deletion
+		// never fires TopicDeleted, and the operator's finalizer keeps
+		// hitting NFS .nfsXXXX EBUSY because the broker re-opens the
+		// segment files (gh #76).
+		w.processEvent(watch.Modified, t)
 	}
 	// Fire Deleted for cached topics no longer present.
 	w.mu.Lock()
