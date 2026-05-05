@@ -131,6 +131,11 @@ func buildResource(ctx context.Context, service string) (*resource.Resource, err
 	}
 	if v := os.Getenv("MY_POD_NAME"); v != "" {
 		attrs = append(attrs, semconv.K8SPodName(v))
+		// Prometheus's OTLP receiver promotes service.instance.id to the
+		// `instance` label on every series; without it, all brokers'
+		// metrics flatten under the same `job=skafka` and per-broker
+		// drill-down in Grafana isn't possible.
+		attrs = append(attrs, semconv.ServiceInstanceID(v))
 	}
 	if v := os.Getenv("SKAFKA_NAMESPACE"); v != "" {
 		attrs = append(attrs, semconv.K8SNamespaceName(v))
