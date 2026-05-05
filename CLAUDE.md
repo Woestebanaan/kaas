@@ -27,7 +27,7 @@ CI (`.github/workflows/ci.yml`) runs `go vet`, `go test`, builds both Docker ima
 
 Releases are tag-driven; see `RELEASING.md`. **Always bump the patch (`v0.1.N-preview` → `v0.1.N+1-preview`), never re-cut a tag.**
 
-The `scripts/smoke-test.sh` end-to-end test hits a live broker in a k3s cluster — it is *not* a unit test and is not invoked by `go test`. See `scripts/README.md` for the procedure (including how to diagnose failures via `/healthz`, broker logs, Prometheus, and the `KafkaClusterAssignments` CR mirror).
+`scripts/kafka-*.sh` is a per-tool integration suite that runs the Apache Kafka shell tools (`kafka-topics`, `kafka-{producer,consumer}-perf-test`, `kafka-acls`, etc.) against a live broker — *not* invoked by `go test`. Each script sources `scripts/_common.sh` for shared `BOOTSTRAP` / `KAFKA_BIN` / `skip` helpers; defaults target the in-cluster Service DNS and `/opt/kafka/bin`. Scripts that target features that are non-goals or post-3.7 (KRaft tools, share-groups, etc.) print a one-line reason and `exit 77` (the autoconf "skipped" code) so they're discoverable without pretending to test something that can't work.
 
 ## Architecture
 
@@ -57,9 +57,20 @@ The "controller" is **a broker that holds the `skafka-controller` Lease**, not a
 - Writes `/data/__cluster/assignment.json` on the shared RWX PVC. The file is epoch-prefixed by `leaseTransitions`; brokers reject writes with stale epochs (this is what `tests/stale-controller-race` verifies).
 - Mirrors the assignment to a `KafkaClusterAssignments` CR for `kubectl` debugging only.
 
-Non-controller brokers watch `assignment.json` via fsnotify + 1s poll (`internal/broker/coordinator.go`, `internal/fsutil/filewatch.go`) and apply changes locally (`TakeoverPartition` / `RelinquishPartition` on the storage engine).
+`assignment.json` is the **single source of truth for partition leadership** (gh #75 cleanup, v0.1.15+). The Metadata response, the produce/fetch ownership check, and `/healthz`'s `partitions_led` all source from it via `*broker.Coordinator` (`Coordinator.Owns` / `Coordinator.LeaderFor`). There is no per-partition Lease — only the singleton `skafka-controller` Lease used for cluster-wide controller election. The per-partition Lease infrastructure under `internal/lease/` is dev-mode-only (`LocalLeaseManager` always says "yes, I lead") and a vestigial `KubernetesLeaseManager` that nothing acquires from anymore.
 
-Lease-based leadership lives in `internal/lease/` (real `KubernetesLeaseManager` and a `LocalLeaseManager` for single-broker dev mode). Local-dev mode is selected when `MY_POD_NAME` is unset; in that case, `dataDir == ""` also flips storage to in-memory (see the branch in `cmd/skafka/main.go`).
+The controller recomputes the assignment when:
+- It first wins the controller Lease (initial recompute).
+- A `KafkaTopic` CR is added / modified / deleted — wired via `clusterRuntime.NotifyTopicChange` from the topic-watcher's onEvent (gh #74).
+- A broker joins or leaves the alive set — wired via `watchBrokerSet` polling `BrokerSource.AliveBrokers()` every 2 s (gh #77).
+
+Non-controller brokers watch `assignment.json` via fsnotify + 1s poll (`internal/broker/coordinator.go`, `internal/fsutil/filewatch.go`); the `TakeoverDriver` / `GroupTakeoverDriver` registered on `Coordinator.OnAssignmentChange` opens or relinquishes partitions in the storage engine to match.
+
+Local-dev mode is selected when `MY_POD_NAME` is unset; in that case `dataDir == ""` also flips storage to in-memory (see the branch in `cmd/skafka/main.go`). The v3 cluster runtime is not started in dev mode — produce and Metadata fall back to `LocalLeaseManager` paths that always treat self as leader of every partition.
+
+### KafkaTopic delete on NFS
+
+When a `KafkaTopic` CR is deleted, `metadata.deletionTimestamp` goes non-nil. The topic-watcher fires `TopicDeleted` *immediately* (rather than waiting for the K8s `Deleted` event after finalizers clear); the broker calls `engine.ClosePartition` for each partition to drop its open log + index file handles. Without this, NFS silly-renames the open files into `.nfsXXXX` entries that EBUSY the operator's `unlinkat` on the parent directory forever (gh #76). The topic-watcher also routes the initial reconcile through `processEvent` so brokers coming up while CRs are already mid-deletion close their handles on startup, not just on watch events.
 
 ### Code map
 
@@ -69,7 +80,7 @@ Lease-based leadership lives in `internal/lease/` (real `KubernetesLeaseManager`
 - `internal/broker/` — broker glue: `Broker` struct, the on-broker `Coordinator` (assignment.json watcher), `controller_watch.go` (1s poll of controller Lease for current epoch), `self_fence.go`, `takeover.go`, `group_takeover.go`, `heartbeat_client.go`.
 - `internal/controller/` — controller-side logic (election, balancer, assignment writer, heartbeat server, k8s CR mirror).
 - `internal/auth/` — SCRAM-SHA-256/512, mTLS principal extraction, ACL evaluation, quotas. Loads from `/data/__cluster/credentials.json` and `acls.json` (written by the operator) with hot-reload via `ClusterFileWatcher`. Toggle off with `SKAFKA_AUTH_DISABLED=true`.
-- `internal/k8s/` — broker-side K8s helpers: `BrokerRegistry` (watches the headless service for peer endpoints), `BrokerIdentity` (parses the ordinal out of the StatefulSet pod name), `TopicWatcher`, `ReadinessUpdater` (satisfies the `skafka.io/PartitionsReady` readiness gate after initial partition acquisition).
+- `internal/k8s/` — broker-side K8s helpers: `BrokerRegistry` (watches the headless service for peer endpoints), `BrokerIdentity` (parses the ordinal out of the StatefulSet pod name), `TopicWatcher` (fires `TopicDeleted` on `deletionTimestamp` so the broker can close handles before the operator's finalizer reconciles), `ReadinessUpdater` (satisfies the `skafka.io/PartitionsReady` readiness gate once partition directories have been created on the PVC).
 - `internal/observability/` — OTLP metrics + tracing bootstrap (push-mode to Prometheus's native OTLP receiver), `/healthz` HTTP handler with rich runtime state, `byteopacity.go` tripwire counters.
 - `operator/api/v1alpha1/` — CRD types (kubebuilder annotations live here; `make manifests` regenerates `deploy/crds/*.yaml` and mirrors them to the Helm chart).
 - `operator/controllers/` — one reconciler per CRD. Topic/user/ACL reconcilers materialize state to files in `/data/__cluster/` on the shared PVC.
