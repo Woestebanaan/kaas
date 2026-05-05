@@ -111,14 +111,131 @@ type partitionState struct {
 	logStart int64
 	highWater int64
 	epoch    int64 // current leader epoch, persisted in manifest.json
-	// pendingFlushRecords counts records appended since the last fsync.
-	// flushLocked checks against Config.FlushIntervalMessages and resets to 0.
+	// pendingFlushRecords counts records appended since the last
+	// flush request. Reset when a flush is requested (not when it
+	// completes), so we don't enqueue redundant signals.
 	pendingFlushRecords int64
 	// retentionBytesOverride is loaded from /data/<topic>/.config.json on
 	// partition open. 0 means "no override" — the cleaner falls back to
 	// engine.cfg.RetentionBytes (which itself is 0 = unlimited by default).
 	// Per-topic operator-driven retention plumbing (gh #47).
 	retentionBytesOverride int64
+
+	// Group-commit state (gh #82). The committer goroutine fsyncs the
+	// active segment outside ps.mu, so concurrent Appends to the same
+	// partition share one fsync round-trip instead of serialising one
+	// per record. requestedFlushSeq increments on every flush request
+	// (under ps.mu); completedFlushSeq advances when the corresponding
+	// fsync returns. Append blocks on flushCond until its mySeq is
+	// covered. flushErr surfaces an fsync failure (sticky — the broker
+	// is in a bad state and operator intervention is expected).
+	flushReqCh        chan struct{}
+	flushCond         *sync.Cond
+	requestedFlushSeq int64
+	completedFlushSeq int64
+	flushErr          error
+	committerDone     chan struct{}
+	closing           bool
+}
+
+// startCommitter spawns the per-partition group-commit goroutine. Must
+// be called exactly once per partitionState before it's exposed to
+// Append callers. The goroutine exits when flushReqCh is closed or
+// closing is set.
+func (ps *partitionState) startCommitter() {
+	ps.flushReqCh = make(chan struct{}, 1)
+	ps.flushCond = sync.NewCond(&ps.mu)
+	ps.committerDone = make(chan struct{})
+	go ps.committerLoop()
+}
+
+// committerLoop drains flushReqCh, runs one fsync per signal, and
+// broadcasts completion. Multiple Appends that signaled before the
+// fsync started share the same fsync — that's the point.
+func (ps *partitionState) committerLoop() {
+	defer close(ps.committerDone)
+	for {
+		_, ok := <-ps.flushReqCh
+		if !ok {
+			// Channel closed (shutdown). Run one final flush to
+			// drain any pending Appends, then exit.
+			ps.drainAndExit()
+			return
+		}
+
+		ps.mu.Lock()
+		if ps.closing {
+			ps.mu.Unlock()
+			ps.drainAndExit()
+			return
+		}
+		// If a prior cycle already covered everything, nothing to do.
+		if ps.requestedFlushSeq <= ps.completedFlushSeq {
+			ps.mu.Unlock()
+			continue
+		}
+		seqAtStart := ps.requestedFlushSeq
+		seg := ps.active
+		ps.mu.Unlock()
+
+		var err error
+		if seg != nil && seg.logFile != nil {
+			start := time.Now()
+			err = seg.logFile.Sync()
+			observability.Global().FsyncLatency.Record(context.Background(), time.Since(start).Seconds())
+		}
+
+		ps.mu.Lock()
+		if err != nil && ps.flushErr == nil {
+			ps.flushErr = err // sticky
+		}
+		ps.completedFlushSeq = seqAtStart
+		ps.flushCond.Broadcast()
+		ps.mu.Unlock()
+	}
+}
+
+// drainAndExit runs a final fsync (best-effort) and wakes any pending
+// Appends. Called once when the committer is told to stop.
+func (ps *partitionState) drainAndExit() {
+	ps.mu.Lock()
+	seg := ps.active
+	seqAtStart := ps.requestedFlushSeq
+	ps.mu.Unlock()
+
+	var err error
+	if seg != nil && seg.logFile != nil {
+		err = seg.logFile.Sync()
+	}
+
+	ps.mu.Lock()
+	if err != nil && ps.flushErr == nil {
+		ps.flushErr = err
+	}
+	ps.completedFlushSeq = seqAtStart
+	ps.flushCond.Broadcast()
+	ps.mu.Unlock()
+}
+
+// stopCommitter signals the committer to exit and waits for it. Called
+// from ClosePartition / DeletePartition. Pending Appends waiting on the
+// flush either complete (data fsynced) or return the broker-shutdown
+// path's "partition closing" error if they raced past the closing flag.
+func (ps *partitionState) stopCommitter() {
+	if ps.flushReqCh == nil {
+		return
+	}
+	ps.mu.Lock()
+	if ps.closing {
+		ps.mu.Unlock()
+		<-ps.committerDone
+		return
+	}
+	ps.closing = true
+	ps.flushCond.Broadcast()
+	ps.mu.Unlock()
+	close(ps.flushReqCh)
+	<-ps.committerDone
 }
 
 // persistManifestLocked writes manifest.json from the partition's current
@@ -129,48 +246,6 @@ func (ps *partitionState) persistManifestLocked() error {
 		HighWatermark:  ps.highWater,
 		LogStartOffset: ps.logStart,
 	})
-}
-
-// flushLocked fsyncs the active segment's log file and resets the
-// pending-record counter. Caller must hold ps.mu. A flush failure
-// surfaces to the caller — the alternative is silently returning a
-// successful Append for data that may not be durable, which is the
-// bug the flush policy exists to prevent.
-//
-// What this function intentionally does NOT do (gh #80, #81):
-//
-//   - No index fsync. Index entries are a hint for Fetch binary search
-//     and are rebuildable from the log on demand; skipping their fsync
-//     removes one NFS COMMIT round-trip per Produce.
-//
-//   - No manifest write. The manifest stores Epoch + HighWatermark +
-//     LogStartOffset and is durably persisted only on slow-changing
-//     events (segment roll, takeover, cleaner advance, partition open),
-//     not on every Produce. Persisting it on the hot path was costing
-//     ~4 NFS RPCs (CREATE / WRITE / RENAME / dir COMMIT for the atomic
-//     tmp+rename) on top of the log fsync — bigger than the log fsync
-//     itself on wifi-attached NFS. The trade-off: the manifest's HWM
-//     can be stale on startup, but takeoverInternal calls recoverSegment
-//     before this broker can serve as leader, which CRC-walks the active
-//     segment and lifts the in-memory HWM back to its real value. Until
-//     takeover this broker isn't serving Fetch for the partition, so the
-//     transient staleness has no observable effect.
-func (ps *partitionState) flushLocked() error {
-	if ps.active == nil {
-		return nil
-	}
-	start := time.Now()
-	if ps.active.logFile != nil {
-		if err := ps.active.logFile.Sync(); err != nil {
-			return fmt.Errorf("storage: fsync log: %w", err)
-		}
-	}
-	// FsyncLatency covers the log Sync — the user-observable durability
-	// cost. Caller (Append) accounts for total request time via
-	// WriteLatency in produce.go.
-	observability.Global().FsyncLatency.Record(context.Background(), time.Since(start).Seconds())
-	ps.pendingFlushRecords = 0
-	return nil
 }
 
 // NewDiskStorageEngine opens (or creates) the data directory and loads all existing partitions.
@@ -367,6 +442,10 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		}
 	}
 
+	// Group-commit committer goroutine. Spawned exactly once per
+	// partitionState before it's exposed to Append callers (gh #82).
+	ps.startCommitter()
+
 	e.mu.Lock()
 	e.partitions[e.partKey(topic, partition)] = ps
 	e.mu.Unlock()
@@ -384,6 +463,7 @@ func (e *DiskStorageEngine) DeletePartition(topic string, partition int32) error
 	e.mu.Unlock()
 
 	if ps != nil {
+		ps.stopCommitter()
 		ps.mu.Lock()
 		if ps.active != nil {
 			_ = ps.active.close()
@@ -455,9 +535,39 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 		// rollSegment fsyncs the previous segment via roll() and persists
 		// the manifest, so the pending counter is fully discharged.
 		ps.pendingFlushRecords = 0
-	} else if e.cfg.FlushIntervalMessages > 0 && ps.pendingFlushRecords >= e.cfg.FlushIntervalMessages {
-		if err := ps.flushLocked(); err != nil {
-			return -1, err
+		return baseOffset, nil
+	}
+
+	// Group commit (gh #82): instead of running the fsync inline under
+	// ps.mu — which serialises every concurrent Appender to the same
+	// partition through one round-trip — we hand the request to a
+	// committer goroutine and wait for our seq to be acknowledged.
+	// Concurrent Appends that arrive before the committer's lock-and-
+	// fsync cycle starts share that single fsync. On wifi/NFS where
+	// each fsync round-trip is the dominant cost, this turns N
+	// serial fsyncs into 1 (best case) or O(N/batch_arrival_rate)
+	// in steady state.
+	if e.cfg.FlushIntervalMessages > 0 && ps.pendingFlushRecords >= e.cfg.FlushIntervalMessages {
+		ps.requestedFlushSeq++
+		mySeq := ps.requestedFlushSeq
+		ps.pendingFlushRecords = 0
+		// Non-blocking signal — if the channel already has a pending
+		// signal, the committer's next iteration will pick up our
+		// updated requestedFlushSeq anyway.
+		select {
+		case ps.flushReqCh <- struct{}{}:
+		default:
+		}
+		// Wait for our seq to be flushed, the partition to close, or
+		// a sticky fsync error to surface.
+		for ps.completedFlushSeq < mySeq && !ps.closing && ps.flushErr == nil {
+			ps.flushCond.Wait()
+		}
+		if ps.flushErr != nil {
+			return -1, ps.flushErr
+		}
+		if ps.closing && ps.completedFlushSeq < mySeq {
+			return -1, fmt.Errorf("storage: partition closing")
 		}
 	}
 
@@ -685,6 +795,11 @@ func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error 
 	}
 	delete(e.partitions, key)
 	e.mu.Unlock()
+
+	// Stop the group-commit goroutine first — it'll run a final
+	// drainAndExit fsync so any pending Appends complete (or surface
+	// the closing-error path) before we close file handles.
+	ps.stopCommitter()
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
