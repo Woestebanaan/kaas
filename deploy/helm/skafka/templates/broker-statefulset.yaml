@@ -86,6 +86,8 @@ spec:
               value: "{{ .Values.broker.controllerLease.renewDeadlineSeconds }}"
             - name: SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS
               value: "{{ .Values.broker.controllerLease.retryPeriodSeconds }}"
+            - name: SKAFKA_FLUSH_INTERVAL_MESSAGES
+              value: "{{ .Values.broker.flushIntervalMessages | default 1 }}"
             {{- if .Values.auth.requireSasl }}
             - name: SKAFKA_REQUIRE_SASL
               value: "true"

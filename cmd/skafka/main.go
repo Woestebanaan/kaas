@@ -129,8 +129,13 @@ func runBroker(ctx context.Context) {
 	if dataDir != "" {
 		// Phase 4 dropped the flock parameter — single-writer enforcement is
 		// now BrokerCoordinator.Owns + epoch-prefixed segment filenames.
+		storageCfg := applyStorageEnv(storage.DefaultConfig())
+		slog.Info("storage config",
+			"flushIntervalMessages", storageCfg.FlushIntervalMessages,
+			"segmentBytes", storageCfg.SegmentBytes,
+			"retentionMs", storageCfg.RetentionMs)
 		var err error
-		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, storage.DefaultConfig())
+		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, storageCfg)
 		if err != nil {
 			slog.Error("open disk storage", "dir", dataDir, "err", err)
 			os.Exit(1)
@@ -629,6 +634,27 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// applyStorageEnv overlays storage.Config with values from environment
+// variables. Recognised vars:
+//
+//   SKAFKA_FLUSH_INTERVAL_MESSAGES — durability/throughput dial. Mirrors
+//     Apache Kafka's log.flush.interval.messages topic config (gh #83).
+//     1 (default) = fsync per record; N > 1 = fsync every N records;
+//     0 = no message-driven flush (only segment roll).
+//
+// Invalid values are logged and ignored so a typo doesn't crash the broker.
+func applyStorageEnv(cfg storage.Config) storage.Config {
+	if v := os.Getenv("SKAFKA_FLUSH_INTERVAL_MESSAGES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			cfg.FlushIntervalMessages = n
+		} else {
+			slog.Warn("invalid SKAFKA_FLUSH_INTERVAL_MESSAGES, keeping default",
+				"value", v, "default", cfg.FlushIntervalMessages)
+		}
+	}
+	return cfg
 }
 
 // envSecondsOr reads an env var as an integer count of seconds and

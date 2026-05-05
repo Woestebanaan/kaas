@@ -65,6 +65,18 @@ broker:
     renewDeadlineSeconds: 10 # SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS
     retryPeriodSeconds: 2    # SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS
 
+  # Durability dial. Mirrors Apache Kafka's log.flush.interval.messages.
+  #   1   (default) — fsync after every record. Honest acks=all semantics.
+  #               No data loss on crash with acks>=1, at the cost of one
+  #               fsync round-trip per Produce.
+  #   N>1         — fsync only every N records per partition. On crash, the
+  #               last (up to) N-1 records on each partition can be lost.
+  #               Acceptable when acks=1 producers tolerate it, or the
+  #               storage substrate's write cache is power-fail safe.
+  #   0           — disable message-driven flushing entirely. Fsync only
+  #               at segment roll. Maximum throughput, weakest durability.
+  flushIntervalMessages: 1
+
 storage:
   className: ceph-filesystem    # or nfs-csi
   size: 500Gi
