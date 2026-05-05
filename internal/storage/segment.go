@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -141,28 +142,49 @@ func openActiveSegmentFromDisk(meta segmentMeta) (*activeSegment, int64, error) 
 	return seg, hwm, nil
 }
 
-// scanHighWatermark scans a log file to find the high watermark (next offset to write).
+// scanHighWatermarkBufSize controls the bufio reader window scanning the
+// active segment at open. 4 MiB lets one NFS READ RPC carry many batches
+// of work; without this, the broker issued one tiny RPC per batch header
+// and per batch body, turning startup into thousands of round-trips per
+// partition. (The crash that motivated this: 16 partitions × ~800 MB
+// each on shared NFS took >60s to scan, exceeding kubelet's startupProbe
+// budget.)
+const scanHighWatermarkBufSize = 4 * 1024 * 1024
+
+// scanHighWatermark scans a log file to find the high watermark (next
+// offset to write). The scan stops at the first malformed/truncated
+// batch — that's the post-crash partial-write boundary; the returned
+// hwm reflects only fully-persisted batches. Bufio-wrapped sequential
+// read so big logs on NFS open in the order of MB/s, not RPCs/s.
 func scanHighWatermark(f *os.File, segmentBaseOffset int64) (int64, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return segmentBaseOffset, err
 	}
 
+	br := bufio.NewReaderSize(f, scanHighWatermarkBufSize)
 	hwm := segmentBaseOffset
 	header := make([]byte, 12)
+	// We only need the first 16 bytes of the body (attrs at [9:11],
+	// lastOffsetDelta at [11:15]); the rest gets discarded.
+	bodyHead := make([]byte, 16)
 	for {
-		if _, err := io.ReadFull(f, header); err != nil {
+		if _, err := io.ReadFull(br, header); err != nil {
 			break
 		}
 		batchLength := int32(binary.BigEndian.Uint32(header[8:12]))
-		if batchLength <= 0 {
+		if batchLength < int32(len(bodyHead)) {
 			break
 		}
-		body := make([]byte, int(batchLength))
-		if _, err := io.ReadFull(f, body); err != nil {
+		if _, err := io.ReadFull(br, bodyHead); err != nil {
+			break
+		}
+		// Skip the rest of the body — bufio.Discard issues bulk reads
+		// from the buffered window, no per-byte syscalls.
+		if _, err := br.Discard(int(batchLength) - len(bodyHead)); err != nil {
 			break
 		}
 		baseOffset := int64(binary.BigEndian.Uint64(header[0:8]))
-		lastOffsetDelta := int32(binary.BigEndian.Uint32(body[11:15])) // body[9:11]=attrs, [11:15]=lastOffsetDelta
+		lastOffsetDelta := int32(binary.BigEndian.Uint32(bodyHead[11:15]))
 		hwm = baseOffset + int64(lastOffsetDelta) + 1
 	}
 	return hwm, nil
