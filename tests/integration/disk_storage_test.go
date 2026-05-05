@@ -436,11 +436,17 @@ func TestAppendEpochFenceRejectsStaleCaller(t *testing.T) {
 	}
 }
 
-// TestFlushPolicyManifestSurvivesCrash verifies the flush policy: when
-// FlushIntervalMessages is 1 (default), every Append should leave the
-// manifest's HWM matching the in-memory HWM, so a crash that loses the
-// engine struct is still recoverable from the on-disk state.
-func TestFlushPolicyManifestSurvivesCrash(t *testing.T) {
+// TestFlushPolicyDataSurvivesCrash verifies the flush policy: with
+// FlushIntervalMessages=1 (default), the *log* is fsynced per record so
+// the data itself survives a crash. The MANIFEST, post-#80, is not
+// rewritten per Produce — it's only persisted on slow-changing events
+// (segment roll, takeover, cleaner advance, partition open). On
+// recovery, takeoverInternal calls recoverSegment which CRC-walks the
+// log and lifts the in-memory HWM back to its real value. So the test
+// asserts: a fresh engine reopened against the same dir + a takeover
+// arrives at HWM=5, regardless of whether the manifest happens to
+// reflect that on disk.
+func TestFlushPolicyDataSurvivesCrash(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 	cfg := storage.DefaultConfig()
@@ -459,18 +465,29 @@ func TestFlushPolicyManifestSurvivesCrash(t *testing.T) {
 		t.Fatalf("CreatePartition: %v", err)
 	}
 
-	// Single Append, then read manifest off disk WITHOUT a clean close —
+	// Single Append, then drop the engine without a clean close —
 	// simulates the broker process being SIGKILL'd between batches.
 	if _, err := e.Append(ctx, "topic", 0, 0, makeBatch(0, 5)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
-	data, err := os.ReadFile(dir + "/topic/0/manifest.json")
+	// Recovery: open a fresh engine, run takeoverInternal which
+	// scans the active segment and rebuilds HWM from the durable log.
+	// Bumped epoch (1) ensures recoverSegment runs.
+	e2, err := storage.NewDiskStorageEngine(
+		dir,
+		&stubLeaseManager{leader: true},
+		cfg,
+	)
 	if err != nil {
-		t.Fatalf("read manifest: %v", err)
+		t.Fatalf("reopen NewDiskStorageEngine: %v", err)
 	}
-	if !bytes.Contains(data, []byte(`"highWatermark":5`)) {
-		t.Errorf("manifest does not record HWM=5 after first Append: %s", data)
+	hwm, err := e2.TakeOver(ctx, "topic", 0, 1)
+	if err != nil {
+		t.Fatalf("TakeOver: %v", err)
+	}
+	if hwm != 5 {
+		t.Errorf("recovered HWM=%d after Append+crash+TakeOver, want 5", hwm)
 	}
 }
 

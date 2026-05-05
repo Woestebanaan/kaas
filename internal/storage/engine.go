@@ -131,19 +131,30 @@ func (ps *partitionState) persistManifestLocked() error {
 	})
 }
 
-// flushLocked fsyncs the active segment's log file and writes the
-// manifest, then resets the pending-record counter. Caller must hold ps.mu.
-// A flush failure surfaces to the caller — the alternative is silently
-// returning a successful Append for data that may not be durable, which is
-// the bug the flush policy exists to prevent.
+// flushLocked fsyncs the active segment's log file and resets the
+// pending-record counter. Caller must hold ps.mu. A flush failure
+// surfaces to the caller — the alternative is silently returning a
+// successful Append for data that may not be durable, which is the
+// bug the flush policy exists to prevent.
 //
-// The index file is intentionally NOT fsynced here (gh #81). Index entries
-// are a hint for binary search during Fetch — they're rebuildable from the
-// log on demand. Skipping the per-batch index fsync removes an entire NFS
-// COMMIT round-trip from the Produce hot path; on broker startup, the
-// active segment's index is rebuilt unconditionally (openPartition →
-// rebuildIndex) to absorb any unpersisted entries lost on crash. Closed
-// segments still have a durable index because roll() syncs both files.
+// What this function intentionally does NOT do (gh #80, #81):
+//
+//   - No index fsync. Index entries are a hint for Fetch binary search
+//     and are rebuildable from the log on demand; skipping their fsync
+//     removes one NFS COMMIT round-trip per Produce.
+//
+//   - No manifest write. The manifest stores Epoch + HighWatermark +
+//     LogStartOffset and is durably persisted only on slow-changing
+//     events (segment roll, takeover, cleaner advance, partition open),
+//     not on every Produce. Persisting it on the hot path was costing
+//     ~4 NFS RPCs (CREATE / WRITE / RENAME / dir COMMIT for the atomic
+//     tmp+rename) on top of the log fsync — bigger than the log fsync
+//     itself on wifi-attached NFS. The trade-off: the manifest's HWM
+//     can be stale on startup, but takeoverInternal calls recoverSegment
+//     before this broker can serve as leader, which CRC-walks the active
+//     segment and lifts the in-memory HWM back to its real value. Until
+//     takeover this broker isn't serving Fetch for the partition, so the
+//     transient staleness has no observable effect.
 func (ps *partitionState) flushLocked() error {
 	if ps.active == nil {
 		return nil
@@ -154,12 +165,9 @@ func (ps *partitionState) flushLocked() error {
 			return fmt.Errorf("storage: fsync log: %w", err)
 		}
 	}
-	if err := ps.persistManifestLocked(); err != nil {
-		return err
-	}
-	// FsyncLatency covers log Sync + manifest write — the user-observable
-	// durability cost. Caller (Append) already accounts for total request
-	// time via WriteLatency in produce.go.
+	// FsyncLatency covers the log Sync — the user-observable durability
+	// cost. Caller (Append) accounts for total request time via
+	// WriteLatency in produce.go.
 	observability.Global().FsyncLatency.Record(context.Background(), time.Since(start).Seconds())
 	ps.pendingFlushRecords = 0
 	return nil

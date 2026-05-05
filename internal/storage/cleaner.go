@@ -117,6 +117,17 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 		slog.Info("retention cleaner: cleaned partition",
 			"topic", p.Topic, "partition", p.Partition,
 			"deletedByTime", deletedByTime, "deletedBySize", deletedBySize)
+		// Persist the new logStartOffset so a broker restart picks
+		// up the cleaner's progress instead of "rediscovering" the
+		// already-deleted segments via a directory listing. The
+		// hot-path Produce no longer writes the manifest (gh #80),
+		// so this is the only path that captures cleaner-driven
+		// logStart advances. Best-effort — a write failure just
+		// means the next clean cycle re-deletes (idempotent).
+		if err := ps.persistManifestLocked(); err != nil {
+			slog.Warn("retention cleaner: persist manifest failed",
+				"topic", p.Topic, "partition", p.Partition, "err", err)
+		}
 	}
 }
 
