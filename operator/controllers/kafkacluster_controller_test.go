@@ -56,14 +56,14 @@ func baseCluster() *v1alpha1.KafkaCluster {
 	}
 }
 
-// reconcileTwice: first call adds the finalizer, second call runs the reconciliation body.
-func reconcileTwice(t *testing.T, r *KafkaClusterReconciler, ns, name string) {
+// reconcileOnce drives the reconciler a single tick. The cluster reconciler
+// no longer uses a finalizer (cleanup is handled by K8s GC via owner
+// references), so the body runs on the first call.
+func reconcileOnce(t *testing.T, r *KafkaClusterReconciler, ns, name string) {
 	t.Helper()
 	ctx := context.Background()
-	for i := 0; i < 2; i++ {
-		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}); err != nil {
-			t.Fatalf("reconcile %d: %v", i, err)
-		}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
 	}
 }
 
@@ -72,7 +72,7 @@ func TestKafkaClusterReconcileCreatesExternalResources(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newClusterScheme()).WithObjects(cluster).WithStatusSubresource(cluster).Build()
 	r := NewKafkaClusterReconciler(c, "kafka")
 
-	reconcileTwice(t, r, "kafka", "skafka")
+	reconcileOnce(t, r, "kafka", "skafka")
 
 	// Certificate was created.
 	cert := &unstructured.Unstructured{}
@@ -141,7 +141,7 @@ func TestKafkaClusterReconcileExternalDisabled(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newClusterScheme()).WithObjects(cluster).WithStatusSubresource(cluster).Build()
 	r := NewKafkaClusterReconciler(c, "kafka")
 
-	reconcileTwice(t, r, "kafka", "skafka")
+	reconcileOnce(t, r, "kafka", "skafka")
 
 	// No Certificate created.
 	cert := &unstructured.Unstructured{}
@@ -200,39 +200,67 @@ func TestKafkaClusterReconcileIdempotent(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newClusterScheme()).WithObjects(cluster).WithStatusSubresource(cluster).Build()
 	r := NewKafkaClusterReconciler(c, "kafka")
 
-	reconcileTwice(t, r, "kafka", "skafka")
+	reconcileOnce(t, r, "kafka", "skafka")
 	// Third reconcile should still succeed.
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "kafka", Name: "skafka"}}); err != nil {
 		t.Errorf("third reconcile: %v", err)
 	}
 }
 
-// Ensure deletion clears external resources and removes the finalizer.
-func TestKafkaClusterReconcileDeletion(t *testing.T) {
+// Owned external resources (Certificate, broker Services, TLSRoutes) must
+// each carry an ownerReference back to the KafkaCluster so K8s GC removes
+// them when the cluster CR is deleted. Without this, deleting the cluster
+// would leak those objects — the operator no longer runs a finalizer-driven
+// cleanup pass on its own.
+func TestKafkaClusterOwnedResourcesHaveOwnerRefs(t *testing.T) {
 	cluster := baseCluster()
-	now := metav1.Now()
-	cluster.DeletionTimestamp = &now
-	cluster.Finalizers = []string{kafkaClusterFinalizer}
-
+	cluster.UID = "cluster-uid-123"
 	c := fake.NewClientBuilder().WithScheme(newClusterScheme()).WithObjects(cluster).WithStatusSubresource(cluster).Build()
 	r := NewKafkaClusterReconciler(c, "kafka")
-	ctx := context.Background()
 
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "kafka", Name: "skafka"}}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	reconcileOnce(t, r, "kafka", "skafka")
 
-	// Finalizer removed.
-	var updated v1alpha1.KafkaCluster
-	err := c.Get(ctx, types.NamespacedName{Namespace: "kafka", Name: "skafka"}, &updated)
-	if err != nil && !errors.IsNotFound(err) {
-		t.Fatalf("get after delete: %v", err)
-	}
-	if err == nil {
-		for _, f := range updated.Finalizers {
-			if f == kafkaClusterFinalizer {
-				t.Error("finalizer should be removed after delete")
+	hasOwner := func(refs []metav1.OwnerReference) bool {
+		for _, ref := range refs {
+			if ref.UID == cluster.UID && ref.Kind == "KafkaCluster" && ref.Controller != nil && *ref.Controller {
+				return true
 			}
+		}
+		return false
+	}
+
+	// Per-broker Services.
+	for i := 0; i < 3; i++ {
+		name := "skafka-broker-" + string(rune('0'+i))
+		var svc corev1.Service
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: "kafka", Name: name}, &svc); err != nil {
+			t.Fatalf("get service %s: %v", name, err)
+		}
+		if !hasOwner(svc.OwnerReferences) {
+			t.Errorf("service %s missing controller ownerRef on KafkaCluster", name)
+		}
+	}
+
+	// Certificate (unstructured).
+	cert := &unstructured.Unstructured{}
+	cert.SetGroupVersionKind(certificateGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "kafka", Name: "skafka-broker-tls"}, cert); err != nil {
+		t.Fatalf("get certificate: %v", err)
+	}
+	if !hasOwner(cert.GetOwnerReferences()) {
+		t.Error("Certificate missing controller ownerRef on KafkaCluster")
+	}
+
+	// Per-broker TLSRoutes (unstructured).
+	for i := 0; i < 3; i++ {
+		route := &unstructured.Unstructured{}
+		route.SetGroupVersionKind(tlsRouteGVK)
+		name := "skafka-broker-" + string(rune('0'+i))
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: "kafka", Name: name}, route); err != nil {
+			t.Fatalf("get TLSRoute %s: %v", name, err)
+		}
+		if !hasOwner(route.GetOwnerReferences()) {
+			t.Errorf("TLSRoute %s missing controller ownerRef on KafkaCluster", name)
 		}
 	}
 }
@@ -256,7 +284,7 @@ func TestKafkaClusterCreatesAssignmentsCR(t *testing.T) {
 		Build()
 	r := NewKafkaClusterReconciler(c, "kafka")
 
-	reconcileTwice(t, r, "kafka", "skafka")
+	reconcileOnce(t, r, "kafka", "skafka")
 
 	var got v1alpha1.KafkaClusterAssignments
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "kafka", Name: "skafka"}, &got); err != nil {
@@ -281,7 +309,7 @@ func TestKafkaClusterCreatesAssignmentsCR(t *testing.T) {
 	}
 
 	// Idempotent: a second reconcile shouldn't error or create a duplicate.
-	reconcileTwice(t, r, "kafka", "skafka")
+	reconcileOnce(t, r, "kafka", "skafka")
 	var crList v1alpha1.KafkaClusterAssignmentsList
 	if err := c.List(context.Background(), &crList, client.InNamespace("kafka")); err != nil {
 		t.Fatal(err)

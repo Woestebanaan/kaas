@@ -4,15 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
-
-const userGroupFinalizer = "skafka.io/usergroup-cleanup"
 
 // KafkaUserGroupReconciler expands group membership into ACL entries in acls.json.
 type KafkaUserGroupReconciler struct {
@@ -33,30 +31,17 @@ func (r *KafkaUserGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *KafkaUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var group v1alpha1.KafkaUserGroup
-	if err := r.Get(ctx, req.NamespacedName, &group); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	err := r.Get(ctx, req.NamespacedName, &group)
+	if apierrors.IsNotFound(err) {
+		// CR is gone — rebuild acls.json. The rebuild iterates all
+		// current CRs, so this group's rules drop out naturally.
+		return ctrl.Result{}, reconcileACLs(ctx, r.Client, r.Namespace, r.DataDir)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// Deletion path — rebuild ACLs without this group's entries.
 	if !group.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&group, userGroupFinalizer) {
-			if err := reconcileACLs(ctx, r.Client, r.Namespace, r.DataDir); err != nil {
-				return ctrl.Result{}, err
-			}
-			controllerutil.RemoveFinalizer(&group, userGroupFinalizer)
-			if err := r.Update(ctx, &group); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Ensure finalizer.
-	if !controllerutil.ContainsFinalizer(&group, userGroupFinalizer) {
-		controllerutil.AddFinalizer(&group, userGroupFinalizer)
-		if err := r.Update(ctx, &group); err != nil {
-			return ctrl.Result{}, err
-		}
 		return ctrl.Result{}, nil
 	}
 

@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -91,6 +92,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Once the manager's cache is in sync, run a one-shot GC pass for state
+	// the (now finalizer-less) reconcilers can't reach: directories on the
+	// PVC and entries in credentials.json that have no surviving CR. This
+	// catches deletions that happened while the operator was down. ACL
+	// state is rebuilt by the per-CR reconciles that fire as the cache
+	// populates, so no separate sweep is needed there.
+	if err := mgr.Add(startupSweepRunnable{
+		client:    mgr.GetClient(),
+		dataDir:   dataDir,
+		namespace: namespace,
+	}); err != nil {
+		ctrl.Log.Error(err, "unable to register startup sweep")
+		os.Exit(1)
+	}
+
 	ctrl.Log.Info("starting operator", "dataDir", dataDir, "namespace", namespace)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.Error(err, "manager exited with error")
@@ -103,4 +119,33 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// startupSweepRunnable runs once after the manager's cache is in sync,
+// reconciling on-disk state with the surviving CRs: dropping topic
+// directories on the PVC whose KafkaTopic CR is gone, and pruning
+// credentials.json entries whose KafkaUser CR is gone. Implements
+// controller-runtime's manager.Runnable so it gets the post-cache-sync
+// timing for free; NeedLeaderElection ensures only one operator pod sweeps.
+type startupSweepRunnable struct {
+	client    ctrlclient.Client
+	dataDir   string
+	namespace string
+}
+
+func (s startupSweepRunnable) NeedLeaderElection() bool { return true }
+
+func (s startupSweepRunnable) Start(ctx context.Context) error {
+	log := ctrl.Log.WithName("startup-sweep")
+	if removed, err := controllers.SweepTopics(ctx, s.client, s.namespace, s.dataDir); err != nil {
+		log.Error(err, "topic sweep failed")
+	} else if len(removed) > 0 {
+		log.Info("removed orphan topic dirs", "names", removed)
+	}
+	if removed, err := controllers.SweepCredentials(ctx, s.client, s.namespace, s.dataDir); err != nil {
+		log.Error(err, "credentials sweep failed")
+	} else if len(removed) > 0 {
+		log.Info("removed orphan credentials", "users", removed)
+	}
+	return nil
 }

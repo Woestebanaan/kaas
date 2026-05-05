@@ -4,15 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
-
-const aclFinalizer = "skafka.io/acl-cleanup"
 
 // KafkaAclReconciler merges ACL rules into acls.json on the shared PVC.
 type KafkaAclReconciler struct {
@@ -33,30 +31,18 @@ func (r *KafkaAclReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *KafkaAclReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var acl v1alpha1.KafkaAcl
-	if err := r.Get(ctx, req.NamespacedName, &acl); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	err := r.Get(ctx, req.NamespacedName, &acl)
+	if apierrors.IsNotFound(err) {
+		// CR is gone — rebuild acls.json without its entries. The rebuild
+		// already iterates all current CRs, so the absence of this one
+		// removes its rules naturally.
+		return ctrl.Result{}, reconcileACLs(ctx, r.Client, r.Namespace, r.DataDir)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// Deletion path — rebuild ACLs without this object's entries.
 	if !acl.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&acl, aclFinalizer) {
-			if err := reconcileACLs(ctx, r.Client, r.Namespace, r.DataDir); err != nil {
-				return ctrl.Result{}, err
-			}
-			controllerutil.RemoveFinalizer(&acl, aclFinalizer)
-			if err := r.Update(ctx, &acl); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Ensure finalizer.
-	if !controllerutil.ContainsFinalizer(&acl, aclFinalizer) {
-		controllerutil.AddFinalizer(&acl, aclFinalizer)
-		if err := r.Update(ctx, &acl); err != nil {
-			return ctrl.Result{}, err
-		}
 		return ctrl.Result{}, nil
 	}
 

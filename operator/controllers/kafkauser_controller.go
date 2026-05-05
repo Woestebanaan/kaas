@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -14,8 +14,6 @@ import (
 
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
-
-const userFinalizer = "skafka.io/user-cleanup"
 
 // KafkaUserReconciler manages user credentials on the shared PVC.
 type KafkaUserReconciler struct {
@@ -36,30 +34,20 @@ func (r *KafkaUserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *KafkaUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var user v1alpha1.KafkaUser
-	if err := r.Get(ctx, req.NamespacedName, &user); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-
-	// Deletion path.
-	if !user.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&user, userFinalizer) {
-			if err := r.removeUser(ctx, user.Name); err != nil {
-				return ctrl.Result{}, err
-			}
-			controllerutil.RemoveFinalizer(&user, userFinalizer)
-			if err := r.Update(ctx, &user); err != nil {
-				return ctrl.Result{}, err
-			}
+	err := r.Get(ctx, req.NamespacedName, &user)
+	if apierrors.IsNotFound(err) {
+		// CR is gone — drop the credential entry. If the operator was down
+		// during the delete, the startup credentials rebuild catches it.
+		if e := r.removeUser(req.Name); e != nil {
+			return ctrl.Result{}, e
 		}
 		return ctrl.Result{}, nil
 	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
-	// Ensure finalizer.
-	if !controllerutil.ContainsFinalizer(&user, userFinalizer) {
-		controllerutil.AddFinalizer(&user, userFinalizer)
-		if err := r.Update(ctx, &user); err != nil {
-			return ctrl.Result{}, err
-		}
+	if !user.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
 
@@ -179,7 +167,7 @@ func (r *KafkaUserReconciler) ensureClientSecret(ctx context.Context, owner *v1a
 
 	var existing corev1.Secret
 	err := r.Get(ctx, types.NamespacedName{Namespace: owner.Namespace, Name: secretName}, &existing)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		_ = controllerutil.SetControllerReference(owner, desired, r.Scheme())
 		return r.Create(ctx, desired)
 	}
@@ -190,11 +178,53 @@ func (r *KafkaUserReconciler) ensureClientSecret(ctx context.Context, owner *v1a
 	return r.Update(ctx, &existing)
 }
 
-func (r *KafkaUserReconciler) removeUser(ctx context.Context, username string) error {
+// removeUser drops one entry from credentials.json. Used as a fast path on
+// Reconcile-time deletion; the startup sweep does the same thing for orphans.
+func (r *KafkaUserReconciler) removeUser(username string) error {
 	cf, err := readCredentials(r.DataDir)
 	if err != nil {
 		return err
 	}
 	cf.removeUser(username)
 	return writeCredentials(r.DataDir, cf)
+}
+
+// SweepCredentials rebuilds credentials.json from all current KafkaUser CRs in
+// namespace, dropping any entries whose CR is gone. Called once at operator
+// startup. Unlike the per-user reconcile, this only rewrites entries we can
+// reconstitute without re-reading password Secrets — for SCRAM users the
+// existing entry is preserved if the CR still exists, since recomputing the
+// scram hash would change salt/keys on every restart.
+func SweepCredentials(ctx context.Context, c client.Client, namespace, dataDir string) ([]string, error) {
+	var users v1alpha1.KafkaUserList
+	if err := c.List(ctx, &users, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list KafkaUsers: %w", err)
+	}
+	keep := map[string]bool{}
+	for _, u := range users.Items {
+		keep[u.Name] = true
+	}
+
+	cf, err := readCredentials(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("read credentials: %w", err)
+	}
+
+	var removed []string
+	out := cf.Users[:0]
+	for _, u := range cf.Users {
+		if keep[u.Username] {
+			out = append(out, u)
+			continue
+		}
+		removed = append(removed, u.Username)
+	}
+	if len(removed) == 0 {
+		return nil, nil
+	}
+	cf.Users = out
+	if err := writeCredentials(dataDir, cf); err != nil {
+		return removed, fmt.Errorf("write credentials: %w", err)
+	}
+	return removed, nil
 }

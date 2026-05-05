@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,8 +17,6 @@ import (
 
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
-
-const kafkaClusterFinalizer = "skafka.io/kafkacluster-cleanup"
 
 // External API group versions used by the reconciler via unstructured clients.
 var (
@@ -38,6 +36,12 @@ var (
 // listener resources: one Certificate, N per-broker Services, N per-broker TLSRoutes.
 // The broker StatefulSet itself is managed by Helm (Phase 8); the reconciler only
 // owns external-access plumbing that depends on runtime config (broker count, etc.).
+//
+// Owned resources carry an ownerReference back to the KafkaCluster, so K8s
+// garbage collection cleans them up when the CR is deleted — no finalizer
+// needed. The "external listener disabled" path still calls
+// deleteExternalResources directly, since in that case the cluster CR stays
+// alive and GC isn't triggered.
 type KafkaClusterReconciler struct {
 	client.Client
 	Namespace string
@@ -55,38 +59,23 @@ func (r *KafkaClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *KafkaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var cluster v1alpha1.KafkaCluster
-	if err := r.Get(ctx, req.NamespacedName, &cluster); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	err := r.Get(ctx, req.NamespacedName, &cluster)
+	if apierrors.IsNotFound(err) {
+		// CR gone — owned resources (Services, Certificate, TLSRoute,
+		// KafkaClusterAssignments) are removed by K8s GC via the owner
+		// references set at creation time. Nothing for us to do.
+		return ctrl.Result{}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if !cluster.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&cluster, kafkaClusterFinalizer) {
-			if err := r.deleteExternalResources(ctx, &cluster); err != nil {
-				return ctrl.Result{}, err
-			}
-			controllerutil.RemoveFinalizer(&cluster, kafkaClusterFinalizer)
-			if err := r.Update(ctx, &cluster); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
-	}
-
-	if !controllerutil.ContainsFinalizer(&cluster, kafkaClusterFinalizer) {
-		controllerutil.AddFinalizer(&cluster, kafkaClusterFinalizer)
-		if err := r.Update(ctx, &cluster); err != nil {
-			return ctrl.Result{}, err
-		}
 		return ctrl.Result{}, nil
 	}
 
 	// 0. Ensure the KafkaClusterAssignments CR exists for this cluster.
-	// Phase 6: this is the operator-side bootstrap. The cluster controller
-	// (an elected broker) writes Status to it after every assignment.json
-	// write; the operator just guarantees the object exists, with proper
-	// ownerReferences so deletion of KafkaCluster cascades to it.
 	if err := r.reconcileAssignmentsCR(ctx, &cluster); err != nil {
-		// Non-fatal — log via condition but continue.
 		_ = r.updateReadyCondition(ctx, &cluster, metav1.ConditionFalse, "AssignmentsCRError", err.Error())
 		return ctrl.Result{}, err
 	}
@@ -150,7 +139,7 @@ func (r *KafkaClusterReconciler) reconcileAssignmentsCR(ctx context.Context, clu
 		// Already exists — nothing to do.
 		return nil
 	}
-	if !errors.IsNotFound(err) {
+	if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get KafkaClusterAssignments: %w", err)
 	}
 
@@ -208,9 +197,9 @@ func (r *KafkaClusterReconciler) reconcileBrokerService(ctx context.Context, clu
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
-				"app.kubernetes.io/name":                 "skafka",
-				"app.kubernetes.io/instance":             cluster.Name,
-				"statefulset.kubernetes.io/pod-name":     fmt.Sprintf("%s-%d", cluster.Name, ordinal),
+				"app.kubernetes.io/name":             "skafka",
+				"app.kubernetes.io/instance":         cluster.Name,
+				"statefulset.kubernetes.io/pod-name": fmt.Sprintf("%s-%d", cluster.Name, ordinal),
 			},
 			Ports: []corev1.ServicePort{{
 				Name:       "kafka-tls",
@@ -222,7 +211,7 @@ func (r *KafkaClusterReconciler) reconcileBrokerService(ctx context.Context, clu
 
 	var existing corev1.Service
 	err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: name}, &existing)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		_ = controllerutil.SetControllerReference(cluster, desired, r.Scheme())
 		return r.Create(ctx, desired)
 	}
@@ -255,7 +244,7 @@ func (r *KafkaClusterReconciler) reconcileBrokerTLSRoute(ctx context.Context, cl
 	}
 
 	spec := map[string]interface{}{
-		"hostnames": []interface{}{hostname},
+		"hostnames":  []interface{}{hostname},
 		"parentRefs": []interface{}{parentRef},
 		"rules": []interface{}{
 			map[string]interface{}{
@@ -273,8 +262,8 @@ func (r *KafkaClusterReconciler) reconcileBrokerTLSRoute(ctx context.Context, cl
 }
 
 // applyUnstructured creates or updates an unstructured object and sets the given spec.
-// Setting a controller reference on unstructured objects is skipped to avoid a direct
-// cert-manager / Gateway API scheme dependency; ownership is tracked via labels instead.
+// An ownerReference back to the KafkaCluster is attached so K8s garbage
+// collection removes the object when the cluster CR is deleted.
 func (r *KafkaClusterReconciler) applyUnstructured(ctx context.Context, cluster *v1alpha1.KafkaCluster, obj *unstructured.Unstructured, spec map[string]interface{}) error {
 	// Tag with owner labels for cleanup tracking.
 	labels := obj.GetLabels()
@@ -289,7 +278,12 @@ func (r *KafkaClusterReconciler) applyUnstructured(ctx context.Context, cluster 
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(obj.GroupVersionKind())
 	err := r.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, existing)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
+		// New object — set ownerReference now so the apiserver records
+		// it on creation. This is what hooks the object into K8s GC.
+		obj.SetOwnerReferences([]metav1.OwnerReference{
+			*metav1.NewControllerRef(cluster, v1alpha1.GroupVersion.WithKind("KafkaCluster")),
+		})
 		return r.Create(ctx, obj)
 	}
 	if err != nil {
@@ -297,11 +291,27 @@ func (r *KafkaClusterReconciler) applyUnstructured(ctx context.Context, cluster 
 	}
 	existing.Object["spec"] = obj.Object["spec"]
 	existing.SetLabels(labels)
+	// Backfill ownerReference on objects created before this code shipped.
+	if !hasControllerOwnerRef(existing.GetOwnerReferences(), cluster.UID) {
+		existing.SetOwnerReferences(append(existing.GetOwnerReferences(),
+			*metav1.NewControllerRef(cluster, v1alpha1.GroupVersion.WithKind("KafkaCluster"))))
+	}
 	return r.Update(ctx, existing)
 }
 
-// deleteExternalResources removes the Certificate, per-broker Services, and TLSRoutes
-// that were previously created for this cluster.
+func hasControllerOwnerRef(refs []metav1.OwnerReference, uid types.UID) bool {
+	for _, ref := range refs {
+		if ref.UID == uid && ref.Controller != nil && *ref.Controller {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteExternalResources removes the Certificate, per-broker Services, and
+// TLSRoutes that were previously created for this cluster. Used only when the
+// external listener is toggled off while the cluster CR stays alive — full
+// cluster deletion is handled by K8s GC via owner references.
 func (r *KafkaClusterReconciler) deleteExternalResources(ctx context.Context, cluster *v1alpha1.KafkaCluster) error {
 	// Certificate.
 	cert := &unstructured.Unstructured{}
