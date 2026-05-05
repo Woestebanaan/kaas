@@ -156,6 +156,7 @@ func flexibleRequestHeader(apiKey, apiVersion int16) bool {
 		18: 3,  // ApiVersions (v3+ = flexible; v4 same format)
 		19: 5,  // CreateTopics
 		20: 4,  // DeleteTopics
+		21: 2,  // DeleteRecords
 		29: 2,  // DescribeAcls
 		30: 2,  // CreateAcls
 		31: 2,  // DeleteAcls
