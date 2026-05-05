@@ -60,6 +60,7 @@ type Config struct {
 	SegmentBytes       int64 // roll to a new segment at this size (default 1 GB)
 	IndexIntervalBytes int64 // write an index entry every N bytes of log data (default 4096)
 	RetentionMs        int64 // delete segments older than this (default 7 days)
+	RetentionBytes     int64 // delete oldest segments when partition total exceeds this (0 = unlimited)
 	// FlushIntervalMessages caps how many records can sit in the OS write-back
 	// cache before the engine forces an fsync(2). Skafka is RF=1, so the
 	// storage layer is the entire durability story — the default of 1 trades
@@ -113,6 +114,11 @@ type partitionState struct {
 	// pendingFlushRecords counts records appended since the last fsync.
 	// flushLocked checks against Config.FlushIntervalMessages and resets to 0.
 	pendingFlushRecords int64
+	// retentionBytesOverride is loaded from /data/<topic>/.config.json on
+	// partition open. 0 means "no override" — the cleaner falls back to
+	// engine.cfg.RetentionBytes (which itself is 0 = unlimited by default).
+	// Per-topic operator-driven retention plumbing (gh #47).
+	retentionBytesOverride int64
 }
 
 // persistManifestLocked writes manifest.json from the partition's current
@@ -306,6 +312,16 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 			HighWatermark:  ps.highWater,
 			LogStartOffset: ps.logStart,
 		})
+	}
+
+	// Per-topic config from /data/<topic>/.config.json (operator-written).
+	// Currently only retentionBytes is wired through to the cleaner; other
+	// fields are accepted but ignored (gh #47 follow-ups).
+	topicDir := filepath.Join(e.dataDir, topic)
+	if cfg, err := ReadTopicConfig(topicDir); err == nil && cfg != nil {
+		if cfg.RetentionBytes != nil {
+			ps.retentionBytesOverride = *cfg.RetentionBytes
+		}
 	}
 
 	e.mu.Lock()

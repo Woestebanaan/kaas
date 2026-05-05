@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/woestebanaan/skafka/internal/storage"
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
 
@@ -81,6 +82,21 @@ func (r *KafkaTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return ctrl.Result{}, fmt.Errorf("mkdir partition %d: %w", p, err)
 		}
+	}
+
+	// Write per-topic config to /data/<topic>/.config.json so the broker
+	// can pick up retentionBytes / retentionMs / segmentBytes etc. on next
+	// partition open. Currently only retentionBytes is enforced by the
+	// cleaner (gh #47); other fields are accepted but ignored.
+	if err := storage.WriteTopicConfig(filepath.Join(r.DataDir, topic.Name), &storage.TopicConfigFile{
+		RetentionMs:        topic.Spec.Config.RetentionMs,
+		RetentionBytes:     topic.Spec.Config.RetentionBytes,
+		SegmentBytes:       topic.Spec.Config.SegmentBytes,
+		CleanupPolicy:      topic.Spec.Config.CleanupPolicy,
+		MinCompactionLagMs: topic.Spec.Config.MinCompactionLagMs,
+		DeleteRetentionMs:  topic.Spec.Config.DeleteRetentionMs,
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("write topic config: %w", err)
 	}
 
 	// Update status.

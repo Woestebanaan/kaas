@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/woestebanaan/skafka/internal/lease"
@@ -58,7 +59,8 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	deleted := 0
+	// --- time-based retention ---
+	deletedByTime := 0
 	for len(ps.segments) > 0 {
 		seg := ps.segments[0]
 
@@ -75,16 +77,63 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 			break
 		}
 
-		slog.Info("retention cleaner: deleting segment",
+		slog.Info("retention cleaner: deleting segment (time)",
 			"topic", p.Topic, "partition", p.Partition,
 			"baseOffset", seg.baseOffset,
 			"maxTimestamp", seg.maxTimestamp)
 		ps.deleteSegment(0)
-		deleted++
+		deletedByTime++
 	}
 
-	if deleted > 0 {
-		slog.Info("retention cleaner: cleaned partition",
-			"topic", p.Topic, "partition", p.Partition, "segmentsDeleted", deleted)
+	// --- size-based retention (gh #47) ---
+	// Active segment is intentionally never deleted; only closed segments.
+	// Per-partition override (loaded from /data/<topic>/.config.json) wins
+	// over the engine-wide RetentionBytes default.
+	limit := ps.retentionBytesOverride
+	if limit == 0 {
+		limit = c.engine.cfg.RetentionBytes
 	}
+	deletedBySize := 0
+	if limit > 0 {
+		total := totalClosedSize(ps.segments)
+		// Don't delete every closed segment to satisfy a tight limit —
+		// keep at least the most recent closed one so reads near HWM
+		// don't fall off a cliff.
+		for total > limit && len(ps.segments) > 1 {
+			seg := ps.segments[0]
+			sz := segmentSize(seg)
+			slog.Info("retention cleaner: deleting segment (size)",
+				"topic", p.Topic, "partition", p.Partition,
+				"baseOffset", seg.baseOffset,
+				"segmentSize", sz,
+				"totalBefore", total, "limit", limit)
+			total -= sz
+			ps.deleteSegment(0)
+			deletedBySize++
+		}
+	}
+
+	if deletedByTime > 0 || deletedBySize > 0 {
+		slog.Info("retention cleaner: cleaned partition",
+			"topic", p.Topic, "partition", p.Partition,
+			"deletedByTime", deletedByTime, "deletedBySize", deletedBySize)
+	}
+}
+
+// segmentSize returns the closed segment's on-disk log file size.
+// Falls back to 0 on a stat failure — the cleaner treats missing-stat
+// as "I can't bound this" and just doesn't delete it.
+func segmentSize(seg segmentMeta) int64 {
+	if fi, err := os.Stat(seg.logPath); err == nil {
+		return fi.Size()
+	}
+	return 0
+}
+
+func totalClosedSize(segs []segmentMeta) int64 {
+	var total int64
+	for _, s := range segs {
+		total += segmentSize(s)
+	}
+	return total
 }
