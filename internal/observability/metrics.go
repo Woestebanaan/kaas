@@ -37,6 +37,22 @@ var noopMetricsSingleton = func() *Metrics {
 	return m
 }()
 
+// latencySecondsBoundaries is the explicit histogram bucket boundary set
+// for every Float64Histogram below that records latency in seconds.
+// Without this, OTel falls back to its default boundaries
+// (5, 10, 25 ... 10000) which are designed for HTTP latencies in
+// MILLISECONDS — every observation we record (`time.Since(start).Seconds()`,
+// always sub-second to mid-second) lands in the [0, 5] bucket and
+// histogram_quantile interpolates p50/p95/p99 to fixed 2.5 / 4.75 / 4.95
+// regardless of actual load (gh #79).
+//
+// Range: 100 µs (in-process hot path) to 30 s (failover / drain-scale
+// events). 15 buckets is a reasonable resolution/cardinality trade-off.
+var latencySecondsBoundaries = []float64{
+	0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+	1, 2.5, 5, 10, 30,
+}
+
 // Metrics is the central registry of all OTel instruments emitted by skafka.
 // Passed by pointer to every component that reports metrics. A nil *Metrics is
 // safe to use — helper methods check for nil before recording.
@@ -141,22 +157,26 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.RequestLatency, err = m.Float64Histogram("skafka.request.latency",
 		metric.WithDescription("Kafka request handler latency"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	if mx.WriteLatency, err = m.Float64Histogram("skafka.storage.write.latency",
 		metric.WithDescription("Partition append latency"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	if mx.ReadLatency, err = m.Float64Histogram("skafka.storage.read.latency",
 		metric.WithDescription("Partition read latency"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	if mx.FsyncLatency, err = m.Float64Histogram("skafka.storage.fsync.latency",
 		metric.WithDescription("Segment fsync latency"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	if mx.ControllerFailovers, err = m.Int64Counter("skafka.controller.failovers",
@@ -165,7 +185,8 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.ControllerFailoverDuration, err = m.Float64Histogram("skafka.controller.failover.duration",
 		metric.WithDescription("Seconds from winning the lease to the first AssignmentLoop write"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	if mx.AssignmentChanges, err = m.Int64Counter("skafka.assignment.changes",
@@ -178,7 +199,8 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.AssignmentFileWriteLatency, err = m.Float64Histogram("skafka.assignment.file.write.latency",
 		metric.WithDescription("AssignmentStore.Write tmp+rename duration"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	if mx.AssignmentPushes, err = m.Int64Counter("skafka.assignment.pushes",
@@ -191,7 +213,8 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.HeartbeatRTT, err = m.Float64Histogram("skafka.heartbeat.rtt",
 		metric.WithDescription("Broker→controller→broker heartbeat round-trip"),
-		metric.WithUnit("s")); err != nil {
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	if mx.HeartbeatMisses, err = m.Int64Counter("skafka.heartbeat.misses",

@@ -75,6 +75,67 @@ func TestMetricsRequestLatencyHistogram(t *testing.T) {
 	}
 }
 
+// TestLatencyHistogramsHaveExplicitBoundaries guards gh #79: every
+// latency histogram (unit=s) must declare explicit bucket boundaries
+// that span sub-millisecond → multi-second. Without this, OTel falls
+// back to its default ms-scale boundaries (5, 10, 25 ... 10000) and
+// every observation lands in [0, 5], collapsing percentiles to fixed
+// 2.5 / 4.75 / 4.95 in Grafana regardless of actual load.
+func TestLatencyHistogramsHaveExplicitBoundaries(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	ctx := context.Background()
+	// Drive every latency histogram once so the SDK emits a data point.
+	m.RequestLatency.Record(ctx, 0.001)
+	m.WriteLatency.Record(ctx, 0.001)
+	m.ReadLatency.Record(ctx, 0.001)
+	m.FsyncLatency.Record(ctx, 0.001)
+	m.HeartbeatRTT.Record(ctx, 0.001)
+	m.ControllerFailoverDuration.Record(ctx, 0.001)
+	m.AssignmentFileWriteLatency.Record(ctx, 0.001)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"skafka.request.latency",
+		"skafka.storage.write.latency",
+		"skafka.storage.read.latency",
+		"skafka.storage.fsync.latency",
+		"skafka.heartbeat.rtt",
+		"skafka.controller.failover.duration",
+		"skafka.assignment.file.write.latency",
+	}
+	seen := map[string]bool{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, inst := range sm.Metrics {
+			h, ok := inst.Data.(metricdata.Histogram[float64])
+			if !ok || len(h.DataPoints) == 0 {
+				continue
+			}
+			bounds := h.DataPoints[0].Bounds
+			// The OTel-default boundaries fan out from 5 with ms-scale
+			// values. Real seconds-scale boundaries fall in [0.0001, 30].
+			// A first-bucket upper edge ≤ 0.01 is a robust signal the
+			// override is in effect; ≥ 1 means we're still on defaults.
+			if len(bounds) == 0 {
+				t.Errorf("%s: histogram has no bounds at all", inst.Name)
+				continue
+			}
+			if bounds[0] > 0.01 {
+				t.Errorf("%s: first bucket boundary = %v, want ≤ 0.01 — looks like the OTel default boundaries are still active (gh #79)", inst.Name, bounds[0])
+			}
+			seen[inst.Name] = true
+		}
+	}
+	for _, name := range want {
+		if !seen[name] {
+			t.Errorf("%s not emitted; cannot verify boundaries", name)
+		}
+	}
+}
+
 func TestGlobalReturnsNoopWhenUnset(t *testing.T) {
 	// Global() must never return nil. Use the no-op path explicitly.
 	globalMetrics.Store(nil)
