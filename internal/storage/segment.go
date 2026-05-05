@@ -234,7 +234,9 @@ func (s *activeSegment) appendBatch(raw []byte, indexIntervalBytes int64) error 
 }
 
 // roll closes the current segment and returns a new segment starting at
-// newBaseOffset under the given leader epoch.
+// newBaseOffset under the given leader epoch. Used by callers that want
+// the full pre-#82 semantics (synchronous fsync of both files) — kept
+// for tests and explicit sync paths.
 func (s *activeSegment) roll(dir string, newBaseOffset, epoch int64) (*activeSegment, error) {
 	if err := s.logFile.Sync(); err != nil {
 		return nil, err
@@ -243,6 +245,32 @@ func (s *activeSegment) roll(dir string, newBaseOffset, epoch int64) (*activeSeg
 		return nil, err
 	}
 	return createSegment(dir, newBaseOffset, epoch)
+}
+
+// rollFast is the segment-roll critical-path (gh #82): it fsyncs the
+// log (so the trigger-batch is durable), creates the new segment, and
+// returns. The OLD segment's index fsync, file close, and the manifest
+// write are deferred to finalizeAfterRoll, which runs in a goroutine
+// outside ps.mu — turning a multi-second NFS stall into a fast pointer
+// swap.
+func (s *activeSegment) rollFast(dir string, newBaseOffset, epoch int64) (*activeSegment, error) {
+	if err := s.logFile.Sync(); err != nil {
+		return nil, err
+	}
+	return createSegment(dir, newBaseOffset, epoch)
+}
+
+// finalizeAfterRoll runs the deferred close-out work for a segment that
+// rollFast left dangling. Safe to call from a goroutine — the segment
+// is no longer ps.active so no concurrent appends touch it. Index fsync
+// is best-effort (a stale/short index just means Fetch falls back to a
+// linear scan from the nearest indexed offset; #81's recovery covers
+// the lossy-tail case).
+func (s *activeSegment) finalizeAfterRoll() error {
+	if s.indexFile != nil {
+		_ = s.indexFile.Sync()
+	}
+	return s.close()
 }
 
 // close flushes and closes the segment files.

@@ -576,6 +576,21 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 
 // rollSegment closes the active segment and opens a new one.
 // Must be called with ps.mu held.
+//
+// rollSegment splits the work into a fast critical-path (under ps.mu)
+// and an async finalize step (gh #82). The lock is held only for:
+//   - log fsync of the old segment (so the trigger-batch is durable)
+//   - createSegment for the new active
+//   - the in-memory swap (segments/active pointer)
+//
+// The deferred work runs in a goroutine after ps.mu is released:
+//   - fsync the old index (best-effort; missing tail entries are fine
+//     because Fetch falls back to a linear scan — #81)
+//   - close the old segment's file handles
+//   - persist the manifest with the new logStartOffset
+//
+// On NFS the previous synchronous version held ps.mu for 5-30s during
+// segment roll; this brings it down to ~one fsync + two file CREATEs.
 func (e *DiskStorageEngine) rollSegment(ps *partitionState) error {
 	closed := segmentMeta{
 		baseOffset: ps.active.baseOffset,
@@ -587,18 +602,26 @@ func (e *DiskStorageEngine) rollSegment(ps *partitionState) error {
 		closed.maxTimestamp = ts
 	}
 
-	newSeg, err := ps.active.roll(ps.dir, ps.highWater, ps.epoch)
+	oldActive := ps.active
+	newSeg, err := oldActive.rollFast(ps.dir, ps.highWater, ps.epoch)
 	if err != nil {
 		return err
 	}
-	_ = ps.active.close()
 	ps.segments = append(ps.segments, closed)
 	ps.active = newSeg
 
-	// Roll is a natural manifest checkpoint: the previous segment is now
-	// closed and the HWM is at a stable boundary. A failure here is not
-	// fatal — the next TakeOver / open will rebuild from a segment scan.
-	_ = ps.persistManifestLocked()
+	// Async finalize: index fsync, close old, manifest checkpoint.
+	// Capture ps + oldActive by value/pointer; the goroutine takes the
+	// lock briefly only for the manifest write at the end. A failure
+	// here is logged but non-fatal — the next TakeOver / open rebuilds
+	// from a segment scan.
+	go func(seg *activeSegment) {
+		_ = seg.finalizeAfterRoll()
+		ps.mu.Lock()
+		_ = ps.persistManifestLocked()
+		ps.mu.Unlock()
+	}(oldActive)
+
 	return nil
 }
 
