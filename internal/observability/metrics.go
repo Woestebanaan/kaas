@@ -126,7 +126,8 @@ type Metrics struct {
 	CertReloads   metric.Int64Counter
 
 	// Connection counters per listener.
-	Connections metric.Int64Counter
+	Connections     metric.Int64Counter
+	ConnectionsOpen metric.Int64UpDownCounter
 }
 
 // NewMetrics creates all instruments on the given meter. Errors from individual
@@ -271,6 +272,10 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.Connections, err = m.Int64Counter("skafka.connections",
 		metric.WithDescription("New client connections accepted")); err != nil {
+		return nil, err
+	}
+	if mx.ConnectionsOpen, err = m.Int64UpDownCounter("skafka.connections.open",
+		metric.WithDescription("Currently open client connections")); err != nil {
 		return nil, err
 	}
 	return mx, nil

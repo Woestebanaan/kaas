@@ -116,10 +116,15 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 		if _, isTLS := conn.(*tls.Conn); isTLS {
 			mode = "tls"
 		}
-		observability.Global().Connections.Add(context.Background(), 1,
-			metric.WithAttributes(attribute.String("mode", mode)))
+		modeAttr := metric.WithAttributes(attribute.String("mode", mode))
+		mx := observability.Global()
+		mx.Connections.Add(context.Background(), 1, modeAttr)
+		mx.ConnectionsOpen.Add(context.Background(), 1, modeAttr)
 		s.wg.Add(1)
-		go s.serveConn(ctx, conn)
+		go func() {
+			defer mx.ConnectionsOpen.Add(context.Background(), -1, modeAttr)
+			s.serveConn(ctx, conn)
+		}()
 	}
 }
 
