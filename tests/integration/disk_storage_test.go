@@ -75,6 +75,9 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 	if err := engine.CreatePartition("test-topic", 0); err != nil {
 		t.Fatalf("CreatePartition: %v", err)
 	}
+	if _, err := engine.TakeOver(ctx, "test-topic", 0, 1); err != nil {
+		t.Fatalf("TakeOver: %v", err)
+	}
 
 	var allBatches [][]byte
 	for i := 0; i < 100; i++ {
@@ -110,10 +113,16 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 		t.Errorf("Read: got %d bytes, want %d bytes", len(raw), len(want))
 	}
 
-	// Reopen to verify persistence.
+	// Reopen to verify persistence. Manifest's HWM at last takeover
+	// is 0 (no event between TakeOver and Appends since #80 dropped
+	// per-Produce manifest writes); a TakeOver after reopen runs
+	// recoverSegment which scans the durable log and lifts HWM.
 	engine2 := newEngine(t, dir)
 	if err := engine2.CreatePartition("test-topic", 0); err != nil {
 		t.Fatalf("reopen CreatePartition: %v", err)
+	}
+	if _, err := engine2.TakeOver(ctx, "test-topic", 0, 2); err != nil {
+		t.Fatalf("reopen TakeOver: %v", err)
 	}
 
 	hwm2, err := engine2.HighWatermark("test-topic", 0)
@@ -527,9 +536,18 @@ func TestFlushPolicyDisabledDelaysSync(t *testing.T) {
 	}
 }
 
-// TestManifestPersistedAcrossRestart verifies the v3.3 per-partition manifest
-// is written on first open + on roll, and is consulted (instead of a full
-// segment scan) when the engine is reopened against the same data dir.
+// TestManifestPersistedAcrossRestart verifies the v3.3 per-partition
+// manifest is written on first open + on roll/takeover/cleaner, and is
+// consulted on reopen as a fast path (no full segment scan). After #80
+// the manifest no longer updates per-Produce — its HWM reflects the
+// last controller event (takeover / segment roll / cleaner). On reopen
+// the manifest's HWM is therefore "what the controller knew at last
+// event", and it's the takeover-after-restart that lifts HWM via
+// recoverSegment to whatever the durable log actually contains.
+//
+// This test pins both behaviours in sequence: post-restart fast path
+// reports the manifest's HWM, then a TakeOver call recovers the true
+// HWM via the segment scan.
 func TestManifestPersistedAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
@@ -538,8 +556,11 @@ func TestManifestPersistedAcrossRestart(t *testing.T) {
 	if err := engine.CreatePartition("topic", 0); err != nil {
 		t.Fatalf("CreatePartition: %v", err)
 	}
+	if _, err := engine.TakeOver(ctx, "topic", 0, 1); err != nil {
+		t.Fatalf("TakeOver: %v", err)
+	}
 	for i := 0; i < 5; i++ {
-		if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(int64(i*10), 10)); err != nil {
+		if _, err := engine.Append(ctx, "topic", 0, 1, makeBatch(int64(i*10), 10)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -550,7 +571,10 @@ func TestManifestPersistedAcrossRestart(t *testing.T) {
 		t.Fatalf("manifest.json missing after appends: %v", err)
 	}
 
-	// Reopen — the engine should pick up state from manifest + segments.
+	// Reopen — the manifest fast path consults manifest's HWM directly
+	// (no segment scan), but that HWM only reflects state at the last
+	// takeover/roll/cleaner. With no event between takeover and the
+	// 5 appends, the on-disk HWM is 0.
 	engine2 := newEngine(t, dir)
 	if err := engine2.CreatePartition("topic", 0); err != nil {
 		t.Fatalf("reopen CreatePartition: %v", err)
@@ -559,8 +583,18 @@ func TestManifestPersistedAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen HighWatermark: %v", err)
 	}
-	if hwm2 != 50 {
-		t.Errorf("reopen HWM=%d, want 50", hwm2)
+	if hwm2 != 0 {
+		t.Errorf("reopen HWM=%d, want 0 (manifest at last takeover; fast path doesn't scan)", hwm2)
+	}
+
+	// A TakeOver after restart triggers recoverSegment, which scans
+	// the active log and lifts HWM to its real value.
+	hwmAfterTakeover, err := engine2.TakeOver(ctx, "topic", 0, 2)
+	if err != nil {
+		t.Fatalf("TakeOver after restart: %v", err)
+	}
+	if hwmAfterTakeover != 50 {
+		t.Errorf("HWM after takeover=%d, want 50 (recoverSegment didn't lift HWM)", hwmAfterTakeover)
 	}
 }
 

@@ -182,20 +182,33 @@ func (ps *partitionState) committerLoop() {
 			continue
 		}
 		seqAtStart := ps.requestedFlushSeq
-		seg := ps.active
+		// Snapshot the logFile pointer (not just the segment) so that
+		// a concurrent Relinquish — which sets ps.active.logFile = nil
+		// after closing — doesn't cause us to deref nil between this
+		// snapshot and the Sync call. If the file was closed under
+		// us we get EBADF on Sync; that propagates as flushErr to the
+		// in-flight waiters and gets cleared on the next successful
+		// cycle (committer's "no error → leave flushErr alone" branch
+		// handles this since the next signal comes after a TakeOver
+		// re-opened the handle).
+		var logFile *os.File
+		if ps.active != nil {
+			logFile = ps.active.logFile
+		}
 		ps.mu.Unlock()
 
 		var err error
-		if seg != nil && seg.logFile != nil {
+		if logFile != nil {
 			start := time.Now()
-			err = seg.logFile.Sync()
+			err = logFile.Sync()
 			observability.Global().FsyncLatency.Record(context.Background(), time.Since(start).Seconds())
 		}
 
 		ps.mu.Lock()
-		if err != nil && ps.flushErr == nil {
-			ps.flushErr = err // sticky
-		}
+		// flushErr is set when this cycle errored, cleared on a clean
+		// cycle. Lets a transient EBADF from a Relinquish race recover
+		// once the next leadership takes over and signals fresh.
+		ps.flushErr = err
 		ps.completedFlushSeq = seqAtStart
 		ps.flushCond.Broadcast()
 		ps.mu.Unlock()
@@ -380,7 +393,7 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		// the very first open after a fresh chart install): fall back
 		// to the full log scan. That path is bounded by SegmentBytes
 		// and rare — manifests are written eagerly.
-		if manifest != nil && manifest.HighWatermark > last.baseOffset {
+		if manifest != nil {
 			active, err = openActiveSegment(last)
 			if err != nil {
 				return fmt.Errorf("open active segment base=%d: %w", last.baseOffset, err)
@@ -858,6 +871,16 @@ func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newE
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
+	// Open file handles if this is a follower → leader transition.
+	// openPartition leaves handles closed so non-leaders don't hold
+	// fds that block the leader's segment-roll/DeleteRecords-driven
+	// os.Remove on NFS (gh #76 follow-up). Idempotent if already open.
+	if ps.active != nil {
+		if err := ps.active.openHandles(); err != nil {
+			return 0, fmt.Errorf("storage: open handles: %w", err)
+		}
+	}
+
 	diskEpoch := ps.epoch
 	if m, err := readManifest(ps.dir); err == nil {
 		diskEpoch = m.Epoch
@@ -890,12 +913,24 @@ func (e *DiskStorageEngine) TakeOver(_ context.Context, topic string, partition 
 	return e.takeoverInternal(topic, partition, int64(epoch))
 }
 
-// Relinquish implements the v3 StorageEngine contract. The partition becomes
-// read-only on this broker. With flock removed in Phase 4, this is a no-op
-// at the storage layer — the BrokerCoordinator.Owns check on the produce
-// hot path is the only enforcement point.
-func (e *DiskStorageEngine) Relinquish(_ string, _ int32) error {
-	return nil
+// Relinquish implements the v3 StorageEngine contract. The partition
+// becomes read-only on this broker — and, more importantly, the broker
+// drops its file descriptors on the active segment so that when the
+// new leader rolls or DeleteRecords-unlinks the segment file, NFS can
+// actually free the bytes (instead of silly-renaming the file because
+// followers still hold it open). The BrokerCoordinator.Owns check on
+// the produce hot path remains the authoritative leadership gate.
+func (e *DiskStorageEngine) Relinquish(topic string, partition int32) error {
+	ps, ok := e.getPartition(topic, partition)
+	if !ok {
+		return nil
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.active == nil {
+		return nil
+	}
+	return ps.active.closeHandles()
 }
 
 // ClosePartition closes the partition's open log + index file handles

@@ -92,46 +92,94 @@ func createSegment(dir string, baseOffset, epoch int64) (*activeSegment, error) 
 	}, nil
 }
 
-// openActiveSegment opens an existing segment's log+index files and reads
-// their on-disk sizes. It does NOT scan the log to recompute the high
-// watermark — that's the caller's choice (manifest fast path vs full
-// scan fallback). Cheap: a couple of file opens + Seek-to-end. Used on
-// broker startup so partition open is O(1) per partition rather than
-// O(log_size); recoverSegment + rebuildIndex run later in
-// takeoverInternal when this broker is about to become leader.
+// openActiveSegment statifies an existing segment's log+index files
+// without opening file handles. The handles are opened lazily by
+// openHandles() — typically during takeoverInternal when this broker
+// is about to become leader. Followers never call openHandles, so
+// they don't hold file descriptors that would prevent the leader's
+// segment-roll/DeleteRecords-driven os.Remove from actually freeing
+// disk on NFS (gh #76 + DeleteRecords-stranded-active follow-up).
 func openActiveSegment(meta segmentMeta) (*activeSegment, error) {
-	lf, err := os.OpenFile(meta.logPath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
+	logFi, err := os.Stat(meta.logPath)
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	idxf, err := os.OpenFile(meta.indexPath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		_ = lf.Close()
+	var logSize int64
+	if logFi != nil {
+		logSize = logFi.Size()
+	}
+	idxFi, err := os.Stat(meta.indexPath)
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-
-	logSize, err := lf.Seek(0, io.SeekEnd)
-	if err != nil {
-		_ = lf.Close()
-		_ = idxf.Close()
-		return nil, err
-	}
-	idxSize, err := idxf.Seek(0, io.SeekEnd)
-	if err != nil {
-		_ = lf.Close()
-		_ = idxf.Close()
-		return nil, err
+	var idxSize int64
+	if idxFi != nil {
+		idxSize = idxFi.Size()
 	}
 
 	return &activeSegment{
 		baseOffset:        meta.baseOffset,
-		logFile:           lf,
-		indexFile:         idxf,
+		logFile:           nil,
+		indexFile:         nil,
 		logPath:           meta.logPath,
 		indexPath:         meta.indexPath,
 		logSize:           logSize,
 		lastIndexedLogPos: idxSize / 8 * 4096, // rough estimate; exact value not critical for appends
 	}, nil
+}
+
+// openHandles materialises the log+index file descriptors. Idempotent —
+// safe to call when the handles are already open. Called from
+// takeoverInternal when this broker becomes leader.
+func (s *activeSegment) openHandles() error {
+	if s.logFile != nil && s.indexFile != nil {
+		return nil
+	}
+	if s.logFile == nil {
+		lf, err := os.OpenFile(s.logPath, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			return err
+		}
+		s.logFile = lf
+	}
+	if s.indexFile == nil {
+		idxf, err := os.OpenFile(s.indexPath, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			_ = s.logFile.Close()
+			s.logFile = nil
+			return err
+		}
+		s.indexFile = idxf
+	}
+	// Refresh logSize / lastIndexedLogPos from disk in case the file
+	// changed between meta-only open and now (e.g., a stale leader
+	// wrote past our cached size before we took over).
+	if fi, err := s.logFile.Stat(); err == nil {
+		s.logSize = fi.Size()
+	}
+	if fi, err := s.indexFile.Stat(); err == nil {
+		s.lastIndexedLogPos = fi.Size() / 8 * 4096
+	}
+	return nil
+}
+
+// closeHandles releases the log+index file descriptors. Idempotent.
+// Called from Relinquish when this broker loses leadership of the
+// partition.
+func (s *activeSegment) closeHandles() error {
+	var lerr, ierr error
+	if s.logFile != nil {
+		lerr = s.logFile.Close()
+		s.logFile = nil
+	}
+	if s.indexFile != nil {
+		ierr = s.indexFile.Close()
+		s.indexFile = nil
+	}
+	if lerr != nil {
+		return lerr
+	}
+	return ierr
 }
 
 // openActiveSegmentFromDisk opens an existing segment and scans it to
@@ -142,6 +190,12 @@ func openActiveSegment(meta segmentMeta) (*activeSegment, error) {
 func openActiveSegmentFromDisk(meta segmentMeta) (*activeSegment, int64, error) {
 	seg, err := openActiveSegment(meta)
 	if err != nil {
+		return nil, 0, err
+	}
+	// Cold path needs the file handle to scan. openActiveSegment is
+	// meta-only by default; open handles here. (Followers go through
+	// openActiveSegment + manifest fast path and never hit this scan.)
+	if err := seg.openHandles(); err != nil {
 		return nil, 0, err
 	}
 	hwm, err := scanHighWatermark(seg.logFile, meta.baseOffset)
