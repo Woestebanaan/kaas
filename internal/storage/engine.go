@@ -740,6 +740,31 @@ func (e *DiskStorageEngine) DeleteRecords(topic string, partition int32, targetO
 		ps.segments = ps.segments[1:]
 	}
 
+	// Reclaim the active segment too when the entire partition has
+	// been purged (logStart caught up to HWM). Otherwise a "purge all"
+	// from Kafbat leaves up to SegmentBytes of physical bytes on disk
+	// per partition — invisible to consumers but counting against the
+	// PVC. We force-roll the active synchronously, finalise it, and
+	// drop the now-orphaned files. Skipped if the active is empty
+	// (no bytes to reclaim) or if there are still visible records in
+	// the active (partial purge).
+	if ps.active != nil && ps.active.logSize > 0 && ps.logStart >= ps.highWater {
+		oldLogPath := ps.active.logPath
+		oldIndexPath := ps.active.indexPath
+		oldActive := ps.active
+		newSeg, err := oldActive.rollFast(ps.dir, ps.highWater, ps.epoch)
+		if err == nil {
+			ps.active = newSeg
+			// finalize synchronously so file handles are closed
+			// before we unlink (NFS silly-rename otherwise leaves
+			// .nfsXXXX files dangling).
+			_ = oldActive.finalizeAfterRoll()
+			_ = os.Remove(oldLogPath)
+			_ = os.Remove(oldIndexPath)
+			_ = os.Remove(strings.TrimSuffix(oldLogPath, ".log") + ".timeindex")
+		}
+	}
+
 	// Persist the manifest so a restart picks up the new logStart
 	// without rediscovering already-deleted segments.
 	if err := ps.persistManifestLocked(); err != nil {

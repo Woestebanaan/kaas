@@ -128,6 +128,75 @@ func TestDeleteRecords_HighWatermarkSentinel(t *testing.T) {
 	}
 }
 
+// TestDeleteRecords_CompletePurgeReclaimsActive guards the disk-
+// reclamation invariant: a "purge all" (offset=-1, logStart catches
+// up to HWM) must drop the bytes physically — not just hide them.
+// Before this fix, Kafbat's "Purge messages" left up to SegmentBytes
+// on disk per partition: invisible to consumers but still counted
+// against the PVC. We force-roll the active segment and unlink its
+// files when the purge covers the entire partition.
+func TestDeleteRecords_CompletePurgeReclaimsActive(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.FlushIntervalMessages = 1
+
+	e, err := NewDiskStorageEngine(dir, &neverLeaderLeases{}, cfg)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.CreatePartition("t", 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := e.TakeOver(context.Background(), "t", 0, 1); err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+
+	// Append a few batches with non-trivial payloads so the active
+	// segment actually consumes bytes on disk.
+	for i := 0; i < 10; i++ {
+		batch := &recordbatch.RecordBatch{
+			BaseOffset: 0, LastOffsetDelta: 0,
+			ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
+			Records: []recordbatch.Record{{
+				OffsetDelta: 0,
+				Value:       make([]byte, 4096),
+			}},
+		}
+		if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	sizeBefore := e.PartitionSize("t", 0)
+	if sizeBefore < 40*1024 {
+		t.Fatalf("PartitionSize before purge = %d, expected ≥ ~40 KiB of payload", sizeBefore)
+	}
+
+	if _, err := e.DeleteRecords("t", 0, -1); err != nil {
+		t.Fatalf("DeleteRecords(-1): %v", err)
+	}
+
+	sizeAfter := e.PartitionSize("t", 0)
+	// Active segment got rolled and the old one unlinked; only the
+	// fresh empty segment remains. Allow a small floor for the empty
+	// segment's metadata files (manifest, empty .log/.index).
+	if sizeAfter > 8*1024 {
+		t.Errorf("PartitionSize after complete purge = %d, expected ~empty (≤ 8 KiB); active segment was not reclaimed", sizeAfter)
+	}
+	t.Logf("PartitionSize: %d → %d after purge", sizeBefore, sizeAfter)
+
+	// Topic must still be writable: post-purge HWM resets perception
+	// — new appends start at the new active's baseOffset.
+	batch := &recordbatch.RecordBatch{
+		BaseOffset: 0, LastOffsetDelta: 0,
+		ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
+		Records: []recordbatch.Record{{OffsetDelta: 0, Value: []byte("post-purge")}},
+	}
+	if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+		t.Errorf("append after purge: %v", err)
+	}
+}
+
 // TestDeleteRecords_OutOfRange guards the error path for offsets past
 // HWM — an admin tool that asks to truncate beyond what exists must
 // see ErrOffsetOutOfRange, not silent acceptance.
