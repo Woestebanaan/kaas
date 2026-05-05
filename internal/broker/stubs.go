@@ -155,6 +155,13 @@ func (m *MemoryStorage) TakeOver(_ context.Context, topic string, partition int3
 
 func (m *MemoryStorage) Relinquish(_ string, _ int32) error { return nil }
 
+func (m *MemoryStorage) DeleteRecords(_ string, _ int32, target int64) (int64, error) {
+	if target < 0 {
+		return 0, nil
+	}
+	return target, nil
+}
+
 // ---- LocalLeaseManager ---- //
 
 // LocalLeaseManager is a single-broker stub: this node is always the leader.

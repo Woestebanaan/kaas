@@ -160,6 +160,11 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// raise back to v7+.
 	d.Register(19, 0, 6, handlers.NewCreateTopicsHandler(b.topics))
 	d.Register(20, 0, 6, handlers.NewDeleteTopicsHandler(b.topics))
+	deleteRecordsHandler := handlers.NewDeleteRecordsHandler(b.store)
+	if b.brokerCoord != nil {
+		deleteRecordsHandler = deleteRecordsHandler.WithCoordinator(b.brokerCoord)
+	}
+	d.Register(21, 0, 2, deleteRecordsHandler)
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())

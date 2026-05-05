@@ -57,6 +57,9 @@ func (r *recordingStorage) CreatePartition(_ string, _ int32) error         { re
 func (r *recordingStorage) DeletePartition(_ string, _ int32) error         { return nil }
 func (r *recordingStorage) PartitionSize(_ string, _ int32) int64           { return 0 }
 func (r *recordingStorage) DataDir() string                                 { return "/tmp/recording" }
+func (r *recordingStorage) DeleteRecords(_ string, _ int32, _ int64) (int64, error) {
+	return 0, nil
+}
 
 var _ storage.StorageEngine = (*recordingStorage)(nil)
 

@@ -19,7 +19,8 @@ import (
 
 var (
 	ErrNotLeader     = errors.New("storage: not leader for partition")
-	ErrEpochMismatch = errors.New("storage: epoch behind current partition leader")
+	ErrEpochMismatch    = errors.New("storage: epoch behind current partition leader")
+	ErrOffsetOutOfRange = errors.New("storage: offset out of range")
 )
 
 // StorageEngine is the interface for reading and writing topic partition data.
@@ -34,6 +35,12 @@ type StorageEngine interface {
 	Read(ctx context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]byte, error)
 	HighWatermark(topic string, partition int32) (int64, error)
 	LogStartOffset(topic string, partition int32) (int64, error)
+	// DeleteRecords advances the partition's log start offset to (at
+	// least) targetOffset, making earlier records invisible to Fetch.
+	// targetOffset == -1 is a sentinel for "current high watermark"
+	// (purge all). Returns the new log start offset, or
+	// ErrOffsetOutOfRange if targetOffset is past HWM.
+	DeleteRecords(topic string, partition int32, targetOffset int64) (newLogStart int64, err error)
 	CreatePartition(topic string, partition int32) error
 	DeletePartition(topic string, partition int32) error
 	// PartitionSize returns the total bytes occupied by the partition's segment
@@ -675,6 +682,70 @@ func (e *DiskStorageEngine) Read(_ context.Context, topic string, partition int3
 		out = append(out, batch...)
 	}
 	return out, nil
+}
+
+// DeleteRecords advances the partition's log start offset to (at least)
+// targetOffset. -1 is a sentinel for "current high watermark" (purge
+// everything currently visible). Closed segments whose entire range
+// falls below the new logStart are removed from disk synchronously;
+// the active segment is left alone (Read filters by logStart).
+//
+// Returns the new low-watermark (== logStart) or ErrOffsetOutOfRange
+// when targetOffset is past HWM. Targets at or below the current
+// logStart are a no-op (the LowWatermark in the response is just the
+// current logStart, no error).
+func (e *DiskStorageEngine) DeleteRecords(topic string, partition int32, targetOffset int64) (int64, error) {
+	ps, ok := e.getPartition(topic, partition)
+	if !ok {
+		return 0, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	target := targetOffset
+	if target == -1 {
+		target = ps.highWater
+	}
+	if target > ps.highWater {
+		return ps.logStart, ErrOffsetOutOfRange
+	}
+	if target <= ps.logStart {
+		return ps.logStart, nil
+	}
+
+	ps.logStart = target
+
+	// Drop closed segments entirely below the new logStart. A segment
+	// is "entirely below" when the next segment's baseOffset (or, for
+	// the last closed one, the active segment's baseOffset) is <=
+	// logStart. We can't use ps.deleteSegment here because it
+	// overwrites ps.logStart with the next segment's baseOffset —
+	// fine for the cleaner's natural-retention path, wrong for
+	// DeleteRecords where logStart can land mid-segment.
+	for len(ps.segments) > 0 {
+		first := ps.segments[0]
+		var nextBase int64
+		if len(ps.segments) > 1 {
+			nextBase = ps.segments[1].baseOffset
+		} else {
+			nextBase = ps.active.baseOffset
+		}
+		if nextBase > ps.logStart {
+			break
+		}
+		_ = os.Remove(first.logPath)
+		_ = os.Remove(first.indexPath)
+		_ = os.Remove(strings.TrimSuffix(first.logPath, ".log") + ".timeindex")
+		ps.segments = ps.segments[1:]
+	}
+
+	// Persist the manifest so a restart picks up the new logStart
+	// without rediscovering already-deleted segments.
+	if err := ps.persistManifestLocked(); err != nil {
+		return ps.logStart, fmt.Errorf("persist manifest: %w", err)
+	}
+	return ps.logStart, nil
 }
 
 func (e *DiskStorageEngine) HighWatermark(topic string, partition int32) (int64, error) {
