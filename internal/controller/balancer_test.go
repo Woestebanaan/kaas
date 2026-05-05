@@ -73,6 +73,50 @@ func TestBalance_StableAcrossRecomputeWithSameInputs(t *testing.T) {
 	}
 }
 
+// TestBalance_BrokerJoinRedistributes guards gh #78: when a broker
+// joins a cluster that previously had a single-broker assignment
+// (e.g. only one broker was alive when the controller first
+// recomputed), subsequent recomputes with the larger alive set must
+// move some partitions onto the newcomers. Pre-fix the stability
+// rule kept everything on the original broker forever.
+func TestBalance_BrokerJoinRedistributes(t *testing.T) {
+	topics := []TopicSpec{{Name: "events", PartitionCount: 9}}
+
+	// First recompute with only "a" alive — every partition lands on a.
+	prev := &kafkaapi.Assignment{Partitions: Balance(nil, []string{"a"}, topics)}
+	for _, p := range prev.Partitions {
+		if p.Broker != "a" {
+			t.Fatalf("setup: expected single-broker assignment to land on a, got %q", p.Broker)
+		}
+	}
+
+	// b and c join. Recompute. We expect a meaningful redistribution —
+	// pure rendezvous would put roughly a third on each broker.
+	out := Balance(prev, []string{"a", "b", "c"}, topics)
+	counts := map[string]int{}
+	for _, p := range out {
+		counts[p.Broker]++
+	}
+	if counts["b"] == 0 || counts["c"] == 0 {
+		t.Errorf("brokers b and c got no partitions after join: %v (gh #78)", counts)
+	}
+	// And the partitions that DID move should have an incremented epoch.
+	prevByKey := map[string]kafkaapi.PartitionAssignment{}
+	for _, p := range prev.Partitions {
+		prevByKey[p.Topic+"/"+string(rune(p.Partition))] = p
+	}
+	for _, p := range out {
+		if p.Broker == "a" {
+			continue
+		}
+		old := prevByKey[p.Topic+"/"+string(rune(p.Partition))]
+		if p.Epoch <= old.Epoch {
+			t.Errorf("%s/%d moved from %s to %s but epoch did not bump (%d -> %d)",
+				p.Topic, p.Partition, old.Broker, p.Broker, old.Epoch, p.Epoch)
+		}
+	}
+}
+
 func TestBalance_BrokerDeathRebalancesOnlyAffectedPartitions(t *testing.T) {
 	brokers := []string{"a", "b", "c"}
 	topics := []TopicSpec{{Name: "events", PartitionCount: 9}}

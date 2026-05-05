@@ -73,14 +73,18 @@ func Balance(
 		for partition := int32(0); partition < ts.PartitionCount; partition++ {
 			key := partitionKey(ts.Name, partition)
 			pa, hadPrev := prevMap[key]
+			broker := rendezvousPick(ts.Name, partition, alive)
 			if hadPrev {
-				if _, ok := aliveSet[pa.Broker]; ok {
-					// Stable: keep existing assignment + epoch.
+				if _, ok := aliveSet[pa.Broker]; ok && pa.Broker == broker {
+					// Stable: prior owner is still alive AND rendezvous
+					// would re-pick the same broker. Keep epoch unchanged.
+					// Without the rendezvous-equality guard we'd freeze
+					// a transient single-broker assignment forever once
+					// the cluster grew (gh #78).
 					out = append(out, pa)
 					continue
 				}
 			}
-			broker := rendezvousPick(ts.Name, partition, alive)
 			epoch := uint32(1)
 			if hadPrev {
 				epoch = pa.Epoch + 1 // bump on reassignment
