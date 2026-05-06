@@ -96,6 +96,35 @@ func (s *OffsetStore) Fetch(groupID string, specs []FetchSpec) map[string]int64 
 	return result
 }
 
+// HasGroup reports whether the in-memory cache has any offsets
+// recorded for groupID. Used by Manager.DeleteGroups to detect a
+// "group exists on disk but in-memory state is empty" case
+// (typical for a coordinator that just took over the group and
+// has Loaded the offsets but not yet seen a JoinGroup). Read-only;
+// safe to call from the coordinator hot path.
+func (s *OffsetStore) HasGroup(groupID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.cache[groupID]
+	return ok
+}
+
+// Delete removes a group's offsets from cache and from disk. Used
+// by Manager.DeleteGroups (gh #89). Idempotent: deleting an
+// unknown group is a no-op (returns nil) so a partial-delete retry
+// from the AdminClient doesn't surface spurious errors.
+func (s *OffsetStore) Delete(groupID string) error {
+	s.mu.Lock()
+	delete(s.cache, groupID)
+	s.mu.Unlock()
+
+	path := filepath.Join(s.dir(), groupID+".json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // Load reads a group's offsets from disk into the in-memory cache.
 // Called when this broker becomes coordinator for the group.
 func (s *OffsetStore) Load(groupID string) error {

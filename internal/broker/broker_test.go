@@ -9,6 +9,28 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 )
 
+// TestDeleteGroupsAdvertisedToClients guards gh #89: the
+// AdminClient checks ApiVersions for key 42 before issuing a
+// DeleteGroups call. If we ever stop registering this handler
+// the AdminClient surfaces UnsupportedVersionException without
+// even attempting the request — which is what the original gh #89
+// reproducer hit before this change.
+func TestDeleteGroupsAdvertisedToClients(t *testing.T) {
+	cfg := Config{BrokerID: 0, Host: "localhost", Port: 9092, ClusterID: "test"}
+	b := New(cfg, NewMemoryStorage(), NewLocalLeaseManager(), NewAllowAllAuthEngine())
+	d := protocol.NewDispatcher()
+	b.RegisterHandlers(d)
+
+	got, ok := d.SupportedVersions()[42]
+	if !ok {
+		t.Fatal("DeleteGroups (key 42) not registered with the dispatcher")
+	}
+	want := [2]int16{0, 2}
+	if got != want {
+		t.Fatalf("DeleteGroups version range = %v, want %v (cap at v2 until member-level delete is wired)", got, want)
+	}
+}
+
 // TestInitProducerIdAdvertisedToClients guards gh #12 stage A:
 // when ApiVersions is built from the dispatcher's SupportedVersions
 // map, key 22 must be in the list with [0, 4]. This is the contract

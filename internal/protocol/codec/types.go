@@ -40,6 +40,8 @@ const (
 	ErrDuplicateSequenceNumber     ErrorCode = 46
 	ErrInvalidProducerEpoch        ErrorCode = 47
 	ErrTransactionalIdAuthFailed   ErrorCode = 53
+	ErrNonEmptyGroup               ErrorCode = 67
+	ErrGroupIDNotFound             ErrorCode = 69
 	ErrCoordinatorLoadInProgress   ErrorCode = 14
 )
 

@@ -169,6 +169,11 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(14, 0, 5, handlers.NewSyncGroupHandler(b.coord))
 	d.Register(15, 0, 5, handlers.NewDescribeGroupsHandler(b.coord))
 	d.Register(16, 0, 4, handlers.NewListGroupsHandler(b.coord))
+	// DeleteGroups (gh #89): supports kafka-consumer-groups.sh --delete
+	// and AdminClient.deleteConsumerGroups(). v3+ adds member-level
+	// deletion (per-member instead of per-group); skafka caps at v2
+	// until that path is wired.
+	d.Register(42, 0, 2, handlers.NewDeleteGroupsHandler(b.coord, b.auth))
 	d.Register(17, 0, 1, handlers.NewSaslHandshakeHandler())
 	// CreateTopics is capped at v6: v7 added the topic_id UUID
 	// (KIP-516) to CreatableTopicResult, which our encoder doesn't

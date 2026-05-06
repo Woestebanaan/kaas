@@ -158,6 +158,7 @@ func flexibleRequestHeader(apiKey, apiVersion int16) bool {
 		20: 4,  // DeleteTopics
 		21: 2,  // DeleteRecords
 		22: 2,  // InitProducerId
+		42: 2,  // DeleteGroups
 		29: 2,  // DescribeAcls
 		30: 2,  // CreateAcls
 		31: 2,  // DeleteAcls

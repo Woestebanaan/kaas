@@ -279,6 +279,156 @@ func TestOffsetCommitFetch(t *testing.T) {
 	}
 }
 
+// TestDeleteGroupsEmptySucceeds: an empty group (no active members,
+// just committed offsets from a prior session) is the AdminClient's
+// happy path. The script audit's gh #89 reproducer follows this
+// exact flow: consume into a new group, all members close, then
+// admin-deletes it.
+func TestDeleteGroupsEmptySucceeds(t *testing.T) {
+	dir := t.TempDir()
+	offsets := coordinator.NewOffsetStore(dir)
+	mgr := coordinator.NewManager(context.Background(), &alwaysGroupSource{brokerID: "test"},
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+		offsets)
+	const groupID = "del-empty"
+
+	// Bring the group to Empty by joining + leaving cleanly.
+	r := mgr.JoinGroup(fastJoin(groupID, "consumer"), "c1")
+	if r.ErrorCode != 0 {
+		t.Fatalf("Join: %d", r.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: r.GenerationID, MemberID: r.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: r.MemberID, Assignment: []byte("p0")}},
+	})
+	// Commit an offset so we can also assert it's deleted.
+	mgr.OffsetCommit(&api.OffsetCommitRequest{
+		GroupID: groupID, MemberID: r.MemberID, GenerationID: r.GenerationID,
+		Topics: []api.OffsetCommitTopic{{Name: "t",
+			Partitions: []api.OffsetCommitPartition{{PartitionIndex: 0, CommittedOffset: 100}},
+		}},
+	})
+	if leave := mgr.LeaveGroup(&api.LeaveGroupRequest{GroupID: groupID, MemberID: r.MemberID}); leave.ErrorCode != 0 {
+		t.Fatalf("Leave: %d", leave.ErrorCode)
+	}
+
+	resp := mgr.DeleteGroups(&api.DeleteGroupsRequest{GroupNames: []string{groupID}})
+	if len(resp.Results) != 1 || resp.Results[0].ErrorCode != 0 {
+		t.Errorf("Empty-group delete results=%+v, want errCode=0", resp.Results)
+	}
+
+	// Offset file must be gone — a fresh OffsetFetch returns -1.
+	fetched := mgr.OffsetFetch(&api.OffsetFetchRequest{
+		GroupID: groupID,
+		Topics:  []api.OffsetFetchTopic{{Name: "t", PartitionIndexes: []int32{0}}},
+	})
+	if got := fetched.Topics[0].Partitions[0].CommittedOffset; got != -1 {
+		t.Errorf("post-delete OffsetFetch=%d, want -1 (offset file should have been removed)", got)
+	}
+}
+
+// TestDeleteGroupsRejectsNonEmpty: a group with active members
+// must return NON_EMPTY_GROUP (67) — Kafka's strict semantics.
+// Without this guard, an admin-delete during normal traffic would
+// silently drop offsets out from under live consumers.
+func TestDeleteGroupsRejectsNonEmpty(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "del-busy"
+
+	r := mgr.JoinGroup(fastJoin(groupID, "consumer"), "c1")
+	if r.ErrorCode != 0 {
+		t.Fatalf("Join: %d", r.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: r.GenerationID, MemberID: r.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: r.MemberID, Assignment: []byte("p0")}},
+	})
+	// State is Stable (not Empty/Dead) — delete must reject.
+
+	resp := mgr.DeleteGroups(&api.DeleteGroupsRequest{GroupNames: []string{groupID}})
+	if len(resp.Results) != 1 {
+		t.Fatalf("results=%+v", resp.Results)
+	}
+	if resp.Results[0].ErrorCode != 67 {
+		t.Errorf("active-group delete errCode=%d, want 67 (NON_EMPTY_GROUP)", resp.Results[0].ErrorCode)
+	}
+}
+
+// TestDeleteGroupsUnknownGroupReturns69 covers the AdminClient's
+// "delete a group that never existed" case — typical when a script
+// retries cleanup. Returns 69 (GROUP_ID_NOT_FOUND); the AdminClient
+// surfaces this as GroupIdNotFoundException.
+func TestDeleteGroupsUnknownGroupReturns69(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	resp := mgr.DeleteGroups(&api.DeleteGroupsRequest{GroupNames: []string{"never-existed"}})
+	if len(resp.Results) != 1 || resp.Results[0].ErrorCode != 69 {
+		t.Errorf("unknown group results=%+v, want errCode=69", resp.Results)
+	}
+}
+
+// TestDeleteGroupsBatchHandlesPerGroup verifies one-bad-doesn't-
+// poison-the-others: a batch delete with mixed Empty / Stable /
+// Unknown groups returns per-group results with the right error
+// for each, not a single all-or-nothing failure.
+func TestDeleteGroupsBatchHandlesPerGroup(t *testing.T) {
+	dir := t.TempDir()
+	offsets := coordinator.NewOffsetStore(dir)
+	mgr := coordinator.NewManager(context.Background(), &alwaysGroupSource{brokerID: "test"},
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+		offsets)
+
+	// Empty group "a" — we just commit an offset and leave.
+	r := mgr.JoinGroup(fastJoin("a", "consumer"), "c1")
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: "a", GenerationID: r.GenerationID, MemberID: r.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: r.MemberID, Assignment: []byte("p0")}},
+	})
+	mgr.LeaveGroup(&api.LeaveGroupRequest{GroupID: "a", MemberID: r.MemberID})
+
+	// Stable group "b" with an active member.
+	r2 := mgr.JoinGroup(fastJoin("b", "consumer"), "c2")
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: "b", GenerationID: r2.GenerationID, MemberID: r2.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: r2.MemberID, Assignment: []byte("p0")}},
+	})
+
+	resp := mgr.DeleteGroups(&api.DeleteGroupsRequest{GroupNames: []string{"a", "b", "c"}})
+	if len(resp.Results) != 3 {
+		t.Fatalf("batch result count=%d, want 3 (one per group)", len(resp.Results))
+	}
+	want := map[string]int16{"a": 0, "b": 67, "c": 69}
+	for _, r := range resp.Results {
+		if r.ErrorCode != want[r.GroupID] {
+			t.Errorf("%s: errCode=%d, want %d", r.GroupID, r.ErrorCode, want[r.GroupID])
+		}
+	}
+}
+
+// TestDeleteGroupsNotCoordinatorReturns16 covers the multi-broker
+// case the script audit will hit on a 3-broker cluster: the
+// AdminClient sends DeleteGroups to whichever broker it thinks is
+// coordinator; if that broker has been reassigned, return 16
+// (NOT_COORDINATOR) so the client retries FindCoordinator.
+func TestDeleteGroupsNotCoordinatorReturns16(t *testing.T) {
+	// notCoordinator says "no" to OwnsGroup for everything.
+	src := &neverGroupSource{}
+	mgr := coordinator.NewManager(context.Background(), src,
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+		coordinator.NewOffsetStore(t.TempDir()))
+
+	resp := mgr.DeleteGroups(&api.DeleteGroupsRequest{GroupNames: []string{"any"}})
+	if len(resp.Results) != 1 || resp.Results[0].ErrorCode != 16 {
+		t.Errorf("non-coordinator results=%+v, want errCode=16", resp.Results)
+	}
+}
+
+// neverGroupSource is the inverse of alwaysGroupSource — a broker
+// that owns NO groups, used to exercise the NOT_COORDINATOR path.
+type neverGroupSource struct{}
+
+func (*neverGroupSource) OwnsGroup(_ string) bool                      { return false }
+func (*neverGroupSource) GroupCoordinator(_ string) (string, bool)     { return "", false }
+
 // TestConsumerCleanShutdownPersistsOffsets is the broker-side analogue
 // of what kafka-verifiable-consumer.sh exercises end-to-end (gh #88):
 // after consuming N records the script's consumer commits offsets,

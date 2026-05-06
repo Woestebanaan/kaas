@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 
+	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
@@ -289,5 +290,65 @@ func (h *ListGroupsHandler) Handle(_ *connstate.ConnState, version int16, body [
 
 	w := codec.NewWriter()
 	api.EncodeListGroupsResponse(w, resp, version)
+	return w.Bytes(), nil
+}
+
+// ---- DeleteGroups (gh #89) ----
+
+type DeleteGroupsHandler struct {
+	coord *coordinator.Manager
+	auth  auth.AuthEngine
+}
+
+func NewDeleteGroupsHandler(coord *coordinator.Manager, authEng auth.AuthEngine) *DeleteGroupsHandler {
+	return &DeleteGroupsHandler{coord: coord, auth: authEng}
+}
+
+func (h *DeleteGroupsHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	r := codec.NewReader(body)
+	req, err := api.DecodeDeleteGroupsRequest(r, version)
+	if err != nil {
+		return nil, fmt.Errorf("delete groups decode: %w", err)
+	}
+
+	resp := &api.DeleteGroupsResponse{}
+
+	// Per-group ACL gate. Producers/consumers normally hold Read on a
+	// group; deleting requires Delete. AdminClient.deleteConsumerGroups
+	// is the typical caller and runs under an operator principal.
+	if h.auth != nil {
+		principal := principalFrom(conn)
+		var allowed []string
+		for _, gid := range req.GroupNames {
+			if !h.auth.Authorize(principal, auth.Resource{Type: "group", Name: gid, PatternType: "literal"}, auth.OpDelete) {
+				resp.Results = append(resp.Results, api.DeleteGroupsResult{
+					GroupID:   gid,
+					ErrorCode: int16(codec.ErrGroupAuthorizationFailed),
+				})
+				continue
+			}
+			allowed = append(allowed, gid)
+		}
+		// Replace request groups with the allowed-only subset; the
+		// coordinator only sees what passed the ACL check.
+		req.GroupNames = allowed
+	}
+
+	if h.coord != nil && len(req.GroupNames) > 0 {
+		coordResp := h.coord.DeleteGroups(req)
+		resp.Results = append(resp.Results, coordResp.Results...)
+	} else if h.coord == nil {
+		// No coordinator wired (e.g. local-dev / pre-init). All
+		// groups get COORDINATOR_NOT_AVAILABLE so the client retries.
+		for _, gid := range req.GroupNames {
+			resp.Results = append(resp.Results, api.DeleteGroupsResult{
+				GroupID:   gid,
+				ErrorCode: int16(codec.ErrCoordinatorNotAvailable),
+			})
+		}
+	}
+
+	w := codec.NewWriter()
+	api.EncodeDeleteGroupsResponse(w, resp, version)
 	return w.Bytes(), nil
 }

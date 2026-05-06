@@ -306,6 +306,86 @@ func (m *Manager) OffsetFetch(req *api.OffsetFetchRequest) *api.OffsetFetchRespo
 	return resp
 }
 
+// DeleteGroups removes the listed groups' coordinator-side state
+// and committed offsets. Per the Kafka protocol contract used by
+// AdminClient.deleteConsumerGroups() and kafka-consumer-groups.sh
+// --delete (gh #89):
+//
+//   - NOT_COORDINATOR (16): this broker is not the assigned
+//     coordinator for the group. Client uses FindCoordinator and
+//     retries against the right broker.
+//   - GROUP_ID_NOT_FOUND (69): group is unknown. Returned for a
+//     groupID this broker is responsible for but has no record of
+//     (no in-memory state, no offsets file on disk).
+//   - NON_EMPTY_GROUP (67): group has active members or pending
+//     state. Per Kafka semantics only Empty / Dead groups can be
+//     deleted; Stable / PreparingRebalance / CompletingRebalance
+//     must rebalance away first.
+//   - 0 (success): in-memory state dropped, offsets file removed.
+func (m *Manager) DeleteGroups(req *api.DeleteGroupsRequest) *api.DeleteGroupsResponse {
+	resp := &api.DeleteGroupsResponse{}
+	for _, id := range req.GroupNames {
+		errCode := m.deleteGroup(id)
+		resp.Results = append(resp.Results, api.DeleteGroupsResult{
+			GroupID:   id,
+			ErrorCode: errCode,
+		})
+	}
+	return resp
+}
+
+// deleteGroup encapsulates the per-group delete decision so the
+// Manager-level loop stays a thin per-result aggregator. Returns
+// the wire error code (0 = success).
+func (m *Manager) deleteGroup(groupID string) int16 {
+	if !m.isCoordinator(groupID) {
+		return int16(codec.ErrNotCoordinator)
+	}
+
+	m.mu.Lock()
+	g, inMemory := m.groups[groupID]
+	m.mu.Unlock()
+
+	hasOffsets := func() bool {
+		// Load reads from disk into the cache; if the file is
+		// missing it's a no-op and the cache stays empty. We
+		// inspect the cache after Load.
+		_ = m.offsets.Load(groupID)
+		return m.offsets.HasGroup(groupID)
+	}
+
+	if !inMemory && !hasOffsets() {
+		return int16(codec.ErrGroupIDNotFound)
+	}
+
+	if inMemory {
+		snap := g.describe()
+		// Per Kafka semantics: only Empty / Dead groups are
+		// deletable. Anything mid-flight (Stable, *Rebalance) must
+		// drain first.
+		if snap.state != "Empty" && snap.state != "Dead" {
+			return int16(codec.ErrNonEmptyGroup)
+		}
+		// shutdown closes any pending join/sync waiters before we
+		// drop the map entry, so a concurrent Heartbeat sees
+		// stateDead instead of hanging.
+		m.mu.Lock()
+		g.shutdown()
+		delete(m.groups, groupID)
+		m.mu.Unlock()
+	}
+
+	if err := m.offsets.Delete(groupID); err != nil {
+		// File-system error: the broker's view of the group is
+		// already gone (in-memory dropped above), but offsets
+		// stayed. Surface UNKNOWN_SERVER_ERROR rather than 0 —
+		// the operator wants to see this rather than the next
+		// AdminClient call rediscovering "stale" offsets.
+		return int16(codec.ErrUnknownServerError)
+	}
+	return 0
+}
+
 func (m *Manager) DescribeGroups(req *api.DescribeGroupsRequest) *api.DescribeGroupsResponse {
 	resp := &api.DescribeGroupsResponse{}
 	for _, id := range req.Groups {
