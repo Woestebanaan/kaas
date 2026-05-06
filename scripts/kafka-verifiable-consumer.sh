@@ -20,8 +20,22 @@ echo ">> Scenario 1: consume 1000 records"
   --group-id "verif-cg-$$" --max-messages 1000 --reset-policy earliest \
   | tee "$TMP/out.json"
 
-count=$(grep -oE '"records_consumed":[0-9]+' "$TMP/out.json" \
-  | awk -F: '{s+=$2} END{print s+0}')
+# A clean run prints "shutdown_complete" — this is the consumer's
+# explicit "I finished and closed cleanly" signal.
+grep -q '"shutdown_complete"' "$TMP/out.json" \
+  || { echo "FAIL: consumer did not reach shutdown_complete" >&2; exit 1; }
+
+# Sum top-level "count" field of records_consumed events. The event
+# format is {"name":"records_consumed","count":N,"partitions":[{"count":...}]}
+# — the per-partition "count" is inside partitions[] AFTER the top-level
+# one, so this match-and-extract picks the right one. Single awk so a
+# missed match doesn't trip pipefail+set-e (the original bug).
+count=$(awk '
+  match($0, /"name":"records_consumed","count":[0-9]+/) {
+    n = substr($0, RSTART, RLENGTH); sub(/.*:/, "", n); s += n
+  }
+  END { print s+0 }
+' "$TMP/out.json")
 echo "records_consumed total: $count"
 [ "$count" -ge 1000 ] || { echo "FAIL: consumed $count < 1000" >&2; exit 1; }
 
