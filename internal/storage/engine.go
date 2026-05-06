@@ -286,7 +286,18 @@ func (ps *partitionState) stopCommitter() {
 
 // persistManifestLocked writes manifest.json from the partition's current
 // in-memory state. Caller must hold ps.mu.
+//
+// Stage B2 of gh #12 also persists producerStates to a sibling
+// producer-state.snapshot file so a restart / leader takeover
+// preserves the idempotent-producer dedupe window. Failure to
+// write the snapshot is best-effort: the manifest is still the
+// source of truth for HWM/logStart, and a missing snapshot just
+// means new idempotent producers start with a fresh window
+// (i.e. the stage-B1 behaviour).
 func (ps *partitionState) persistManifestLocked() error {
+	if len(ps.producerStates) > 0 {
+		_ = writeProducerSnapshot(ps.dir, ps.producerStates)
+	}
 	return writeManifest(ps.dir, &Manifest{
 		Epoch:          ps.epoch,
 		HighWatermark:  ps.highWater,
@@ -465,6 +476,15 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 		if manifest.LogStartOffset > ps.logStart {
 			ps.logStart = manifest.LogStartOffset
 		}
+	}
+
+	// Stage B2 of gh #12: restore the idempotent-producer dedupe
+	// window. Missing or unreadable snapshot is non-fatal — fall
+	// through to fresh state, which is the stage-B1 behaviour.
+	// snapshot file → producerStates: the next idempotent batch
+	// dedupes correctly across this restart.
+	if states, err := readProducerSnapshot(dir); err == nil && states != nil {
+		ps.producerStates = states
 	}
 
 	// First open under v3.3 storage: persist a manifest so subsequent opens
@@ -982,6 +1002,11 @@ func (e *DiskStorageEngine) Relinquish(topic string, partition int32) error {
 	if ps.active == nil {
 		return nil
 	}
+	// Stage B2 of gh #12: persist the producer-state snapshot on
+	// graceful handoff so the next leader picks up the dedupe
+	// window. Best-effort; segment-roll snapshots and the open-time
+	// write also cover this surface.
+	_ = ps.persistManifestLocked()
 	return ps.active.closeHandles()
 }
 
