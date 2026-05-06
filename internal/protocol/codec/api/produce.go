@@ -45,13 +45,12 @@ func DecodeProduceRequest(r *codec.Reader, version int16) (*ProduceRequest, erro
 
 	var err error
 	if version >= 3 {
-		var null bool
-		req.TransactionalID, null, err = nullableString(r, flexible)
+		// nullableString returns "" when the wire value is null, so the
+		// second bool is "is non-null" (named misleadingly across this
+		// codebase) — discard it and trust the empty-string convention.
+		req.TransactionalID, _, err = nullableString(r, flexible)
 		if err != nil {
 			return nil, err
-		}
-		if null {
-			req.TransactionalID = ""
 		}
 	}
 

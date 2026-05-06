@@ -290,17 +290,16 @@ func DecodeMetadataResponse(r *codec.Reader, version int16) (*MetadataResponse, 
 			return err
 		}
 		if version >= 1 {
-			var null bool
+			// Reader returns "" on null and the actual string otherwise,
+			// so discard the bool — historical handling of it was
+			// inverted (named "null" but actually "isNonNull").
 			if flexible {
-				b.Rack, null, err = r.ReadCompactNullableString()
+				b.Rack, _, err = r.ReadCompactNullableString()
 			} else {
-				b.Rack, null, err = r.ReadNullableString()
+				b.Rack, _, err = r.ReadNullableString()
 			}
 			if err != nil {
 				return err
-			}
-			if null {
-				b.Rack = ""
 			}
 		}
 		if flexible {
@@ -322,17 +321,13 @@ func DecodeMetadataResponse(r *codec.Reader, version int16) (*MetadataResponse, 
 	}
 
 	if version >= 2 {
-		var null bool
 		if flexible {
-			resp.ClusterID, null, err = r.ReadCompactNullableString()
+			resp.ClusterID, _, err = r.ReadCompactNullableString()
 		} else {
-			resp.ClusterID, null, err = r.ReadNullableString()
+			resp.ClusterID, _, err = r.ReadNullableString()
 		}
 		if err != nil {
 			return nil, err
-		}
-		if null {
-			resp.ClusterID = ""
 		}
 	}
 	if version >= 1 {
@@ -347,11 +342,7 @@ func DecodeMetadataResponse(r *codec.Reader, version int16) (*MetadataResponse, 
 			return err
 		}
 		if flexible && version >= 12 {
-			var null bool
-			t.Name, null, err = r.ReadCompactNullableString()
-			if null {
-				t.Name = ""
-			}
+			t.Name, _, err = r.ReadCompactNullableString()
 		} else if flexible {
 			t.Name, err = r.ReadCompactString()
 		} else {

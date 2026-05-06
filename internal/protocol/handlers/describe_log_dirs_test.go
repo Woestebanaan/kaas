@@ -141,6 +141,46 @@ func TestDescribeLogDirsExplicitSubsetReportsSize(t *testing.T) {
 	}
 }
 
+// TestDescribeLogDirsFilterIsolation guards gh #87: the Java
+// kafka-log-dirs --topic-list flag asks the broker to return only
+// the named topic. A regression where the filter is ignored would
+// leak unrelated partitions into the response and the script-side
+// "filter sanity" check (scripts/kafka-log-dirs.sh) would only
+// catch it post-hoc, after a noisy CI run.
+func TestDescribeLogDirsFilterIsolation(t *testing.T) {
+	h := NewDescribeLogDirsHandler(sizedStubStorage{size: 16}, twoTopicsSource{})
+
+	// Ask for "alpha" with all-partitions sentinel (empty inner array).
+	w := codec.NewWriter()
+	w.WriteArray(1, func() {
+		w.WriteString("alpha")
+		w.WriteArray(0, func() {}) // empty = all partitions of "alpha"
+	})
+	out, err := h.Handle(&connstate.ConnState{}, 1, w.Bytes())
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	resp := decodeLogDirsV1(t, out)
+
+	// "beta" must NOT appear in the response, even though it's a
+	// known topic — the explicit filter should be respected.
+	for _, top := range resp.Results[0].Topics {
+		if top.Name == "beta" {
+			t.Errorf("filter leaked unrelated topic %q (full topics=%+v)", top.Name, resp.Results[0].Topics)
+		}
+	}
+	// And alpha must come back with both its partitions.
+	var alpha *api.DescribeLogDirsResponseTopic
+	for i, top := range resp.Results[0].Topics {
+		if top.Name == "alpha" {
+			alpha = &resp.Results[0].Topics[i]
+		}
+	}
+	if alpha == nil || len(alpha.Partitions) != 2 {
+		t.Errorf("alpha missing or wrong partition count: %+v", alpha)
+	}
+}
+
 // Unknown topic in the request is silently dropped (Kafka behaviour: clients
 // see the topic absent, not an error code per topic).
 func TestDescribeLogDirsUnknownTopicDropped(t *testing.T) {

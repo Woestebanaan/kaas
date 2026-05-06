@@ -279,6 +279,82 @@ func TestOffsetCommitFetch(t *testing.T) {
 	}
 }
 
+// TestConsumerCleanShutdownPersistsOffsets is the broker-side analogue
+// of what kafka-verifiable-consumer.sh exercises end-to-end (gh #88):
+// after consuming N records the script's consumer commits offsets,
+// sends LeaveGroup, prints "shutdown_complete" and exits 0. None of
+// those steps individually is novel — TestOffsetCommitFetch and
+// TestLeaveGroupTriggersRebalance already pin the per-call success
+// codes — but the SEQUENCE matters: a regression where LeaveGroup
+// silently flushes uncommitted state, or where OffsetCommit ignores
+// commits sent during a generation that's about to rebalance, would
+// make the next consumer in the same group re-read records from
+// scratch (the verifiable-consumer's "consumed > expected" failure).
+//
+// Pattern: Join → Sync → OffsetCommit → LeaveGroup → fresh consumer
+// joins same group → OffsetFetch returns committed offsets, NOT -1.
+func TestConsumerCleanShutdownPersistsOffsets(t *testing.T) {
+	dir := t.TempDir()
+	offsets := coordinator.NewOffsetStore(dir)
+	mgr := coordinator.NewManager(context.Background(), &alwaysGroupSource{brokerID: "test"},
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+		offsets)
+	const groupID = "verifiable-cg"
+
+	join := mgr.JoinGroup(fastJoin(groupID, "consumer"), "verif-1")
+	if join.ErrorCode != 0 {
+		t.Fatalf("JoinGroup errCode=%d", join.ErrorCode)
+	}
+	sync := mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: join.MemberID, Assignment: []byte("p0")}},
+	})
+	if sync.ErrorCode != 0 {
+		t.Fatalf("SyncGroup errCode=%d", sync.ErrorCode)
+	}
+
+	// Consumer "consumed" 1000 records and is now committing the next
+	// fetch position (offset 1000) right before shutdown.
+	commit := mgr.OffsetCommit(&api.OffsetCommitRequest{
+		GroupID:      groupID,
+		MemberID:     join.MemberID,
+		GenerationID: join.GenerationID,
+		Topics: []api.OffsetCommitTopic{
+			{Name: "verif-topic", Partitions: []api.OffsetCommitPartition{
+				{PartitionIndex: 0, CommittedOffset: 1000},
+			}},
+		},
+	})
+	for _, top := range commit.Topics {
+		for _, p := range top.Partitions {
+			if p.ErrorCode != 0 {
+				t.Fatalf("OffsetCommit p%d errCode=%d (clean-shutdown path must not fail mid-generation)",
+					p.PartitionIndex, p.ErrorCode)
+			}
+		}
+	}
+
+	// Consumer's "shutdown_complete" trigger: LeaveGroup. This must not
+	// asynchronously discard the just-committed offset.
+	if leave := mgr.LeaveGroup(&api.LeaveGroupRequest{GroupID: groupID, MemberID: join.MemberID}); leave.ErrorCode != 0 {
+		t.Fatalf("LeaveGroup errCode=%d", leave.ErrorCode)
+	}
+
+	// A fresh consumer joins the same group — the verifiable-consumer's
+	// "second run reads only NEW records" expectation. OffsetFetch must
+	// see 1000, not -1 (no committed offset).
+	fetch := mgr.OffsetFetch(&api.OffsetFetchRequest{
+		GroupID: groupID,
+		Topics:  []api.OffsetFetchTopic{{Name: "verif-topic", PartitionIndexes: []int32{0}}},
+	})
+	if len(fetch.Topics) != 1 || len(fetch.Topics[0].Partitions) != 1 {
+		t.Fatalf("OffsetFetch shape: %+v", fetch.Topics)
+	}
+	if got := fetch.Topics[0].Partitions[0].CommittedOffset; got != 1000 {
+		t.Errorf("CommittedOffset after clean shutdown = %d, want 1000", got)
+	}
+}
+
 func TestLeaveGroupTriggersRebalance(t *testing.T) {
 	mgr := newTestCoordinator(t, "broker-0")
 	const groupID = "leave-group"

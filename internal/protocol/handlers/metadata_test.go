@@ -234,6 +234,69 @@ func TestMetadataHandlerNilConnState(t *testing.T) {
 	}
 }
 
+// TestMetadataHandlerEmitsClusterID guards gh #85: kafka-cluster.sh
+// (and the AdminClient's describeCluster) reads the ClusterID off the
+// Metadata v2+ response. If we ever stop threading the configured ID
+// through to the response, the Java tool prints "Cluster ID: " with a
+// trailing blank and existing infra (kafkactl, Kafbat) that keys
+// on cluster ID will silently lose its anchor.
+func TestMetadataHandlerEmitsClusterID(t *testing.T) {
+	src := stubBrokerSource{
+		self: BrokerEndpoint{NodeID: 0, Host: "skafka-0", Port: 9092},
+		all:  []BrokerEndpoint{{NodeID: 0, Host: "skafka-0", Port: 9092}},
+	}
+	h := NewMetadataHandlerWithSource(src, "skafka-test-cluster", stubTopics{}, stubLeaseManager{})
+
+	w := codec.NewWriter()
+	w.WriteArray(0, func() {}) // empty Topics array (non-flexible v2)
+	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerInternal}, 2, w.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := api.DecodeMetadataResponse(codec.NewReader(out), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ClusterID != "skafka-test-cluster" {
+		t.Errorf("ClusterID=%q, want %q", resp.ClusterID, "skafka-test-cluster")
+	}
+}
+
+// TestMetadataHandlerClusterIDFlexible guards the same gh #85 behaviour
+// on the modern flexible (v9+) wire format used by Java AdminClient and
+// franz-go: the cluster ID is written as a compact nullable string,
+// not the legacy nullable string. A regression that picks the wrong
+// encoder would deserialize as null/garbage on the client side.
+func TestMetadataHandlerClusterIDFlexible(t *testing.T) {
+	src := stubBrokerSource{
+		self: BrokerEndpoint{NodeID: 0, Host: "skafka-0", Port: 9092},
+		all:  []BrokerEndpoint{{NodeID: 0, Host: "skafka-0", Port: 9092}},
+	}
+	h := NewMetadataHandlerWithSource(src, "skafka-flex-cluster", stubTopics{}, stubLeaseManager{})
+
+	// v9 (flexible) request body: empty compact array of topics + empty
+	// auto-create / authorized-ops flags + empty tagged fields.
+	w := codec.NewWriter()
+	w.WriteCompactArray(0, func() {})
+	w.WriteInt8(0) // AllowAutoTopicCreation
+	// v9 has IncludeClusterAuthorizedOperations + IncludeTopicAuthorizedOperations
+	w.WriteInt8(0)
+	w.WriteInt8(0)
+	w.WriteEmptyTaggedFields()
+
+	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerInternal}, 9, w.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := api.DecodeMetadataResponse(codec.NewReader(out), 9)
+	if err != nil {
+		t.Fatalf("decode v9: %v", err)
+	}
+	if resp.ClusterID != "skafka-flex-cluster" {
+		t.Errorf("v9 ClusterID=%q, want %q", resp.ClusterID, "skafka-flex-cluster")
+	}
+}
+
 // decodeMetadata sends an empty Metadata v1 request through the handler and parses
 // the response body.
 func decodeMetadata(t *testing.T, h *MetadataHandler, conn *connstate.ConnState) *api.MetadataResponse {
