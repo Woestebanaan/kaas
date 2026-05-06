@@ -159,7 +159,16 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// Metadata v10 cap above. Real fix is to encode topic_id and
 	// raise back to v7+.
 	d.Register(19, 0, 6, handlers.NewCreateTopicsHandler(b.topics))
-	d.Register(20, 0, 6, handlers.NewDeleteTopicsHandler(b.topics))
+	// DeleteTopics capped at v5: v6+ changed `topic_names: [STRING]` to
+	// `topics: [DeleteTopicState]` (name COMPACT_NULLABLE_STRING +
+	// topic_id UUID — KRaft topic-id KIP-516). The codec still expects
+	// the v0–v5 flat name array; advertising v6 made franz-go's
+	// kmsg.DeleteTopicsRequest send the new struct shape and skafka
+	// errored with "unexpected null compact string". Capping at v5
+	// keeps name-based deletes working for kafka-topics.sh, kafbat-ui,
+	// and Java AdminClient. v6 topic-id support is a separate parity
+	// task.
+	d.Register(20, 0, 5, handlers.NewDeleteTopicsHandler(b.topics))
 	deleteRecordsHandler := handlers.NewDeleteRecordsHandler(b.store)
 	if b.brokerCoord != nil {
 		deleteRecordsHandler = deleteRecordsHandler.WithCoordinator(b.brokerCoord)

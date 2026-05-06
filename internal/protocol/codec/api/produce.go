@@ -199,3 +199,15 @@ func writeString(w *codec.Writer, s string, flexible bool) {
 		w.WriteString(s)
 	}
 }
+
+// writeNullableString writes a nullable string. Empty string serialises
+// as null (length sentinel), which is the convention used by Kafka
+// fields like ErrorMessage where absence-of-error == null.
+func writeNullableString(w *codec.Writer, s string, flexible bool) {
+	null := s == ""
+	if flexible {
+		w.WriteCompactNullableString(s, null)
+	} else {
+		w.WriteNullableString(s, null)
+	}
+}

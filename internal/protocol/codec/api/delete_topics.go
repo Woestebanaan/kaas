@@ -8,15 +8,18 @@ type DeleteTopicsRequest struct {
 	TimeoutMs  int32
 }
 
-// DeleteTopicsResponse (key 20, v0–v6).
+// DeleteTopicsResponse (key 20, v0–v5). v6 added topic_id and made
+// name nullable; not yet supported here, so the broker registers
+// version range 0–5.
 type DeleteTopicsResponse struct {
 	ThrottleTimeMs int32 // v1+
 	Responses      []DeletableTopicResult
 }
 
 type DeletableTopicResult struct {
-	Name      string
-	ErrorCode int16
+	Name         string
+	ErrorCode    int16
+	ErrorMessage string // v5+ (nullable; empty == null on the wire)
 }
 
 func DecodeDeleteTopicsRequest(r *codec.Reader, version int16) (*DeleteTopicsRequest, error) {
@@ -59,6 +62,12 @@ func EncodeDeleteTopicsResponse(w *codec.Writer, resp *DeleteTopicsResponse, ver
 		for _, r := range resp.Responses {
 			writeString(w, r.Name, flexible)
 			w.WriteInt16(r.ErrorCode)
+			// v5+ adds ErrorMessage as COMPACT_NULLABLE_STRING. Empty
+			// string on our side serialises as null, which is what
+			// the official spec says the absence of an error means.
+			if version >= 5 {
+				writeNullableString(w, r.ErrorMessage, flexible)
+			}
 			if flexible {
 				w.WriteEmptyTaggedFields()
 			}
