@@ -43,9 +43,15 @@ func (r *KafkaTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	var topic v1alpha1.KafkaTopic
 	err := r.Get(ctx, req.NamespacedName, &topic)
 	if apierrors.IsNotFound(err) {
-		// CR is gone. Best-effort: drop the topic dir on the PVC. If the
-		// operator was down during the delete, this branch never fires;
-		// the startup sweep (SweepTopics) catches that case.
+		// CR is gone. Best-effort: drop the topic dir on the PVC. We
+		// only have req.Name (metadata.name) — for the common case
+		// where metadata.name == Kafka name (RFC-1123-valid topic),
+		// this is the right path and cleanup succeeds. For synthetic-
+		// metadata-name CRs (gh #86 — Kafka name uses uppercase /
+		// underscores / etc) the real dir is at the Kafka name, which
+		// req.Name doesn't carry; RemoveAll(req.Name) no-ops on a
+		// non-existent dir and SweepTopics at the next operator
+		// startup catches the orphan via EffectiveTopicName lookups.
 		topicDir := filepath.Join(r.DataDir, req.Name)
 		if e := os.RemoveAll(topicDir); e != nil && !os.IsNotExist(e) {
 			return ctrl.Result{}, fmt.Errorf("remove topic dir: %w", e)
@@ -75,9 +81,18 @@ func (r *KafkaTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, r.Status().Update(ctx, &topic)
 	}
 
+	// Partition dir paths use the on-wire Kafka topic name, not the
+	// CR's metadata.name (gh #86 — admin-protocol topic creation
+	// synthesises a hash-derived metadata.name and stores the literal
+	// Kafka name in spec.topicName). EffectiveTopicName falls back to
+	// metadata.name when spec.topicName is unset, so old CRs and
+	// hand-written ones with valid names still resolve to the same
+	// path as before.
+	topicName := topic.EffectiveTopicName()
+
 	// Create partition directories (idempotent).
 	for p := int32(0); p < topic.Spec.Partitions; p++ {
-		dir := filepath.Join(r.DataDir, topic.Name, strconv.Itoa(int(p)))
+		dir := filepath.Join(r.DataDir, topicName, strconv.Itoa(int(p)))
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return ctrl.Result{}, fmt.Errorf("mkdir partition %d: %w", p, err)
 		}
@@ -87,7 +102,7 @@ func (r *KafkaTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// can pick up retentionBytes / retentionMs / segmentBytes etc. on next
 	// partition open. Currently only retentionBytes is enforced by the
 	// cleaner (gh #47); other fields are accepted but ignored.
-	if err := storage.WriteTopicConfig(filepath.Join(r.DataDir, topic.Name), &storage.TopicConfigFile{
+	if err := storage.WriteTopicConfig(filepath.Join(r.DataDir, topicName), &storage.TopicConfigFile{
 		RetentionMs:        topic.Spec.Config.RetentionMs,
 		RetentionBytes:     topic.Spec.Config.RetentionBytes,
 		SegmentBytes:       topic.Spec.Config.SegmentBytes,
@@ -120,7 +135,7 @@ func SweepTopics(ctx context.Context, c client.Client, namespace, dataDir string
 	}
 	keep := map[string]bool{clusterFilesDir: true}
 	for _, t := range topics.Items {
-		keep[t.Name] = true
+		keep[t.EffectiveTopicName()] = true
 	}
 
 	entries, err := os.ReadDir(dataDir)

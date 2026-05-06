@@ -2,7 +2,9 @@ package k8s
 
 import (
 	"context"
+	"crypto/sha1"
 	"fmt"
+	"regexp"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,6 +27,16 @@ import (
 // writes the in-memory TopicRegistry on the broker that received the
 // request and nothing else, which is fine for single-broker tests but
 // invisible to peers in multi-broker production.
+//
+// Naming bridge (gh #86): Kafka topic names allow uppercase, dots,
+// underscores and up to 249 characters; Kubernetes resource names
+// must follow RFC 1123. When the literal Kafka name is RFC-1123
+// valid, the CR uses it as both metadata.name and (implicitly via
+// EffectiveTopicName) the Kafka name — leaves spec.topicName unset
+// for human readability. When it isn't, the CR's metadata.name is
+// synthesised from a sha1 prefix and spec.topicName carries the
+// literal Kafka name. Operator + TopicWatcher resolve via
+// KafkaTopic.EffectiveTopicName().
 type TopicCRWriter struct {
 	client    client.Client
 	namespace string
@@ -41,12 +53,14 @@ func NewTopicCRWriter(c client.Client, namespace string) *TopicCRWriter {
 // in handlers.ErrTopicAlreadyExists so the handler can surface
 // TOPIC_ALREADY_EXISTS to the client.
 func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions int32) error {
+	metaName, topicName := nameForCR(name)
 	t := &v1alpha1.KafkaTopic{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      metaName,
 			Namespace: w.namespace,
 		},
 		Spec: v1alpha1.KafkaTopicSpec{
+			TopicName:  topicName, // empty when metaName == name (clean common case)
 			Partitions: partitions,
 		},
 	}
@@ -59,13 +73,15 @@ func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions
 	return nil
 }
 
-// DeleteTopic removes a KafkaTopic CR by name. Wraps apierrors.IsNotFound
-// in handlers.ErrTopicNotFound so the handler can surface
-// UNKNOWN_TOPIC_OR_PARTITION.
+// DeleteTopic removes a KafkaTopic CR. Resolves the Kafka name to the
+// matching CR via the same nameForCR mapping CreateTopic used. Wraps
+// apierrors.IsNotFound in handlers.ErrTopicNotFound so the handler
+// can surface UNKNOWN_TOPIC_OR_PARTITION.
 func (w *TopicCRWriter) DeleteTopic(ctx context.Context, name string) error {
+	metaName, _ := nameForCR(name)
 	t := &v1alpha1.KafkaTopic{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      metaName,
 			Namespace: w.namespace,
 		},
 	}
@@ -76,4 +92,31 @@ func (w *TopicCRWriter) DeleteTopic(ctx context.Context, name string) error {
 		return fmt.Errorf("delete KafkaTopic %s: %w", name, err)
 	}
 	return nil
+}
+
+// rfc1123 matches the K8s resource-name validation: lowercase
+// alphanumerics with single dots/hyphens between, start+end
+// alphanumeric, max 253 chars. Kept lenient on length here (caller
+// truncates / hashes); this is just the character-class check.
+var rfc1123 = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+
+// nameForCR returns the (metadata.name, spec.topicName) pair for a
+// given Kafka topic name. When the Kafka name is a valid RFC 1123
+// resource name (≤ 253 chars), use it as metadata.name and leave
+// spec.topicName empty (Strimzi's recommendation: "It is recommended
+// to not set this unless the topic name is not a valid Kubernetes
+// resource name."). Otherwise synthesise a deterministic synthetic
+// metadata.name and stash the literal Kafka name in spec.topicName.
+//
+// Determinism is required so re-creating a topic with the same name
+// hits the same CR (TOPIC_ALREADY_EXISTS via apierrors.IsAlreadyExists)
+// rather than spawning a new CR each time.
+func nameForCR(kafkaName string) (metaName, topicName string) {
+	if len(kafkaName) <= 253 && rfc1123.MatchString(kafkaName) {
+		return kafkaName, ""
+	}
+	h := sha1.Sum([]byte(kafkaName))
+	// 16 hex chars of sha1 is enough for collision resistance at the
+	// scale of "topics on one cluster" and keeps the CR name short.
+	return fmt.Sprintf("skafka-topic-%x", h[:8]), kafkaName
 }

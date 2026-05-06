@@ -127,7 +127,10 @@ func (w *TopicWatcher) reconcile(ctx context.Context) (string, error) {
 	seen := make(map[string]struct{}, len(list.Items))
 	for i := range list.Items {
 		t := &list.Items[i]
-		seen[t.Name] = struct{}{}
+		// Cache + event names key off EffectiveTopicName (gh #86 — a
+		// CR with spec.topicName set has the literal Kafka name there,
+		// not in metadata.name).
+		seen[t.EffectiveTopicName()] = struct{}{}
 		// Route through processEvent so Terminating CRs (with a non-nil
 		// deletionTimestamp) reach handleTerminating during the initial
 		// reconcile, not just during watch events. Without this, a
@@ -147,6 +150,10 @@ func (w *TopicWatcher) reconcile(ctx context.Context) (string, error) {
 	}
 	w.mu.Unlock()
 	for _, name := range missing {
+		// The synthetic CR carries the Kafka name as metadata.name with
+		// an empty Spec.TopicName, so EffectiveTopicName() inside
+		// handleDelete falls back to metadata.name and matches the
+		// cache key.
 		w.handleDelete(&operatorv1.KafkaTopic{ObjectMeta: metav1.ObjectMeta{Name: name}})
 	}
 	return list.ResourceVersion, nil
@@ -198,14 +205,15 @@ func (w *TopicWatcher) processEvent(eventType watch.EventType, t *operatorv1.Kaf
 // started, missed the Added event for a topic that's already
 // Terminating).
 func (w *TopicWatcher) handleTerminating(t *operatorv1.KafkaTopic) {
+	name := t.EffectiveTopicName()
 	w.mu.Lock()
-	if _, alreadyFired := w.terminating[t.Name]; alreadyFired {
+	if _, alreadyFired := w.terminating[name]; alreadyFired {
 		w.mu.Unlock()
 		return
 	}
-	last, existed := w.cache[t.Name]
-	delete(w.cache, t.Name)
-	w.terminating[t.Name] = struct{}{}
+	last, existed := w.cache[name]
+	delete(w.cache, name)
+	w.terminating[name] = struct{}{}
 	w.mu.Unlock()
 
 	if !existed {
@@ -214,40 +222,42 @@ func (w *TopicWatcher) handleTerminating(t *operatorv1.KafkaTopic) {
 	if last <= 0 {
 		return
 	}
-	w.fire(TopicEvent{Type: TopicDeleted, Name: t.Name, Partitions: last})
+	w.fire(TopicEvent{Type: TopicDeleted, Name: name, Partitions: last})
 }
 
 func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
+	name := t.EffectiveTopicName()
 	w.mu.Lock()
-	old, existed := w.cache[t.Name]
+	old, existed := w.cache[name]
 	// Don't shrink the cached count — the operator rejects shrinks, and keeping
 	// the larger value lets a later legitimate expansion still produce a
 	// Modified event with the correct OldPartitions.
 	if !existed || t.Spec.Partitions > old {
-		w.cache[t.Name] = t.Spec.Partitions
+		w.cache[name] = t.Spec.Partitions
 	}
 	w.mu.Unlock()
 
 	switch {
 	case !existed:
-		w.fire(TopicEvent{Type: TopicAdded, Name: t.Name, Partitions: t.Spec.Partitions})
+		w.fire(TopicEvent{Type: TopicAdded, Name: name, Partitions: t.Spec.Partitions})
 	case old < t.Spec.Partitions:
-		w.fire(TopicEvent{Type: TopicModified, Name: t.Name, Partitions: t.Spec.Partitions, OldPartitions: old})
+		w.fire(TopicEvent{Type: TopicModified, Name: name, Partitions: t.Spec.Partitions, OldPartitions: old})
 	case old > t.Spec.Partitions:
-		slog.Warn("topic watcher: ignoring partition decrease", "topic", t.Name, "old", old, "new", t.Spec.Partitions)
+		slog.Warn("topic watcher: ignoring partition decrease", "topic", name, "old", old, "new", t.Spec.Partitions)
 	}
 }
 
 func (w *TopicWatcher) handleDelete(t *operatorv1.KafkaTopic) {
+	name := t.EffectiveTopicName()
 	w.mu.Lock()
-	last, existed := w.cache[t.Name]
-	delete(w.cache, t.Name)
-	delete(w.terminating, t.Name)
+	last, existed := w.cache[name]
+	delete(w.cache, name)
+	delete(w.terminating, name)
 	w.mu.Unlock()
 	if !existed {
 		return
 	}
-	w.fire(TopicEvent{Type: TopicDeleted, Name: t.Name, Partitions: last})
+	w.fire(TopicEvent{Type: TopicDeleted, Name: name, Partitions: last})
 }
 
 func (w *TopicWatcher) fire(ev TopicEvent) {

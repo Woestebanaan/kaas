@@ -82,6 +82,21 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              topicName:
+                description: |-
+                  TopicName is the name of the Kafka topic on the wire. When unset
+                  (the common case), it defaults to metadata.name. Set this only
+                  when the desired Kafka name isn't a valid Kubernetes resource
+                  name — e.g. uppercase letters, double underscores, or names
+                  longer than 253 characters. Kafka allows up to 249 characters
+                  from [A-Za-z0-9._-]; Kubernetes resource names must follow RFC
+                  1123 (lowercase, dots/hyphens, start+end alphanumeric, ≤ 253).
+                  The admin-protocol path (gh #51 + #86) synthesises a
+                  hash-derived metadata.name and sets this field when the literal
+                  Kafka name fails RFC 1123. Mirrors Strimzi's spec.topicName
+                  (https://strimzi.io/docs).
+                maxLength: 249
+                type: string
             required:
             - partitions
             type: object

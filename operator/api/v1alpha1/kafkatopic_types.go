@@ -19,9 +19,36 @@ type KafkaTopic struct {
 }
 
 type KafkaTopicSpec struct {
+	// TopicName is the name of the Kafka topic on the wire. When unset
+	// (the common case), it defaults to metadata.name. Set this only
+	// when the desired Kafka name isn't a valid Kubernetes resource
+	// name — e.g. uppercase letters, double underscores, or names
+	// longer than 253 characters. Kafka allows up to 249 characters
+	// from [A-Za-z0-9._-]; Kubernetes resource names must follow RFC
+	// 1123 (lowercase, dots/hyphens, start+end alphanumeric, ≤ 253).
+	// The admin-protocol path (gh #51 + #86) synthesises a
+	// hash-derived metadata.name and sets this field when the literal
+	// Kafka name fails RFC 1123. Mirrors Strimzi's spec.topicName
+	// (https://strimzi.io/docs).
+	// +kubebuilder:validation:MaxLength=249
+	TopicName string `json:"topicName,omitempty"`
 	// +kubebuilder:validation:Minimum=1
 	Partitions int32            `json:"partitions"`
 	Config     KafkaTopicConfig `json:"config,omitempty"`
+}
+
+// EffectiveTopicName returns the on-wire Kafka topic name, falling
+// back to the resource name when spec.topicName is unset. Callers in
+// the broker (TopicWatcher) and operator (KafkaTopicReconciler) MUST
+// use this rather than reading either field directly — that way old
+// CRs (no spec.topicName) keep working AND the new admin-protocol
+// path (synthetic metadata.name + spec.topicName) is correctly
+// resolved.
+func (t *KafkaTopic) EffectiveTopicName() string {
+	if t.Spec.TopicName != "" {
+		return t.Spec.TopicName
+	}
+	return t.Name
 }
 
 type KafkaTopicConfig struct {
