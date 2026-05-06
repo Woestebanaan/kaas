@@ -6,6 +6,9 @@ package broker
 
 import (
 	"fmt"
+	"log/slog"
+	"path/filepath"
+	"strings"
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/coordinator"
@@ -208,7 +211,26 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// gh #12 stage A: hand out a fresh PID/epoch so idempotent producers
 	// (default since Kafka 3.0) can complete their startup handshake.
 	// Sequence-number enforcement in Produce is stage B.
-	d.Register(22, 0, 4, handlers.NewInitProducerIdHandler())
+	// gh #22: layer the TxnStateStore on top so non-empty
+	// transactional.id rejoins bump the epoch (and the storage-
+	// layer fence rejects the previous instance's writes).
+	initPIDHandler := handlers.NewInitProducerIdHandler()
+	// Only wire the TxnStateStore when DataDir is a real on-disk
+	// path. MemoryStorage (local-dev / unit tests) returns
+	// "memory://" — joining "__cluster" onto it would create a
+	// stray "memory:/__cluster" directory in cwd. Production
+	// DiskStorageEngine returns an absolute path so this just
+	// skips the dev path.
+	if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
+		clusterDir := filepath.Join(dataDir, "__cluster")
+		if txnStore, err := coordinator.NewTxnStateStore(clusterDir); err == nil {
+			initPIDHandler = initPIDHandler.WithTxnStateStore(txnStore)
+		} else {
+			slog.Warn("InitProducerId: TxnStateStore disabled (gh #22 epoch fence inactive)",
+				"clusterDir", clusterDir, "err", err)
+		}
+	}
+	d.Register(22, 0, 4, initPIDHandler)
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())

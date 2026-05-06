@@ -88,6 +88,135 @@ func TestInitProducerIdEpochZero(t *testing.T) {
 	}
 }
 
+// fakeTxnStore is a minimal in-memory TxnStateStore for the
+// handler tests. Mirrors the production store's
+// (PID stays stable, epoch bumps) contract without touching disk.
+type fakeTxnStore struct {
+	state map[string]struct {
+		pid   int64
+		epoch int16
+	}
+}
+
+func newFakeTxnStore() *fakeTxnStore {
+	return &fakeTxnStore{state: map[string]struct {
+		pid   int64
+		epoch int16
+	}{}}
+}
+
+func (f *fakeTxnStore) GetOrAllocate(txnID string, alloc func() int64) (int64, int16, error) {
+	e, ok := f.state[txnID]
+	if !ok {
+		e.pid = alloc()
+		e.epoch = 0
+	} else {
+		e.epoch++
+	}
+	f.state[txnID] = e
+	return e.pid, e.epoch, nil
+}
+
+// TestInitProducerIdTxnIDBumpsEpochOnRejoin guards gh #22's
+// handler-level contract: a request carrying the same
+// transactional.id twice gets the SAME PID with epoch+1 the
+// second time. Without this, the storage-layer fence at
+// classifyIdempotence has nothing to fence — both sessions
+// write under (PID, epoch=0) and a zombie's records appear as
+// legitimate.
+func TestInitProducerIdTxnIDBumpsEpochOnRejoin(t *testing.T) {
+	h := NewInitProducerIdHandler().WithTxnStateStore(newFakeTxnStore())
+
+	pid1, ep1 := callInitPIDWithTxn(t, h, "my-txn", 4)
+	pid2, ep2 := callInitPIDWithTxn(t, h, "my-txn", 4)
+
+	if pid1 != pid2 {
+		t.Errorf("PIDs drifted across rejoins: %d vs %d (must be stable)", pid1, pid2)
+	}
+	if ep1 != 0 {
+		t.Errorf("first call epoch=%d, want 0", ep1)
+	}
+	if ep2 != 1 {
+		t.Errorf("rejoin epoch=%d, want 1 (gh #22 epoch fence)", ep2)
+	}
+}
+
+// TestInitProducerIdEmptyTxnIDStillFresh: the empty
+// transactional.id (the wire sentinel for non-transactional
+// idempotent producers) must keep stage-A behaviour even when
+// the txn store is wired. Otherwise the store would have to grow
+// an entry per producer connection — unbounded.
+func TestInitProducerIdEmptyTxnIDStillFresh(t *testing.T) {
+	h := NewInitProducerIdHandler().WithTxnStateStore(newFakeTxnStore())
+
+	pid1 := callInitPID(t, h, 4)
+	pid2 := callInitPID(t, h, 4)
+
+	if pid1 == pid2 {
+		t.Errorf("non-txn producers got the same PID %d (must be fresh each time)", pid1)
+	}
+}
+
+// TestInitProducerIdNoStoreFallsBackToFreshPID guards the warn-and-
+// continue behaviour when the txn store fails to wire (disk
+// missing, permission error, dev mode). Producers can still write
+// — they just lose the rejoin fence. A reject here would prevent
+// a broker that can't open its data dir from serving any
+// transactional client at all.
+func TestInitProducerIdNoStoreFallsBackToFreshPID(t *testing.T) {
+	h := NewInitProducerIdHandler() // no store wired
+
+	pid1, ep1 := callInitPIDWithTxn(t, h, "my-txn", 4)
+	pid2, ep2 := callInitPIDWithTxn(t, h, "my-txn", 4)
+
+	if pid1 == pid2 {
+		t.Errorf("no-store fallback should hand out distinct PIDs each time, got %d twice", pid1)
+	}
+	if ep1 != 0 || ep2 != 0 {
+		t.Errorf("no-store fallback epochs=(%d,%d), want (0,0)", ep1, ep2)
+	}
+}
+
+// callInitPIDWithTxn is callInitPID with a non-empty
+// transactional.id field. v4 only — v0/v1 don't have the
+// PID/epoch echo fields but they DO carry transactional.id.
+func callInitPIDWithTxn(t *testing.T, h *InitProducerIdHandler, txnID string, version int16) (int64, int16) {
+	t.Helper()
+	w := codec.NewWriter()
+	if version >= 2 {
+		w.WriteCompactNullableString(txnID, txnID == "")
+		w.WriteInt32(60_000)
+		if version >= 3 {
+			w.WriteInt64(-1)
+			w.WriteInt16(-1)
+		}
+		w.WriteEmptyTaggedFields()
+	} else {
+		w.WriteNullableString(txnID, txnID == "")
+		w.WriteInt32(60_000)
+	}
+	out, err := h.Handle(&connstate.ConnState{}, version, w.Bytes())
+	if err != nil {
+		t.Fatalf("Handle v%d: %v", version, err)
+	}
+	r := codec.NewReader(out)
+	if _, err = r.ReadInt32(); err != nil { // throttle
+		t.Fatal(err)
+	}
+	if _, err = r.ReadInt16(); err != nil { // errCode
+		t.Fatal(err)
+	}
+	pid, err := r.ReadInt64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := r.ReadInt16()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid, epoch
+}
+
 // callInitPID is a v0/v4-aware helper that runs one InitProducerId
 // call through the handler and returns the producer ID. v0 uses the
 // legacy nullable-string + int32 timeout body; v4 adds the compact

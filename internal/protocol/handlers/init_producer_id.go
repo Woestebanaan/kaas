@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -8,6 +9,15 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
+
+// TxnStateStore is the slim interface InitProducerIdHandler needs
+// from the coordinator's TxnStateStore. Defined here to avoid an
+// import cycle (handlers → coordinator → handlers via Manager's
+// dependencies). Production wires the concrete
+// coordinator.TxnStateStore; tests can substitute a fake.
+type TxnStateStore interface {
+	GetOrAllocate(txnID string, alloc func() int64) (int64, int16, error)
+}
 
 // InitProducerIdHandler answers API key 22.
 //
@@ -31,7 +41,8 @@ import (
 // trades the strong guarantees of Apache Kafka's TransactionCoordinator
 // for simplicity; revisit if/when transactions arrive.
 type InitProducerIdHandler struct {
-	next atomic.Int64
+	next     atomic.Int64
+	txnStore TxnStateStore // nil ⇒ stage A behaviour for transactional IDs (always fresh PID)
 }
 
 func NewInitProducerIdHandler() *InitProducerIdHandler {
@@ -43,19 +54,63 @@ func NewInitProducerIdHandler() *InitProducerIdHandler {
 	return h
 }
 
+// WithTxnStateStore enables the gh #22 epoch-fence-on-rejoin path
+// for non-empty transactional.id requests. Without this wired,
+// transactional clients still get a PID but every InitProducerId
+// returns epoch=0 — which means a zombie producer's writes are
+// indistinguishable from a fresh one's. With it wired, the second
+// call from the same transactional.id gets the same PID with
+// epoch+1, and the storage-layer fence (gh #12 stage B) drops
+// the zombie's writes with INVALID_PRODUCER_EPOCH (47).
+func (h *InitProducerIdHandler) WithTxnStateStore(s TxnStateStore) *InitProducerIdHandler {
+	h.txnStore = s
+	return h
+}
+
 func (h *InitProducerIdHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
 	r := codec.NewReader(body)
-	if _, err := api.DecodeInitProducerIdRequest(r, version); err != nil {
+	req, err := api.DecodeInitProducerIdRequest(r, version)
+	if err != nil {
 		return nil, err
 	}
 
-	pid := h.next.Add(1)
+	pid, epoch := h.allocate(req.TransactionalID)
 
 	resp := &api.InitProducerIdResponse{
 		ProducerID:    pid,
-		ProducerEpoch: 0,
+		ProducerEpoch: epoch,
 	}
 	w := codec.NewWriter()
 	api.EncodeInitProducerIdResponse(w, resp, version)
 	return w.Bytes(), nil
+}
+
+// allocate is the gh #22 decision point: empty transactional.id
+// gets the stage-A "fresh PID, epoch=0" behaviour; a non-empty
+// transactional.id with a wired TxnStateStore gets the bump-on-
+// rejoin behaviour. A non-empty transactional.id WITHOUT a wired
+// store falls back to fresh-PID-every-time and logs once at warn
+// — that means the broker is mid-startup or running in a config
+// that doesn't support transactions, and a zombie producer
+// could still write under its old (PID, epoch).
+func (h *InitProducerIdHandler) allocate(txnID string) (int64, int16) {
+	if txnID == "" || h.txnStore == nil {
+		if txnID != "" && h.txnStore == nil {
+			slog.Warn("InitProducerId received transactional.id but no TxnStateStore is wired; "+
+				"epoch fence on rejoin disabled (gh #22)", "txn_id", txnID)
+		}
+		return h.next.Add(1), 0
+	}
+	pid, epoch, err := h.txnStore.GetOrAllocate(txnID, func() int64 { return h.next.Add(1) })
+	if err != nil {
+		// Persistence failure on the txnStore is rare (disk full,
+		// I/O error). The producer side has nothing to fall back
+		// to, so we surface a fresh PID with epoch=0 and log —
+		// the producer can still make progress, just without
+		// rejoin fencing this connection.
+		slog.Warn("InitProducerId txn store failed; falling back to fresh PID",
+			"txn_id", txnID, "err", err)
+		return h.next.Add(1), 0
+	}
+	return pid, epoch
 }

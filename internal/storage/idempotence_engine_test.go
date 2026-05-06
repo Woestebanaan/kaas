@@ -160,6 +160,47 @@ func TestEngineNonIdempotentAppendStillWorks(t *testing.T) {
 	}
 }
 
+// TestEngineRejoinFenceClosesZombieWindow walks the gh #22
+// scenario the storage layer enables: producer A connected as
+// "txn-foo" got (PID=42, epoch=0) and wrote 3 records. The
+// network blipped, A retried InitProducerId, got bumped to
+// (PID=42, epoch=1). Meanwhile A's old session had one batch
+// in-flight under (PID=42, epoch=0). That batch arrives AFTER
+// A's new session has started writing under epoch=1.
+//
+// Without the storage-layer fence, the zombie's batch would
+// land at HWM and corrupt the log. With it, classifyIdempotence
+// detects the stale epoch and returns ErrInvalidProducerEpoch
+// — exactly the error #22's epoch bump exists to trigger.
+func TestEngineRejoinFenceClosesZombieWindow(t *testing.T) {
+	e := newIdempotenceEngine(t)
+
+	// Session 1: PID=42, epoch=0 — write 3 records.
+	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 0, 0, 3)); err != nil {
+		t.Fatalf("session1 seed: %v", err)
+	}
+
+	// Session 2 starts (gh #22 bump): PID=42, epoch=1 — writes 5
+	// records starting from seq=0 (a fresh epoch resets the
+	// sequence counter on the producer side).
+	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 1, 0, 5)); err != nil {
+		t.Fatalf("session2 first batch: %v", err)
+	}
+
+	// Zombie from session 1's in-flight queue: PID=42, epoch=0,
+	// seq=3 (continuing where the seed left off). MUST be fenced.
+	_, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 0, 3, 2))
+	if !errors.Is(err, ErrInvalidProducerEpoch) {
+		t.Errorf("zombie batch err=%v, want ErrInvalidProducerEpoch (gh #22 fence missed it)", err)
+	}
+
+	// Sanity: session 2 keeps working — the zombie's reject
+	// didn't poison the per-PID state.
+	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 1, 5, 3)); err != nil {
+		t.Errorf("session2 continued append after fence: %v", err)
+	}
+}
+
 // TestEngineIdempotentDifferentProducersDontInterfere: PID is the
 // dedupe key. Two producers can both legitimately send batches with
 // firstSeq=0 — they must both succeed and land at distinct offsets,
