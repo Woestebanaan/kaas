@@ -200,6 +200,10 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 		deleteRecordsHandler = deleteRecordsHandler.WithCoordinator(b.brokerCoord)
 	}
 	d.Register(21, 0, 2, deleteRecordsHandler)
+	// gh #12 stage A: hand out a fresh PID/epoch so idempotent producers
+	// (default since Kafka 3.0) can complete their startup handshake.
+	// Sequence-number enforcement in Produce is stage B.
+	d.Register(22, 0, 4, handlers.NewInitProducerIdHandler())
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())
