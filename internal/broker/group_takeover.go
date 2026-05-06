@@ -13,6 +13,10 @@ import (
 // is still cleaner — tests don't need to spin up a real Manager).
 type groupRelinquisher interface {
 	RelinquishGroup(groupID string)
+	// LocalGroups returns every group ID this broker currently has
+	// in-memory. Used by OnAssignmentChange's orphan sweep to drop
+	// stale entries that the prev→next diff alone misses.
+	LocalGroups() []string
 }
 
 // GroupTakeoverDriver is the consumer-group analogue of TakeoverDriver:
@@ -37,19 +41,63 @@ func NewGroupTakeoverDriver(mgr groupRelinquisher, brokerID string) *GroupTakeov
 }
 
 // OnAssignmentChange is the kafkaapi.AssignmentChangeHandler signature
-// expected by Coordinator.OnAssignmentChange. It diffs prev vs next:
-// every group that was ours but is no longer ours has its in-memory
-// state dropped via Manager.RelinquishGroup. Newly-ours groups need
-// no proactive work — the next JoinGroup builds state organically.
+// expected by Coordinator.OnAssignmentChange. It enforces:
+//
+//	post-condition: m.groups keys ⊆ groups assigned to this broker.
+//
+// The prev→next diff alone is not enough. A stray entry can land in
+// m.groups when a JoinGroup arrives during the brief window the
+// controller has assigned the group to this broker (and OwnsGroup
+// returns true), and then later moves it elsewhere via a recompute.
+// The diff at line `for groupID := range prevOurs` only relinquishes
+// entries that were in the BROKER'S previous assignment view; an
+// entry created when this broker had no prior assignment, or under
+// an assignment that's been overwritten in memory before the next
+// change handler fires, is never in `prevOurs` and therefore never
+// gets cleaned up. The result is the script-audit symptom: stale
+// `--list` rows on non-coordinator brokers (gh #89 follow-up,
+// surfaced by the v0.1.49 verification).
+//
+// Two passes:
+//  1. Diff prev→next for the common case (state-changes that did
+//     touch this broker's known assignment view).
+//  2. Orphan sweep: anything in `LocalGroups()` not in `nextOurs`
+//     gets relinquished. This is the self-healing pass that closes
+//     the leak.
 func (d *GroupTakeoverDriver) OnAssignmentChange(_ context.Context, prev, next *kafkaapi.Assignment) {
 	prevOurs := groupsOwnedBy(prev, d.brokerID)
 	nextOurs := groupsOwnedBy(next, d.brokerID)
+
+	// Single-fire: a group surfaced by both the diff and the sweep
+	// passes still gets relinquished exactly once. Manager's
+	// RelinquishGroup is itself idempotent, but emitting two
+	// matching calls per change is wasteful and noisy in any
+	// future logging.
+	relinquished := make(map[string]struct{})
+	relinquish := func(groupID string) {
+		if _, done := relinquished[groupID]; done {
+			return
+		}
+		relinquished[groupID] = struct{}{}
+		d.mgr.RelinquishGroup(groupID)
+	}
 
 	for groupID := range prevOurs {
 		if _, stillOurs := nextOurs[groupID]; stillOurs {
 			continue
 		}
-		d.mgr.RelinquishGroup(groupID)
+		relinquish(groupID)
+	}
+
+	// Orphan sweep: drop any in-memory group not in the broker's
+	// current assignment view. Closes the gap left by the prev→next
+	// diff when a stray entry landed in m.groups under a transient
+	// "I own this" window the broker had since-overwritten.
+	for _, groupID := range d.mgr.LocalGroups() {
+		if _, ours := nextOurs[groupID]; ours {
+			continue
+		}
+		relinquish(groupID)
 	}
 }
 
