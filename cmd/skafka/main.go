@@ -328,6 +328,23 @@ func runBroker(ctx context.Context) {
 		startTopicWatcher(ctx, namespace, b, engine, leaseManager, brokerReg, brokerID, k8sTopics, rt)
 	}
 
+	// gh #51: wire the KafkaTopic CR writer so admin-protocol
+	// CreateTopics/DeleteTopics calls (Kafbat, kafka-topics.sh, Java
+	// AdminClient) write the CR. Operator reconciles → partition dirs
+	// on the shared PVC + every broker's TopicWatcher fires Added,
+	// so a Metadata refresh from any peer sees the new topic. Without
+	// this writer, admin-protocol topic ops are local to one broker.
+	if k8sMode {
+		topicCRScheme := runtime.NewScheme()
+		if err := operatorv1.AddToScheme(topicCRScheme); err == nil {
+			if cl, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: topicCRScheme}); err == nil {
+				b.UseTopicCRWriter(k8spkg.NewTopicCRWriter(cl, namespace))
+			} else {
+				slog.Warn("admin: build CR writer failed; CreateTopics will be local-only", "err", err)
+			}
+		}
+	}
+
 	d := protocol.NewDispatcher()
 	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
 	b.RegisterHandlers(d)

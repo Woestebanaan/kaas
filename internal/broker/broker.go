@@ -43,6 +43,14 @@ type Broker struct {
 	// it; RegisterHandlers picks it up via WithCoordinator on the
 	// ProduceHandler. nil → legacy lease+lock fallback.
 	brokerCoord kafkaapi.BrokerCoordinator
+
+	// topicCRWriter persists CreateTopics / DeleteTopics admin-protocol
+	// calls as KafkaTopic CR mutations (gh #51). UseTopicCRWriter wires
+	// it; RegisterHandlers picks it up via WithCRWriter on the
+	// CreateTopicsHandler / DeleteTopicsHandler. nil → admin protocol
+	// updates only the local TopicRegistry, which is invisible to
+	// peer brokers (broken in multi-broker production).
+	topicCRWriter handlers.TopicCRWriter
 }
 
 func New(
@@ -98,6 +106,16 @@ func (b *Broker) AddTopic(name string, partitions int32) {
 // every topic the broker knows about.
 func (b *Broker) Topics() *TopicRegistry {
 	return b.topics
+}
+
+// UseTopicCRWriter wires the optional KafkaTopic-CR writer (gh #51).
+// Must be called BEFORE RegisterHandlers so the admin handlers can
+// pick it up via WithCRWriter. Without this, admin-protocol
+// CreateTopics / DeleteTopics is local-broker-only (in-memory
+// TopicRegistry), which is fine for tests / dev but invisible to
+// peer brokers in production.
+func (b *Broker) UseTopicCRWriter(w handlers.TopicCRWriter) {
+	b.topicCRWriter = w
 }
 
 // UseCoordinator wires the v3 BrokerCoordinator into the broker. Must be
@@ -158,7 +176,11 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// reading the missing 16 bytes (gh #73). Same shape as the
 	// Metadata v10 cap above. Real fix is to encode topic_id and
 	// raise back to v7+.
-	d.Register(19, 0, 6, handlers.NewCreateTopicsHandler(b.topics))
+	createTopicsHandler := handlers.NewCreateTopicsHandler(b.topics)
+	if b.topicCRWriter != nil {
+		createTopicsHandler = createTopicsHandler.WithCRWriter(b.topicCRWriter)
+	}
+	d.Register(19, 0, 6, createTopicsHandler)
 	// DeleteTopics capped at v5: v6+ changed `topic_names: [STRING]` to
 	// `topics: [DeleteTopicState]` (name COMPACT_NULLABLE_STRING +
 	// topic_id UUID — KRaft topic-id KIP-516). The codec still expects
@@ -168,7 +190,11 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// keeps name-based deletes working for kafka-topics.sh, kafbat-ui,
 	// and Java AdminClient. v6 topic-id support is a separate parity
 	// task.
-	d.Register(20, 0, 5, handlers.NewDeleteTopicsHandler(b.topics))
+	deleteTopicsHandler := handlers.NewDeleteTopicsHandler(b.topics)
+	if b.topicCRWriter != nil {
+		deleteTopicsHandler = deleteTopicsHandler.WithCRWriter(b.topicCRWriter)
+	}
+	d.Register(20, 0, 5, deleteTopicsHandler)
 	deleteRecordsHandler := handlers.NewDeleteRecordsHandler(b.store)
 	if b.brokerCoord != nil {
 		deleteRecordsHandler = deleteRecordsHandler.WithCoordinator(b.brokerCoord)

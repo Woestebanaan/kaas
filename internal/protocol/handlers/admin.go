@@ -1,17 +1,41 @@
 package handlers
 
 // Admin handlers for topic and ACL management.
-// CreateTopics/DeleteTopics are handled by the operator via CRDs in production;
-// the broker handler registers the topic locally so Metadata works immediately.
+// CreateTopics/DeleteTopics in production mode write a KafkaTopic CR via
+// the optional TopicCRWriter (gh #51); the operator reconciles the CR
+// into partition directories on the shared PVC and the local
+// TopicWatcher fires `Added` on every broker. Without a CRWriter
+// (kafka-compat tests / dev mode) the handler still updates the local
+// TopicRegistry so Metadata reflects the change on this broker.
 // ACL write operations return NOT_CONTROLLER — ACLs are managed via KafkaAcl CRDs.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 	"github.com/woestebanaan/skafka/internal/storage"
+)
+
+// TopicCRWriter persists topic create/delete intent through the
+// KafkaTopic CR (gh #51). Implementations live in internal/k8s. When
+// nil on a handler, the broker falls back to local-registry-only
+// updates — fine for in-process tests, broken in multi-broker
+// production because the other brokers won't observe the change.
+type TopicCRWriter interface {
+	CreateTopic(ctx context.Context, name string, partitions int32) error
+	DeleteTopic(ctx context.Context, name string) error
+}
+
+// ErrTopicAlreadyExists / ErrTopicNotFound are sentinels TopicCRWriter
+// implementations should wrap (errors.Is-compatible) so handlers can
+// surface the right Kafka error code.
+var (
+	ErrTopicAlreadyExists = errors.New("topic already exists")
+	ErrTopicNotFound      = errors.New("topic not found")
 )
 
 // TopicWriter is the write side of TopicRegistry (subset needed by admin handlers).
@@ -24,10 +48,22 @@ type TopicWriter interface {
 
 type CreateTopicsHandler struct {
 	topics TopicWriter
+	crw    TopicCRWriter
 }
 
 func NewCreateTopicsHandler(topics TopicWriter) *CreateTopicsHandler {
 	return &CreateTopicsHandler{topics: topics}
+}
+
+// WithCRWriter wires the production path: CreateTopics persists a
+// KafkaTopic CR; the operator reconciles it into partition dirs on the
+// shared PVC and the per-broker TopicWatcher fires Added on every
+// broker (so Metadata refreshes from any peer see the new topic).
+// Without this, the handler is local-registry-only — works for
+// single-broker tests, broken across multi-broker clusters.
+func (h *CreateTopicsHandler) WithCRWriter(crw TopicCRWriter) *CreateTopicsHandler {
+	h.crw = crw
+	return h
 }
 
 func (h *CreateTopicsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -45,6 +81,22 @@ func (h *CreateTopicsHandler) Handle(_ *connstate.ConnState, version int16, body
 			ReplicationFactor: t.ReplicationFactor,
 		}
 		if !req.ValidateOnly {
+			if h.crw != nil {
+				if err := h.crw.CreateTopic(context.Background(), t.Name, t.NumPartitions); err != nil {
+					switch {
+					case errors.Is(err, ErrTopicAlreadyExists):
+						result.ErrorCode = int16(codec.ErrTopicAlreadyExists)
+					default:
+						result.ErrorCode = int16(codec.ErrInvalidRequest)
+						result.ErrorMessage = err.Error()
+					}
+					resp.Topics = append(resp.Topics, result)
+					continue
+				}
+			}
+			// Local-registry update is a fast hint; in CR-writer mode
+			// the broker's TopicWatcher will redundantly call
+			// b.topics.Add as the CR's Added event fires (idempotent).
 			h.topics.Add(t.Name, t.NumPartitions)
 		}
 		resp.Topics = append(resp.Topics, result)
@@ -59,10 +111,19 @@ func (h *CreateTopicsHandler) Handle(_ *connstate.ConnState, version int16, body
 
 type DeleteTopicsHandler struct {
 	topics TopicWriter
+	crw    TopicCRWriter
 }
 
 func NewDeleteTopicsHandler(topics TopicWriter) *DeleteTopicsHandler {
 	return &DeleteTopicsHandler{topics: topics}
+}
+
+// WithCRWriter mirrors CreateTopicsHandler.WithCRWriter — DeleteTopics
+// removes the KafkaTopic CR; the operator's reconciler tears down the
+// partition dirs and TopicWatcher fires Deleted on every broker.
+func (h *DeleteTopicsHandler) WithCRWriter(crw TopicCRWriter) *DeleteTopicsHandler {
+	h.crw = crw
+	return h
 }
 
 func (h *DeleteTopicsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -74,8 +135,22 @@ func (h *DeleteTopicsHandler) Handle(_ *connstate.ConnState, version int16, body
 
 	resp := &api.DeleteTopicsResponse{}
 	for _, name := range req.TopicNames {
+		result := api.DeletableTopicResult{Name: name}
+		if h.crw != nil {
+			if err := h.crw.DeleteTopic(context.Background(), name); err != nil {
+				switch {
+				case errors.Is(err, ErrTopicNotFound):
+					result.ErrorCode = int16(codec.ErrUnknownTopicOrPartition)
+				default:
+					result.ErrorCode = int16(codec.ErrInvalidRequest)
+					result.ErrorMessage = err.Error()
+				}
+				resp.Responses = append(resp.Responses, result)
+				continue
+			}
+		}
 		h.topics.Remove(name)
-		resp.Responses = append(resp.Responses, api.DeletableTopicResult{Name: name, ErrorCode: 0})
+		resp.Responses = append(resp.Responses, result)
 	}
 
 	w := codec.NewWriter()
