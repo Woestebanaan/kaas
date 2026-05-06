@@ -34,7 +34,7 @@ Releases are tag-driven; see `RELEASING.md`. **Always bump the patch (`v0.1.N-pr
 skafka is a from-scratch Kafka-protocol-compatible broker that runs on Kubernetes. Two binaries ship in this repo:
 
 - **`cmd/skafka`** — the broker (port 9092 plaintext, 9093 TLS, 8080 health, 9094 inter-broker heartbeat gRPC).
-- **`cmd/skafka-operator`** — a controller-runtime operator that reconciles 5 CRDs into on-disk config files (auth/topics) and Kubernetes plumbing (TLS routes, etc.).
+- **`cmd/skafka-operator`** — a controller-runtime operator that reconciles 6 CRDs into on-disk config files (auth/topics) and Kubernetes plumbing (TLS routes, etc.).
 
 There are also two helper binaries for tests/diagnostics: `cmd/skafka-failover-probe` and `cmd/skafka-fsync-check`.
 
@@ -45,6 +45,8 @@ This is the most important architectural fact and is easy to misread from the di
 - Operator manages 6 CRDs in `operator/api/v1alpha1/`: `KafkaCluster` (external listener plumbing), `KafkaTopic` (partition dir creation), `KafkaUser` / `KafkaACL` / `KafkaUserGroup` (auth — materialized to files under `/data/__cluster/`), and `KafkaClusterAssignments` (read-only debug mirror, written fire-and-forget by the controller broker; brokers never read it).
 - Brokers read `KafkaTopic` CRs at startup (and watch them for new topics / partition expansion), but the read is non-fatal — a missing/unreachable API server only blocks new topic creation, never serving of existing topics.
 - The Produce/Fetch hot path makes **zero K8s API calls**. Ownership lookups are in-memory.
+
+**Operator reconcilers do NOT use cleanup finalizers.** Earlier versions had `skafka.io/{topic,user,acl,usergroup,kafkacluster}-cleanup` finalizers that drained on CR delete; ArgoCD's parallel cascade-delete deadlocked when the operator pod went down before its CRs. Cleanup is now reconcile-time (best-effort `os.RemoveAll` / credentials-file edit when `Get` returns `NotFound`) plus a leader-elected startup sweep (`controllers.SweepTopics`, `controllers.SweepCredentials`) that drops orphan dirs / stale credential entries the reconciler missed. Owned external resources (Certificates, Services, TLSRoutes) carry `OwnerReferences` so K8s GC handles cluster-CR deletion.
 
 If you find yourself adding a runtime dependency from broker → operator (e.g. a watch on a CR that blocks request handling), stop — that's an architectural change.
 
@@ -68,14 +70,22 @@ Non-controller brokers watch `assignment.json` via fsnotify + 1s poll (`internal
 
 Local-dev mode is selected when `MY_POD_NAME` is unset; in that case `dataDir == ""` also flips storage to in-memory (see the branch in `cmd/skafka/main.go`). The v3 cluster runtime is not started in dev mode — produce and Metadata fall back to `LocalLeaseManager` paths that always treat self as leader of every partition.
 
+### Storage hot path & file-handle ownership
+
+The broker's storage engine is heavily optimised for shared-NFS substrates where every NFS COMMIT round-trip is the dominant cost. The current Produce path (post-perf rework, gh #80/#81/#82) issues **one NFS COMMIT per group of concurrent batches**, not per record — `flushLocked` is gone; per-partition committer goroutines drain a `flushReqCh` and run one `logFile.Sync()` per cycle while concurrent Appenders wait on a `sync.Cond`. The index file is **not** fsynced on the hot path (rebuildable on takeover via `rebuildIndex`); the manifest is **not** rewritten per Produce — it's persisted only on partition open / takeover / segment roll / cleaner advance, so its `HighWatermark` can lag in-memory by up to one segment. `recoverSegment` runs at takeover time and reconciles. The `SKAFKA_FLUSH_INTERVAL_MESSAGES` env var (default 1 = honest acks=all) is the durability/throughput dial — mirrors Apache Kafka's `log.flush.interval.messages`.
+
+Segment roll splits the work: the in-memory swap (`rollFast`: log fsync + create new active + pointer swap) runs under `ps.mu`; the deferred finalize (index fsync, close old, manifest write) runs in a goroutine. `DeleteRecords` (API key 21) drives `logStart` advance and reclaims the active segment when the purge covers it (`logStart >= HighWatermark`).
+
+**Only the partition's current leader holds open log/index file descriptors** (gh #76 follow-up, v0.1.39+). `openPartition` at startup statifies segments without `OpenFile`. `TakeoverDriver` (registered on `Coordinator.OnAssignmentChange`) calls `storage.TakeOver` which `openHandles()` before recovery; `Relinquish` calls `closeHandles()`. This makes leader-side `os.Remove` (segment retention, DeleteRecords, segment roll cleanup) actually free disk on NFS rather than silly-renaming the file because peer brokers held it open. The committer goroutine snapshots the `*os.File` pointer (not the segment) so a concurrent Relinquish can't race the Sync into a nil deref.
+
 ### KafkaTopic delete on NFS
 
-When a `KafkaTopic` CR is deleted, `metadata.deletionTimestamp` goes non-nil. The topic-watcher fires `TopicDeleted` *immediately* (rather than waiting for the K8s `Deleted` event after finalizers clear); the broker calls `engine.ClosePartition` for each partition to drop its open log + index file handles. Without this, NFS silly-renames the open files into `.nfsXXXX` entries that EBUSY the operator's `unlinkat` on the parent directory forever (gh #76). The topic-watcher also routes the initial reconcile through `processEvent` so brokers coming up while CRs are already mid-deletion close their handles on startup, not just on watch events.
+When a `KafkaTopic` CR is deleted, `metadata.deletionTimestamp` goes non-nil. The topic-watcher fires `TopicDeleted` *immediately* (rather than waiting for the K8s `Deleted` event after finalizers clear); the broker calls `engine.ClosePartition` for each partition to drop its open log + index file handles on the leader broker (followers don't have them open per the previous section). Without this, NFS silly-renames the open files into `.nfsXXXX` entries that EBUSY the operator's `unlinkat` on the parent directory forever (gh #76). The topic-watcher also routes the initial reconcile through `processEvent` so brokers coming up while CRs are already mid-deletion close their handles on startup, not just on watch events.
 
 ### Code map
 
 - `internal/protocol/` — Kafka wire protocol. `codec/` (frames, primitives, CRC32C, per-API request/response types under `codec/api/`), `dispatch.go`, `server.go` (TCP listener + TLS), and `handlers/` (one file per API: `produce.go`, `fetch.go`, `metadata.go`, `consumer_group.go`, `list_offsets.go`, `admin.go`, `sasl.go`, `api_versions.go`).
-- `internal/storage/` — `DiskStorageEngine` with segment files, manifest, watcher, and cleaner. Single-writer enforcement is `BrokerCoordinator.Owns` + epoch-prefixed segment filenames (the old per-partition flock was removed in Phase 4).
+- `internal/storage/` — `DiskStorageEngine` with segment files, manifest, watcher, and cleaner. Single-writer enforcement is `BrokerCoordinator.Owns` + epoch-prefixed segment filenames (the old per-partition flock was removed in Phase 4). See "Storage hot path & file-handle ownership" above for the group-commit / lazy-open / async-roll-finalize semantics — those are easy to miss if you read the engine code in isolation.
 - `internal/coordinator/` — Kafka consumer-group coordinator (group state, offset commits). Offsets persisted under `dataDir`. Group ownership comes from a `GroupAssignmentSource`; the runtime variant is wired through the controller assignment, not per-group Leases.
 - `internal/broker/` — broker glue: `Broker` struct, the on-broker `Coordinator` (assignment.json watcher), `controller_watch.go` (1s poll of controller Lease for current epoch), `self_fence.go`, `takeover.go`, `group_takeover.go`, `heartbeat_client.go`.
 - `internal/controller/` — controller-side logic (election, balancer, assignment writer, heartbeat server, k8s CR mirror).
