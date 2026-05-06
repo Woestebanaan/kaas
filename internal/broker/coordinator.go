@@ -28,11 +28,19 @@ import (
 // step 6 (takeover.go). For now it observes the authoritative assignment,
 // validates each new version against the current controller epoch, and
 // dispatches registered handlers.
+// HeartbeatSource is the narrow contract Coordinator needs from the
+// heartbeat layer: just "when did we last hear from the controller?".
+// *HeartbeatClient satisfies it. Tests inject a fake to simulate
+// partition (gh #62) without spinning up a gRPC server.
+type HeartbeatSource interface {
+	LastReceived() time.Time
+}
+
 type Coordinator struct {
 	brokerID string
 	store    kafkaapi.AssignmentStore
 	leases   *ControllerWatch
-	heart    *HeartbeatClient
+	heart    HeartbeatSource
 
 	mu                 sync.RWMutex
 	current            *kafkaapi.Assignment
@@ -46,12 +54,13 @@ type Coordinator struct {
 // NewCoordinator builds a Coordinator. Callers wire the dependencies:
 // the file-backed AssignmentStore (typically rooted at /data), a
 // ControllerWatch on the same namespace as the controller Lease, and a
-// HeartbeatClient pointed at the current controller's gRPC endpoint.
+// HeartbeatSource (production: *HeartbeatClient pointed at the current
+// controller's gRPC endpoint).
 func NewCoordinator(
 	brokerID string,
 	store kafkaapi.AssignmentStore,
 	leases *ControllerWatch,
-	heart *HeartbeatClient,
+	heart HeartbeatSource,
 ) *Coordinator {
 	return &Coordinator{
 		brokerID:  brokerID,
