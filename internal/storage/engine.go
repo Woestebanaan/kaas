@@ -1049,6 +1049,42 @@ func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error 
 }
 
 // AllPartitions returns all known partitions — used by the retention cleaner.
+// FenceProducerEpoch advances every partition's view of (PID, epoch)
+// to AT LEAST `epoch` for the given producerID, and clears the
+// per-PID dedupe window. After this returns, any subsequent
+// Append carrying batch.epoch < epoch returns ErrInvalidProducerEpoch
+// regardless of which partition it targets.
+//
+// gh #30: closes the cross-partition gap left by gh #12 stage B.
+// B's classifyIdempotence advances the partition's per-PID epoch
+// only when a new-epoch batch lands on THAT partition. A producer
+// that bumps its epoch via InitProducerId (gh #22) but hasn't yet
+// written to all its partitions leaves a window where in-flight
+// zombie batches on those partitions are wrongly accepted.
+// Calling this from the InitProducerId rejoin path closes the
+// window proactively.
+//
+// In-memory only — the next persistManifestLocked (segment roll
+// or Relinquish) flushes the bumped epoch to producer-state.snapshot.
+// A broker restart between the bump and the next persist accepts
+// a zombie batch under the OLD epoch (it sees the persisted
+// snapshot's old state). The window is narrow in practice; tighter
+// closure would require synchronously snapshotting every partition
+// per InitProducerId call, which costs O(partitions) writes.
+func (e *DiskStorageEngine) FenceProducerEpoch(pid int64, epoch int16) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, ps := range e.partitions {
+		ps.mu.Lock()
+		entry, ok := ps.producerStates[pid]
+		if ok && entry.epoch < epoch {
+			entry.epoch = epoch
+			entry.recent = nil
+		}
+		ps.mu.Unlock()
+	}
+}
+
 func (e *DiskStorageEngine) AllPartitions() []PartitionID {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

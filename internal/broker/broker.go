@@ -230,6 +230,13 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 				"clusterDir", clusterDir, "err", err)
 		}
 	}
+	// gh #30: cross-partition fence on every rejoin bump. Only
+	// DiskStorageEngine implements the fence interface; MemoryStorage
+	// has no per-partition producerStates to walk, so the cast just
+	// fails and the fence stays a no-op.
+	if fencer, ok := b.store.(handlers.ProducerEpochFencer); ok {
+		initPIDHandler = initPIDHandler.WithFencer(fencer)
+	}
 	d.Register(22, 0, 4, initPIDHandler)
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())

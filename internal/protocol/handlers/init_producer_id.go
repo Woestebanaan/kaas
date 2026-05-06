@@ -19,6 +19,15 @@ type TxnStateStore interface {
 	GetOrAllocate(txnID string, alloc func() int64) (int64, int16, error)
 }
 
+// ProducerEpochFencer broadcasts an epoch bump to every partition
+// the broker manages so a zombie batch from a previous session
+// (still tagged with the old epoch) is fenced even on partitions
+// the new session has not yet touched. gh #30. Production wires
+// *storage.DiskStorageEngine; tests can substitute a fake.
+type ProducerEpochFencer interface {
+	FenceProducerEpoch(pid int64, epoch int16)
+}
+
 // InitProducerIdHandler answers API key 22.
 //
 // Stage A (gh #12): we hand out a fresh, monotonically increasing
@@ -42,7 +51,8 @@ type TxnStateStore interface {
 // for simplicity; revisit if/when transactions arrive.
 type InitProducerIdHandler struct {
 	next     atomic.Int64
-	txnStore TxnStateStore // nil ⇒ stage A behaviour for transactional IDs (always fresh PID)
+	txnStore TxnStateStore       // nil ⇒ stage A behaviour for transactional IDs (always fresh PID)
+	fencer   ProducerEpochFencer // nil ⇒ gh #30 cross-partition fence is lazy (only on next Append)
 }
 
 func NewInitProducerIdHandler() *InitProducerIdHandler {
@@ -64,6 +74,20 @@ func NewInitProducerIdHandler() *InitProducerIdHandler {
 // the zombie's writes with INVALID_PRODUCER_EPOCH (47).
 func (h *InitProducerIdHandler) WithTxnStateStore(s TxnStateStore) *InitProducerIdHandler {
 	h.txnStore = s
+	return h
+}
+
+// WithFencer wires the gh #30 cross-partition fence callback. On
+// every InitProducerId call where TxnStateStore returns
+// epoch > 0 (a rejoin), the handler invokes
+// fencer.FenceProducerEpoch(pid, epoch) so any in-flight write
+// from the previous session — even on partitions the new session
+// has not yet touched — is rejected with INVALID_PRODUCER_EPOCH.
+// Without this, B + #22 still fence eventually (as soon as a
+// new-epoch batch lands on each partition), but the gap before
+// that first batch is a real correctness window.
+func (h *InitProducerIdHandler) WithFencer(f ProducerEpochFencer) *InitProducerIdHandler {
+	h.fencer = f
 	return h
 }
 
@@ -111,6 +135,16 @@ func (h *InitProducerIdHandler) allocate(txnID string) (int64, int16) {
 		slog.Warn("InitProducerId txn store failed; falling back to fresh PID",
 			"txn_id", txnID, "err", err)
 		return h.next.Add(1), 0
+	}
+	// gh #30: epoch>0 means this was a rejoin that bumped from a
+	// previous session's epoch. Broadcast the bump so any in-flight
+	// zombie write is rejected even on partitions the new session
+	// has not yet touched. epoch==0 covers two cases — first-ever
+	// alloc, and post-overflow rotation (fresh PID) — neither
+	// needs fencing because no earlier (PID, epoch) state exists
+	// or the PID itself has changed.
+	if epoch > 0 && h.fencer != nil {
+		h.fencer.FenceProducerEpoch(pid, epoch)
 	}
 	return pid, epoch
 }

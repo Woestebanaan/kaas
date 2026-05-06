@@ -160,6 +160,98 @@ func TestEngineNonIdempotentAppendStillWorks(t *testing.T) {
 	}
 }
 
+// TestFenceProducerEpochUpdatesAllPartitions guards gh #30: a
+// single FenceProducerEpoch call must propagate the new epoch to
+// every partition's producerStates entry, not just the one the
+// new session has written to. The classifyIdempotence check
+// then rejects any subsequent old-epoch batch with
+// ErrInvalidProducerEpoch.
+func TestFenceProducerEpochUpdatesAllPartitions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.FlushIntervalMessages = 0
+	e, err := NewDiskStorageEngine(dir, &neverLeaderLeases{}, cfg)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	for _, p := range []int32{0, 1, 2} {
+		if err := e.CreatePartition("t", p); err != nil {
+			t.Fatalf("create p%d: %v", p, err)
+		}
+		if _, err := e.TakeOver(context.Background(), "t", p, 1); err != nil {
+			t.Fatalf("takeover p%d: %v", p, err)
+		}
+	}
+
+	// Producer P=99 writes one batch on EACH partition at epoch=0.
+	// Each partition's producerStates now records epoch=0.
+	for _, p := range []int32{0, 1, 2} {
+		if _, err := e.Append(context.Background(), "t", p, 1, idempotentBatch(99, 0, 0, 1)); err != nil {
+			t.Fatalf("seed p%d: %v", p, err)
+		}
+	}
+
+	// gh #30 fence: bump P=99 to epoch=1 broker-wide.
+	e.FenceProducerEpoch(99, 1)
+
+	// Zombie batch at epoch=0 on EVERY partition must now be
+	// rejected — even partitions the "new session" has not yet
+	// written to. That's the gap B + #22 alone leave open.
+	for _, p := range []int32{0, 1, 2} {
+		_, err := e.Append(context.Background(), "t", p, 1, idempotentBatch(99, 0, 5, 1))
+		if !errors.Is(err, ErrInvalidProducerEpoch) {
+			t.Errorf("p%d: zombie at epoch=0 got err=%v, want ErrInvalidProducerEpoch (#30 fence missed it)", p, err)
+		}
+	}
+}
+
+// TestFenceProducerEpochClearsRecentWindow: after a fence, the
+// new session's first batch at the bumped epoch starts fresh
+// from sequence 0. If recent[] survived the fence, the new
+// firstSeq=0 batch would dedupe against the OLD epoch-0 batch
+// at firstSeq=0 — silently dropping the new session's data.
+func TestFenceProducerEpochClearsRecentWindow(t *testing.T) {
+	e := newIdempotenceEngine(t)
+
+	// Old session: P=77, epoch=0, write seq 0..4.
+	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(77, 0, 0, 5)); err != nil {
+		t.Fatalf("old session: %v", err)
+	}
+
+	e.FenceProducerEpoch(77, 1)
+
+	// New session at epoch=1 writes seq 0..4 (sequence resets
+	// on epoch bump per the producer client). Must land as a
+	// fresh batch, NOT dedupe against the old epoch-0 batch.
+	off, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(77, 1, 0, 5))
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if off == 0 {
+		t.Errorf("new-epoch batch deduped to offset 0 — fence did not clear recent[]")
+	}
+}
+
+// TestFenceProducerEpochSkipsLowerEpoch: defense in depth —
+// a duplicate fence call (e.g. a retried InitProducerId that
+// returns the same epoch as a previous bump) must be a no-op
+// rather than re-clearing the dedupe window.
+func TestFenceProducerEpochSkipsLowerEpoch(t *testing.T) {
+	e := newIdempotenceEngine(t)
+
+	// PID=88 writes at epoch=2.
+	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(88, 2, 0, 3)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Spurious fence at lower epoch — must be a no-op.
+	e.FenceProducerEpoch(88, 1)
+
+	// Original epoch-2 producer continues — must NOT be fenced.
+	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(88, 2, 3, 3)); err != nil {
+		t.Errorf("legit epoch-2 batch fenced by spurious lower-epoch call: %v", err)
+	}
+}
+
 // TestEngineRejoinFenceClosesZombieWindow walks the gh #22
 // scenario the storage layer enables: producer A connected as
 // "txn-foo" got (PID=42, epoch=0) and wrote 3 records. The

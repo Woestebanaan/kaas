@@ -177,6 +177,86 @@ func TestInitProducerIdNoStoreFallsBackToFreshPID(t *testing.T) {
 	}
 }
 
+// fakeFencer records every FenceProducerEpoch call so tests can
+// assert exactly when the cross-partition fence fires.
+type fakeFencer struct {
+	calls []fakeFenceCall
+}
+type fakeFenceCall struct {
+	pid   int64
+	epoch int16
+}
+
+func (f *fakeFencer) FenceProducerEpoch(pid int64, epoch int16) {
+	f.calls = append(f.calls, fakeFenceCall{pid, epoch})
+}
+
+// TestInitProducerIdFencerNotCalledOnFirstAlloc: the first
+// InitProducerId for a new transactional.id has no previous
+// session to fence. Calling FenceProducerEpoch with epoch=0
+// would be a no-op (FenceProducerEpoch only advances), but a
+// regression that fired it spuriously would still be confusing
+// in logs. Pin that we skip it.
+func TestInitProducerIdFencerNotCalledOnFirstAlloc(t *testing.T) {
+	fencer := &fakeFencer{}
+	h := NewInitProducerIdHandler().
+		WithTxnStateStore(newFakeTxnStore()).
+		WithFencer(fencer)
+
+	callInitPIDWithTxn(t, h, "first-time", 4)
+
+	if len(fencer.calls) != 0 {
+		t.Errorf("first InitProducerId fired fence: %+v", fencer.calls)
+	}
+}
+
+// TestInitProducerIdFencerCalledOnRejoin pins the gh #30
+// callback wiring: every bump from epoch=N to N+1 produces a
+// FenceProducerEpoch(pid, N+1) call so the storage layer
+// rejects any in-flight epoch=N writes broker-wide.
+func TestInitProducerIdFencerCalledOnRejoin(t *testing.T) {
+	fencer := &fakeFencer{}
+	h := NewInitProducerIdHandler().
+		WithTxnStateStore(newFakeTxnStore()).
+		WithFencer(fencer)
+
+	pid1, _ := callInitPIDWithTxn(t, h, "rejoiner", 4)
+	pid2, ep2 := callInitPIDWithTxn(t, h, "rejoiner", 4)
+
+	if len(fencer.calls) != 1 {
+		t.Fatalf("expected 1 fence call after one rejoin, got %d: %+v", len(fencer.calls), fencer.calls)
+	}
+	if fencer.calls[0].pid != pid2 || fencer.calls[0].epoch != ep2 {
+		t.Errorf("fence called with (%d, %d), want (%d, %d)",
+			fencer.calls[0].pid, fencer.calls[0].epoch, pid2, ep2)
+	}
+	// Sanity: PID didn't change between calls (this is the gh #22
+	// invariant the gh #30 fence depends on — we want to fence
+	// THIS pid, not a different one).
+	if pid1 != pid2 {
+		t.Errorf("PID changed across rejoin: %d → %d", pid1, pid2)
+	}
+}
+
+// TestInitProducerIdFencerNotCalledForEmptyTxnID: the empty
+// transactional.id sentinel skips the txn store entirely; with
+// no store interaction, there's no rejoin signal, so the fence
+// must not fire. Otherwise every non-transactional idempotent
+// producer's startup would broadcast a useless fence call.
+func TestInitProducerIdFencerNotCalledForEmptyTxnID(t *testing.T) {
+	fencer := &fakeFencer{}
+	h := NewInitProducerIdHandler().
+		WithTxnStateStore(newFakeTxnStore()).
+		WithFencer(fencer)
+
+	callInitPID(t, h, 4)
+	callInitPID(t, h, 4)
+
+	if len(fencer.calls) != 0 {
+		t.Errorf("empty-txn-id calls fired fence: %+v", fencer.calls)
+	}
+}
+
 // callInitPIDWithTxn is callInitPID with a non-empty
 // transactional.id field. v4 only — v0/v1 don't have the
 // PID/epoch echo fields but they DO carry transactional.id.
