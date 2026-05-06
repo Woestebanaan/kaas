@@ -21,6 +21,23 @@ var (
 	ErrNotLeader     = errors.New("storage: not leader for partition")
 	ErrEpochMismatch    = errors.New("storage: epoch behind current partition leader")
 	ErrOffsetOutOfRange = errors.New("storage: offset out of range")
+
+	// ErrOutOfOrderSequence pairs with Kafka error 45
+	// (OUT_OF_ORDER_SEQUENCE_NUMBER): an idempotent producer's batch
+	// arrived with a baseSequence that does not pick up where its
+	// previous batch left off. Producers treat this as fatal —
+	// retrying would only widen the gap — and surface it as a
+	// KafkaException to the application.
+	ErrOutOfOrderSequence = errors.New("storage: out-of-order sequence number")
+	// ErrInvalidProducerEpoch pairs with Kafka error 47: the batch's
+	// producerEpoch is older than what we have on file for this
+	// producerID. Apache Kafka emits this when a zombie producer
+	// (one that was fenced by a newer InitProducerId on the same
+	// transactional ID) tries to write — for skafka stage B it also
+	// fires when a non-transactional producer's epoch goes
+	// backwards, which should never happen on a healthy connection
+	// but is the correct response if it does.
+	ErrInvalidProducerEpoch = errors.New("storage: invalid producer epoch")
 )
 
 // StorageEngine is the interface for reading and writing topic partition data.
@@ -143,6 +160,15 @@ type partitionState struct {
 	flushErr          error
 	committerDone     chan struct{}
 	closing           bool
+
+	// producerStates tracks per-(producerID) idempotence state for
+	// Apache Kafka's idempotent-producer guarantees (gh #12 stage B):
+	// dedupe of in-window retries, OUT_OF_ORDER_SEQUENCE_NUMBER for
+	// gaps, INVALID_PRODUCER_EPOCH for stale-epoch writes. The map is
+	// in-memory only in stage B1; persistence on segment roll is B2.
+	// Nil until the first idempotent batch lands so non-idempotent
+	// partitions don't pay the allocation cost.
+	producerStates map[int64]*producerEntry
 }
 
 // startCommitter spawns the per-partition group-commit goroutine. Must
@@ -531,6 +557,29 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 		return -1, ErrEpochMismatch
 	}
 
+	// gh #12 stage B: idempotence check before we touch the log.
+	// Runs on the partition mutex so dedupe + offset assignment +
+	// state advance are atomic with concurrent Appends. PID == -1
+	// (the wire sentinel for non-idempotent producers) skips this
+	// branch entirely.
+	prodInfo, err := parseBatchProducerInfo(rawBatch)
+	if err != nil {
+		return -1, fmt.Errorf("storage: %w", err)
+	}
+	if ps.producerStates == nil && prodInfo.producerID >= 0 {
+		ps.producerStates = make(map[int64]*producerEntry)
+	}
+	switch action, savedOffset := classifyIdempotence(ps.producerStates, prodInfo); action {
+	case idemDuplicate:
+		return savedOffset, nil
+	case idemOutOfOrder:
+		return -1, ErrOutOfOrderSequence
+	case idemInvalidEpoch:
+		return -1, ErrInvalidProducerEpoch
+	case idemAccept, idemNotIdempotent:
+		// fall through
+	}
+
 	// Brokers own offsets. Producers ship baseOffset=0 (the wire convention);
 	// rewrite to the partition's high watermark before persisting so reads
 	// see strictly-increasing offsets across batches. CRC32C covers
@@ -544,6 +593,9 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 
 	if err := ps.active.appendBatch(rawBatch, e.cfg.IndexIntervalBytes); err != nil {
 		return -1, err
+	}
+	if prodInfo.producerID >= 0 {
+		recordIdempotenceOutcome(ps.producerStates, prodInfo, baseOffset)
 	}
 	ps.highWater = baseOffset + int64(lastOffsetDelta) + 1
 	ps.pendingFlushRecords += int64(lastOffsetDelta) + 1

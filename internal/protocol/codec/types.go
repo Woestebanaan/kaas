@@ -36,6 +36,8 @@ const (
 	ErrTopicAlreadyExists          ErrorCode = 36
 	ErrInvalidPartitions           ErrorCode = 37
 	ErrInvalidRequest              ErrorCode = 42
+	ErrOutOfOrderSequenceNumber    ErrorCode = 45
+	ErrDuplicateSequenceNumber     ErrorCode = 46
 	ErrInvalidProducerEpoch        ErrorCode = 47
 	ErrTransactionalIdAuthFailed   ErrorCode = 53
 	ErrCoordinatorLoadInProgress   ErrorCode = 14

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/woestebanaan/skafka/internal/lease"
+	"github.com/woestebanaan/skafka/internal/storage"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 	"github.com/woestebanaan/skafka/tests/testutil/recordbatch"
 )
@@ -199,6 +200,35 @@ func TestCheckOwnership_LegacyPathWhenNoCoordinator(t *testing.T) {
 	leases.leader = false
 	if ok, _ := h.checkOwnership("events", 0); ok {
 		t.Error("legacy path should fail when not leader")
+	}
+}
+
+// TestErrCodeForAppendError pins the storage-error → wire-code map
+// gh #12 stage B introduces. The map is one-line per branch but
+// production-critical: a regression that drops 45 or 47 sends
+// idempotent producers into infinite retries (instead of failing
+// fast) and corrupts their dedupe-tracking. Unit-test isolated from
+// the rest of Handle so future error-code additions can extend the
+// switch without re-running the full Produce path.
+func TestErrCodeForAppendError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int16
+	}{
+		{"out-of-order → 45", storage.ErrOutOfOrderSequence, 45},
+		{"invalid-epoch → 47", storage.ErrInvalidProducerEpoch, 47},
+		{"epoch-mismatch falls through to UNKNOWN_SERVER_ERROR", storage.ErrEpochMismatch, -1},
+		{"epoch-mismatch wrapped also -1", fmt.Errorf("wrap: %w", storage.ErrEpochMismatch), -1},
+		{"out-of-order wrapped is unwrapped to 45", fmt.Errorf("wrap: %w", storage.ErrOutOfOrderSequence), 45},
+		{"raw I/O error → -1", fmt.Errorf("io: short read"), -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errCodeForAppendError(tc.err); got != tc.want {
+				t.Errorf("got=%d, want=%d", got, tc.want)
+			}
+		})
 	}
 }
 

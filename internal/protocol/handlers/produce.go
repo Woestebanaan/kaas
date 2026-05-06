@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
@@ -120,7 +121,7 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 			mx.WriteLatency.Record(context.Background(), time.Since(appendStart).Seconds(),
 				metric.WithAttributes(attribute.String("topic", td.Name)))
 			if err != nil {
-				pr.ErrorCode = int16(codec.ErrUnknownServerError)
+				pr.ErrorCode = errCodeForAppendError(err)
 				pr.BaseOffset = -1
 			} else {
 				topicAttr := metric.WithAttributes(attribute.String("topic", td.Name))
@@ -181,6 +182,26 @@ func heartbeatFresh(c kafkaapi.BrokerCoordinator) bool {
 		return false
 	}
 	return time.Since(last) <= produceHeartbeatTimeout
+}
+
+// errCodeForAppendError maps the storage-layer error sentinel a
+// failed Append returns onto the Kafka wire error code the producer
+// expects in the response. The idempotent-producer sentinels
+// (ErrOutOfOrderSequence, ErrInvalidProducerEpoch) get explicit
+// codes so the Java client can react correctly: 45 raises a
+// fatal OutOfOrderSequenceException; 47 fences the producer
+// (it stops sending and surfaces InvalidProducerEpochException).
+// Anything else collapses to UNKNOWN_SERVER_ERROR (-1) — the
+// producer's blanket "broker failure" path.
+func errCodeForAppendError(err error) int16 {
+	switch {
+	case errors.Is(err, storage.ErrOutOfOrderSequence):
+		return int16(codec.ErrOutOfOrderSequenceNumber)
+	case errors.Is(err, storage.ErrInvalidProducerEpoch):
+		return int16(codec.ErrInvalidProducerEpoch)
+	default:
+		return int16(codec.ErrUnknownServerError)
+	}
 }
 
 // produceHeartbeatTimeout mirrors broker.DefaultHeartbeatTimeout (3s).
