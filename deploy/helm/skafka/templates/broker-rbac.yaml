@@ -20,10 +20,19 @@ rules:
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]
     verbs: [get, list, watch]
-  # CRD watches — read-only.
+  # CRD watches — read-only for users / groups / acls (operator
+  # writes them from KafkaUser/KafkaACL CRs; brokers only consume).
   - apiGroups: [skafka.io]
-    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls]
+    resources: [kafkausers, kafkausergroups, kafkaacls]
     verbs: [get, list, watch]
+  # KafkaTopic: brokers watch + manage. The watch covers the
+  # operator-driven path (kubectl apply -f); create/delete cover
+  # the admin-protocol path (gh #51) where Kafbat / kafka-topics.sh
+  # / Java AdminClient calls CreateTopics/DeleteTopics on the broker
+  # and the broker's TopicCRWriter writes the CR.
+  - apiGroups: [skafka.io]
+    resources: [kafkatopics]
+    verbs: [get, list, watch, create, delete]
   # KafkaClusterAssignments mirror: the elected controller broker
   # writes Status to it via internal/controller/k8s_mirror.go after every
   # assignment.json change. Read on every broker (debug/diag); update
