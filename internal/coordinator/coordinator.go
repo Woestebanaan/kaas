@@ -389,11 +389,22 @@ func (m *Manager) deleteGroup(groupID string) int16 {
 func (m *Manager) DescribeGroups(req *api.DescribeGroupsRequest) *api.DescribeGroupsResponse {
 	resp := &api.DescribeGroupsResponse{}
 	for _, id := range req.Groups {
+		dg := api.DescribedGroup{GroupID: id, AuthorizedOperations: -2147483648}
+
+		// Symmetric with ListGroups: a non-coordinator broker
+		// reports the group as Dead even if it has a stale
+		// m.groups entry. Surface the truth (the broker's
+		// authoritative role) instead of leaking transient state.
+		if !m.isCoordinator(id) {
+			dg.GroupState = "Dead"
+			resp.Groups = append(resp.Groups, dg)
+			continue
+		}
+
 		m.mu.Lock()
 		g, ok := m.groups[id]
 		m.mu.Unlock()
 
-		dg := api.DescribedGroup{GroupID: id, AuthorizedOperations: -2147483648}
 		if !ok {
 			dg.GroupState = "Dead"
 		} else {
@@ -421,6 +432,19 @@ func (m *Manager) ListGroups(req *api.ListGroupsRequest) *api.ListGroupsResponse
 
 	resp := &api.ListGroupsResponse{}
 	for id, g := range m.groups {
+		// Each broker only reports the groups it currently owns
+		// per the cluster assignment. The Java AdminClient unions
+		// ListGroups responses across all brokers; if a stale
+		// m.groups entry survives on a non-coordinator broker
+		// (e.g. an assignment recompute moved the group elsewhere
+		// before GroupTakeoverDriver's orphan sweep ran), filtering
+		// here keeps the union strictly correct: at most one broker
+		// reports any given group ID. Symmetric with the
+		// isCoordinator gate on JoinGroup / OffsetCommit / etc.
+		// (gh #89 follow-up).
+		if !m.isCoordinator(id) {
+			continue
+		}
 		snap := g.describe()
 		if len(req.StatesFilter) > 0 && !containsString(req.StatesFilter, snap.state) {
 			continue

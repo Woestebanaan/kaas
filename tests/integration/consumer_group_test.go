@@ -279,6 +279,123 @@ func TestOffsetCommitFetch(t *testing.T) {
 	}
 }
 
+// TestListGroupsHidesNonCoordinatorEntries pins the read-side
+// filter that fixes the v0.1.49 verification bug: a broker that
+// has a stale m.groups entry (e.g. left over from a previous
+// "we own this" window) must NOT advertise it via ListGroups
+// once the cluster assignment has moved the group elsewhere. The
+// orphan sweep eventually drops the entry on the next assignment
+// change, but ListGroups is queried independently of changes —
+// the filter keeps the union of broker responses correct
+// even before the sweep fires.
+func TestListGroupsHidesNonCoordinatorEntries(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-A")
+
+	// Bring the group to Empty by joining + leaving.
+	r := mgr.JoinGroup(fastJoin("vis-test", "consumer"), "c1")
+	if r.ErrorCode != 0 {
+		t.Fatalf("Join: %d", r.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: "vis-test", GenerationID: r.GenerationID, MemberID: r.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: r.MemberID, Assignment: []byte("p0")}},
+	})
+	mgr.LeaveGroup(&api.LeaveGroupRequest{GroupID: "vis-test", MemberID: r.MemberID})
+
+	// alwaysGroupSource (the test fixture) returns true for every
+	// OwnsGroup call, so the group lists.
+	listed := mgr.ListGroups(&api.ListGroupsRequest{})
+	found := false
+	for _, g := range listed.Groups {
+		if g.GroupID == "vis-test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ListGroups should include owned group; got %+v", listed.Groups)
+	}
+
+	// Now flip ownership: the broker no longer owns the group.
+	// Subsequent ListGroups must NOT advertise it even though
+	// m.groups still has the entry until the orphan sweep runs.
+	flip := &flippableGroupSource{owns: false, brokerID: "broker-A"}
+	mgr2 := coordinator.NewManager(context.Background(), flip,
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+		coordinator.NewOffsetStore(t.TempDir()))
+
+	// Manually populate m.groups via a JoinGroup that succeeds (flip
+	// is currently true → coordinator) then flip false to simulate
+	// the cluster reassigning the group elsewhere. Use the
+	// recordingMgr-style pattern.
+	flip.SetOwns(true)
+	r2 := mgr2.JoinGroup(fastJoin("flipped", "consumer"), "c2")
+	if r2.ErrorCode != 0 {
+		t.Fatalf("setup Join: %d", r2.ErrorCode)
+	}
+	flip.SetOwns(false)
+
+	listed2 := mgr2.ListGroups(&api.ListGroupsRequest{})
+	for _, g := range listed2.Groups {
+		if g.GroupID == "flipped" {
+			t.Errorf("ListGroups leaked stale entry for non-owned group; got %+v", listed2.Groups)
+		}
+	}
+}
+
+// TestDescribeGroupsReportsDeadForNonOwnedGroup pins the symmetric
+// behaviour for the AdminClient.describeConsumerGroups path: a
+// query for a group on a broker that doesn't own it returns
+// state="Dead" instead of leaking the broker's stale view.
+func TestDescribeGroupsReportsDeadForNonOwnedGroup(t *testing.T) {
+	flip := &flippableGroupSource{owns: true, brokerID: "broker-A"}
+	mgr := coordinator.NewManager(context.Background(), flip,
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+		coordinator.NewOffsetStore(t.TempDir()))
+
+	r := mgr.JoinGroup(fastJoin("desc-test", "consumer"), "c1")
+	if r.ErrorCode != 0 {
+		t.Fatalf("Join: %d", r.ErrorCode)
+	}
+
+	flip.SetOwns(false)
+	resp := mgr.DescribeGroups(&api.DescribeGroupsRequest{Groups: []string{"desc-test"}})
+	if len(resp.Groups) != 1 {
+		t.Fatalf("expected 1 group result, got %+v", resp.Groups)
+	}
+	if resp.Groups[0].GroupState != "Dead" {
+		t.Errorf("non-owned describe state=%q, want Dead", resp.Groups[0].GroupState)
+	}
+}
+
+// flippableGroupSource is a coordinator.GroupAssignmentSource whose
+// OwnsGroup return can be toggled at runtime — needed to simulate
+// "broker used to own this, now doesn't" without spinning up the
+// full assignment file plumbing.
+type flippableGroupSource struct {
+	mu       sync.Mutex
+	owns     bool
+	brokerID string
+}
+
+func (f *flippableGroupSource) OwnsGroup(_ string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.owns
+}
+func (f *flippableGroupSource) GroupCoordinator(_ string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.owns {
+		return "", false
+	}
+	return f.brokerID, true
+}
+func (f *flippableGroupSource) SetOwns(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.owns = v
+}
+
 // TestDeleteGroupsEmptySucceeds: an empty group (no active members,
 // just committed offsets from a prior session) is the AdminClient's
 // happy path. The script audit's gh #89 reproducer follows this
