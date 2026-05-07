@@ -65,13 +65,17 @@ spec:
                       RetentionBytes caps the per-partition log size. When the cleaner runs
                       and a partition's total segment bytes exceed this value, oldest
                       closed segments are deleted until the partition is back under the
-                      limit. Active segment is never touched. Default 0 = unlimited.
+                      limit. Active segment is never touched. -1 = unlimited (Kafka
+                      convention); 0 = treat as unlimited too.
                     format: int64
-                    minimum: 0
+                    minimum: -1
                     type: integer
                   retentionMs:
+                    description: |-
+                      retention.ms in Kafka semantics: -1 means "infinite" (never
+                      delete by time). Streams sets this on its changelog topics.
                     format: int64
-                    minimum: 0
+                    minimum: -1
                     type: integer
                   segmentBytes:
                     format: int64

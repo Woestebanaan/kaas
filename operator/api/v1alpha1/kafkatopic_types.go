@@ -52,13 +52,16 @@ func (t *KafkaTopic) EffectiveTopicName() string {
 }
 
 type KafkaTopicConfig struct {
-	// +kubebuilder:validation:Minimum=0
+	// retention.ms in Kafka semantics: -1 means "infinite" (never
+	// delete by time). Streams sets this on its changelog topics.
+	// +kubebuilder:validation:Minimum=-1
 	RetentionMs *int64 `json:"retentionMs,omitempty"`
 	// RetentionBytes caps the per-partition log size. When the cleaner runs
 	// and a partition's total segment bytes exceed this value, oldest
 	// closed segments are deleted until the partition is back under the
-	// limit. Active segment is never touched. Default 0 = unlimited.
-	// +kubebuilder:validation:Minimum=0
+	// limit. Active segment is never touched. -1 = unlimited (Kafka
+	// convention); 0 = treat as unlimited too.
+	// +kubebuilder:validation:Minimum=-1
 	RetentionBytes *int64 `json:"retentionBytes,omitempty"`
 	// +kubebuilder:validation:Minimum=1
 	SegmentBytes *int64 `json:"segmentBytes,omitempty"`
