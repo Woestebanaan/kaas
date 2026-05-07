@@ -6,7 +6,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/klog/v2"
 )
 
 // CorrelationHandler wraps a slog.Handler and adds trace_id / span_id attributes
@@ -52,6 +54,15 @@ func InstallLogger() {
 		inner = slog.NewJSONHandler(os.Stderr, opts)
 	}
 	slog.SetDefault(slog.New(&CorrelationHandler{inner: inner}))
+
+	// Bridge k8s.io/klog through slog so client-go's leaderelection /
+	// reflector / informer chatter ends up as JSON next to skafka's
+	// own logs. Without this, klog writes its native format
+	// (`I0507 21:20:19.263740 1 leaderelection.go:258] "..."`)
+	// straight to stderr, mixing two log shapes in `kubectl logs`.
+	// logr.FromSlogHandler wraps slog into a logr.Logger that klog
+	// understands.
+	klog.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 }
 
 func parseLevel(s string) slog.Level {

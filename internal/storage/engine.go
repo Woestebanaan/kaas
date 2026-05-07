@@ -301,7 +301,7 @@ func (ps *partitionState) committerLoop() {
 		case nowStalled && !ps.stalled:
 			slog.Warn("storage: fsync watchdog timeout — backend stalled",
 				"partition_dir", ps.dir,
-				"deadline", ps.fsyncMaxLatency,
+				"deadline", ps.fsyncMaxLatency.String(),
 				"seq", seqAtStart)
 		case !nowStalled && ps.stalled:
 			slog.Info("storage: fsync recovered",

@@ -134,7 +134,7 @@ func runBroker(ctx context.Context) {
 			"flushIntervalMessages", storageCfg.FlushIntervalMessages,
 			"segmentBytes", storageCfg.SegmentBytes,
 			"retentionMs", storageCfg.RetentionMs,
-			"fsyncMaxLatency", storageCfg.FsyncMaxLatency)
+			"fsyncMaxLatency", storageCfg.FsyncMaxLatency.String())
 		var err error
 		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, storageCfg)
 		if err != nil {

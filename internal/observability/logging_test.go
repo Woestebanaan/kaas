@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/sdk/trace"
+	"k8s.io/klog/v2"
 )
 
 func TestCorrelationHandlerWithActiveSpan(t *testing.T) {
@@ -45,6 +47,37 @@ func TestCorrelationHandlerWithoutSpan(t *testing.T) {
 
 	if strings.Contains(buf.String(), "trace_id") {
 		t.Errorf("trace_id should be absent when no span: %s", buf.String())
+	}
+}
+
+// TestKlogBridgeEmitsJSON pins the gh #95 follow-up: client-go's
+// klog calls (leaderelection / reflectors / informers) must funnel
+// through the same slog handler skafka uses, so kubectl logs sees
+// one log shape instead of two. Without the bridge, klog would
+// write its native format ("I0507 21:20:19 1 file.go:42] ...")
+// straight to stderr and break JSON parsing.
+func TestKlogBridgeEmitsJSON(t *testing.T) {
+	var buf bytes.Buffer
+	inner := slog.NewJSONHandler(&buf, nil)
+	h := &CorrelationHandler{inner: inner}
+	klog.SetLogger(logr.FromSlogHandler(slog.New(h).Handler()))
+	defer klog.ClearLogger()
+
+	klog.InfoS("leaderelection-style message", "lock", "skafka/skafka-controller")
+
+	out := strings.TrimSpace(buf.String())
+	if out == "" {
+		t.Fatalf("klog did not produce any output through the bridge")
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(out), &entry); err != nil {
+		t.Fatalf("klog output is not JSON: %v\nraw=%s", err, out)
+	}
+	if entry["msg"] != "leaderelection-style message" {
+		t.Errorf("msg=%v, want \"leaderelection-style message\"", entry["msg"])
+	}
+	if entry["lock"] != "skafka/skafka-controller" {
+		t.Errorf("lock=%v, want \"skafka/skafka-controller\"", entry["lock"])
 	}
 }
 
