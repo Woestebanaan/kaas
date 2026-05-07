@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
@@ -270,7 +271,7 @@ func (h *DescribeConfigsHandler) Handle(_ *connstate.ConnState, version int16, b
 				out.ErrorCode = int16(codec.ErrUnknownTopicOrPartition)
 				out.ErrorMessage = "unknown topic"
 			} else {
-				out.Configs = filterConfigs(topicConfigs(), res.ConfigNames, res.ConfigNull)
+				out.Configs = filterConfigs(topicConfigsFor(h.topics, res.ResourceName), res.ConfigNames, res.ConfigNull)
 			}
 		case api.ConfigResourceBroker:
 			out.Configs = filterConfigs(brokerConfigs(h.brokers), res.ConfigNames, res.ConfigNull)
@@ -287,16 +288,74 @@ func (h *DescribeConfigsHandler) Handle(_ *connstate.ConnState, version int16, b
 }
 
 // topicConfigs returns the static topic-level defaults reported for every
-// topic. Values mirror storage.DefaultConfig.
+// topic. Values mirror storage.DefaultConfig. Used both as the
+// fallback set when the topic source can't surface per-topic
+// overrides (test stubs that don't implement TopicConfigSource) and
+// as the basis topicConfigsFor merges per-topic CR fields on top of.
 func topicConfigs() []api.DescribeConfigsEntry {
 	return []api.DescribeConfigsEntry{
 		readOnlyEntry("cleanup.policy", "delete"),
 		readOnlyEntry("retention.ms", "604800000"),
+		readOnlyEntry("retention.bytes", "-1"),
 		readOnlyEntry("segment.bytes", "1073741824"),
+		readOnlyEntry("min.compaction.lag.ms", "0"),
+		readOnlyEntry("delete.retention.ms", "86400000"),
 		readOnlyEntry("index.interval.bytes", "4096"),
 		readOnlyEntry("compression.type", "producer"),
 		readOnlyEntry("min.insync.replicas", "1"),
 	}
+}
+
+// topicConfigsFor returns the configured + default config entries
+// for a specific topic (gh #93). When the topic source exposes
+// per-topic configs (TopicConfigSource — the production
+// broker.TopicRegistry does, test stubs typically don't), each CR
+// override replaces the matching default entry and is marked
+// IsDefault=false / ConfigSource=TOPIC_CONFIG so admin tools render
+// the actual effective value (Apache Kafka's wire contract).
+//
+// Topic config keys with no CR override fall through to the broker
+// default unchanged, exactly matching Apache Kafka's behaviour for
+// keys the user hasn't touched.
+func topicConfigsFor(topics TopicSource, name string) []api.DescribeConfigsEntry {
+	defaults := topicConfigs()
+	cs, ok := topics.(TopicConfigSource)
+	if !ok {
+		return defaults
+	}
+	cfg, ok := cs.TopicConfig(name)
+	if !ok {
+		return defaults
+	}
+	override := func(key, value string) {
+		for i := range defaults {
+			if defaults[i].Name == key {
+				defaults[i].Value = value
+				defaults[i].IsDefault = false
+				defaults[i].ConfigSource = api.ConfigSourceDynamicTopic
+				return
+			}
+		}
+	}
+	if cfg.CleanupPolicy != "" {
+		override("cleanup.policy", cfg.CleanupPolicy)
+	}
+	if cfg.RetentionMs != nil {
+		override("retention.ms", strconv.FormatInt(*cfg.RetentionMs, 10))
+	}
+	if cfg.RetentionBytes != nil {
+		override("retention.bytes", strconv.FormatInt(*cfg.RetentionBytes, 10))
+	}
+	if cfg.SegmentBytes != nil {
+		override("segment.bytes", strconv.FormatInt(*cfg.SegmentBytes, 10))
+	}
+	if cfg.MinCompactionLagMs != nil {
+		override("min.compaction.lag.ms", strconv.FormatInt(*cfg.MinCompactionLagMs, 10))
+	}
+	if cfg.DeleteRetentionMs != nil {
+		override("delete.retention.ms", strconv.FormatInt(*cfg.DeleteRetentionMs, 10))
+	}
+	return defaults
 }
 
 func brokerConfigs(brokers BrokerSource) []api.DescribeConfigsEntry {

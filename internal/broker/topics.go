@@ -36,12 +36,16 @@ func (p CleanupPolicy) IsDelete() bool {
 }
 
 // TopicMeta is the per-topic record TopicRegistry holds. Partitions
-// is the count; Cleanup is the per-topic cleanup.policy when known
-// (empty means "use the default = delete"). Other config fields
-// will land here as #48 follow-ups need them.
+// is the count; Config carries the resolved KafkaTopic Spec.Config
+// fields (gh #93) — every override that's been pushed by
+// TopicWatcher and lives here lands in DescribeConfigs responses
+// with ConfigSource=DYNAMIC_TOPIC_CONFIG. Pointer fields are nil
+// when the CR didn't set the override; the cleaner / handler then
+// fall through to the broker default.
 type TopicMeta struct {
 	Partitions int32
 	Cleanup    CleanupPolicy
+	Config     handlers.TopicConfig
 }
 
 // TopicRegistry is a thread-safe in-memory cache of topic metadata.
@@ -72,12 +76,31 @@ func (r *TopicRegistry) Add(name string, partitions int32) {
 // SetCleanupPolicy is the gh #48 hook: TopicWatcher pushes the
 // resolved cleanup.policy from the KafkaTopic CR's Spec.Config so
 // the cleaner can dispatch correctly. Idempotent; called on every
-// CR observation including no-op reconciles.
+// CR observation including no-op reconciles. Kept as a focused
+// setter (separate from SetTopicConfig) for tests / callers that
+// only care about the cleaner-relevant slice of the config.
 func (r *TopicRegistry) SetCleanupPolicy(name string, policy CleanupPolicy) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	existing := r.topics[name]
 	existing.Cleanup = policy
+	existing.Config.CleanupPolicy = string(policy)
+	r.topics[name] = existing
+}
+
+// SetTopicConfig is the gh #93 hook: TopicWatcher pushes the
+// resolved KafkaTopic CR Spec.Config so DescribeConfigs returns the
+// effective per-topic values instead of broker defaults. Also
+// updates Cleanup so SetTopicConfig fully supersedes the older
+// SetCleanupPolicy contract — callers that have full config can
+// call SetTopicConfig and skip the separate cleanup-policy push.
+// Idempotent; safe to call on every CR observation.
+func (r *TopicRegistry) SetTopicConfig(name string, cfg handlers.TopicConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	existing := r.topics[name]
+	existing.Config = cfg
+	existing.Cleanup = CleanupPolicy(cfg.CleanupPolicy)
 	r.topics[name] = existing
 }
 
@@ -88,6 +111,21 @@ func (r *TopicRegistry) CleanupPolicy(name string) CleanupPolicy {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.topics[name].Cleanup
+}
+
+// TopicConfig satisfies handlers.TopicConfigSource (gh #93). Returns
+// the pushed-from-CR config plus an ok flag so the DescribeConfigs
+// handler can fall through to broker defaults for unknown topics.
+// The returned struct is a value copy — caller may mutate without
+// affecting the registry.
+func (r *TopicRegistry) TopicConfig(name string) (handlers.TopicConfig, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.topics[name]
+	if !ok {
+		return handlers.TopicConfig{}, false
+	}
+	return t.Config, true
 }
 
 func (r *TopicRegistry) Remove(name string) {

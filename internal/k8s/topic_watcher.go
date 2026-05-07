@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/rest"
 	sigs_client "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	operatorv1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
 
@@ -31,12 +32,20 @@ const (
 // the CR — empty when unset (which the broker treats as
 // cleanup.policy=delete, the safe default). Used by gh #48 to decide
 // which partitions enter the compactor's path.
+//
+// Config (gh #93) carries the resolved full per-topic CR config so
+// the broker's TopicRegistry can serve DescribeConfigs with effective
+// values instead of static broker defaults. CleanupPolicy is
+// duplicated into both Config.CleanupPolicy and the typed
+// CleanupPolicy field above to keep the gh #48 cleaner-dispatch
+// callsites untouched while gh #93 plumbs the rest through.
 type TopicEvent struct {
 	Type           TopicEventType
 	Name           string
 	Partitions     int32 // current count for Added/Modified, last-seen count for Deleted
 	OldPartitions  int32 // previous count (only set for Modified)
 	CleanupPolicy  string
+	Config         handlers.TopicConfig
 }
 
 // TopicWatcher streams KafkaTopic CR changes from the API server and fires a
@@ -60,10 +69,13 @@ type TopicWatcher struct {
 // cleanupPolicy alongside partitions lets us fire TopicModified on
 // policy mutation (gh #48) — Modified used to fire only on partition
 // increase, but a CR change from cleanup.policy=delete to compact
-// is just as broker-relevant.
+// is just as broker-relevant. Config (gh #93) extends the same
+// idea to retention.ms / retention.bytes / segment.bytes / etc.,
+// so DescribeConfigs sees CR edits without a broker restart.
 type watcherCacheEntry struct {
 	Partitions    int32
 	CleanupPolicy string
+	Config        handlers.TopicConfig
 }
 
 // NewTopicWatcher builds a watcher bound to the KafkaTopic CRD in namespace.
@@ -243,6 +255,7 @@ func (w *TopicWatcher) handleTerminating(t *operatorv1.KafkaTopic) {
 		Name:          name,
 		Partitions:    last.Partitions,
 		CleanupPolicy: last.CleanupPolicy,
+		Config:        last.Config,
 	})
 }
 
@@ -250,19 +263,21 @@ func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
 	name := t.EffectiveTopicName()
 	newPolicy := t.Spec.Config.CleanupPolicy
 	newParts := t.Spec.Partitions
+	newCfg := topicConfigFromCR(t)
 
 	w.mu.Lock()
 	old, existed := w.cache[name]
 	// Compute the next cached state. Don't shrink Partitions —
 	// operator rejects shrinks, and capping at max(old,new) lets a
 	// later legitimate expansion still produce Modified with the
-	// correct OldPartitions. Policy is the only mutation we accept
+	// correct OldPartitions. Config is the only mutation we accept
 	// in-place.
 	next := old
 	if !existed || newParts > old.Partitions {
 		next.Partitions = newParts
 	}
 	next.CleanupPolicy = newPolicy
+	next.Config = newCfg
 	w.cache[name] = next
 	w.mu.Unlock()
 
@@ -273,6 +288,7 @@ func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
 			Name:          name,
 			Partitions:    newParts,
 			CleanupPolicy: newPolicy,
+			Config:        newCfg,
 		})
 	case newParts > old.Partitions:
 		w.fire(TopicEvent{
@@ -281,22 +297,69 @@ func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
 			Partitions:    newParts,
 			OldPartitions: old.Partitions,
 			CleanupPolicy: newPolicy,
+			Config:        newCfg,
 		})
-	case newPolicy != old.CleanupPolicy:
-		// Policy-only mutation: emit Modified with unchanged
-		// partition count so the broker (gh #48) can
-		// re-dispatch the partition between retention-only and
-		// compactor paths.
+	case !topicConfigEqual(old.Config, newCfg):
+		// Config-only mutation (cleanup.policy, retention.ms,
+		// segment.bytes, etc.): emit Modified with unchanged
+		// partition count so the broker (gh #48) can re-dispatch
+		// retention-vs-compactor and DescribeConfigs (gh #93)
+		// returns the new effective values without a restart.
 		w.fire(TopicEvent{
 			Type:          TopicModified,
 			Name:          name,
 			Partitions:    old.Partitions,
 			OldPartitions: old.Partitions,
 			CleanupPolicy: newPolicy,
+			Config:        newCfg,
 		})
 	case newParts < old.Partitions:
 		slog.Warn("topic watcher: ignoring partition decrease", "topic", name, "old", old.Partitions, "new", newParts)
 	}
+}
+
+// topicConfigFromCR projects KafkaTopicConfig (the operator type) onto
+// handlers.TopicConfig (the broker-side type). Pointer fields are
+// passed through verbatim — the broker treats nil as "no override,
+// fall through to default".
+func topicConfigFromCR(t *operatorv1.KafkaTopic) handlers.TopicConfig {
+	c := t.Spec.Config
+	return handlers.TopicConfig{
+		CleanupPolicy:      c.CleanupPolicy,
+		RetentionMs:        c.RetentionMs,
+		RetentionBytes:     c.RetentionBytes,
+		SegmentBytes:       c.SegmentBytes,
+		MinCompactionLagMs: c.MinCompactionLagMs,
+		DeleteRetentionMs:  c.DeleteRetentionMs,
+	}
+}
+
+// topicConfigEqual is a value-equality check that follows pointers
+// (so two distinct *int64 with the same target compare equal).
+// reflect.DeepEqual would do the same, but rolling it inline keeps
+// the watcher path off the reflect dependency for what is a hot
+// per-event check.
+func topicConfigEqual(a, b handlers.TopicConfig) bool {
+	if a.CleanupPolicy != b.CleanupPolicy {
+		return false
+	}
+	for _, pair := range []struct{ x, y *int64 }{
+		{a.RetentionMs, b.RetentionMs},
+		{a.RetentionBytes, b.RetentionBytes},
+		{a.SegmentBytes, b.SegmentBytes},
+		{a.MinCompactionLagMs, b.MinCompactionLagMs},
+		{a.DeleteRetentionMs, b.DeleteRetentionMs},
+	} {
+		switch {
+		case pair.x == nil && pair.y == nil:
+			continue
+		case pair.x == nil || pair.y == nil:
+			return false
+		case *pair.x != *pair.y:
+			return false
+		}
+	}
+	return true
 }
 
 func (w *TopicWatcher) handleDelete(t *operatorv1.KafkaTopic) {
@@ -314,6 +377,7 @@ func (w *TopicWatcher) handleDelete(t *operatorv1.KafkaTopic) {
 		Name:          name,
 		Partitions:    last.Partitions,
 		CleanupPolicy: last.CleanupPolicy,
+		Config:        last.Config,
 	})
 }
 

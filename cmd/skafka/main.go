@@ -512,7 +512,12 @@ func startTopicWatcher(
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
-			b.SetTopicCleanupPolicy(ev.Name, ev.CleanupPolicy)
+			// gh #93: push the full CR Spec.Config so DescribeConfigs
+			// surfaces effective per-topic values (cleanup.policy,
+			// retention.ms, segment.bytes, …). Supersedes the
+			// gh #48 SetTopicCleanupPolicy push — Cleanup is part of
+			// Config now.
+			b.SetTopicConfig(ev.Name, ev.Config)
 			// Triggers an assignment recompute on whichever broker is
 			// currently controller. No-op on non-controller brokers and
 			// when the v3 runtime is disabled. Without this, new topics
@@ -527,7 +532,7 @@ func startTopicWatcher(
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
-			b.SetTopicCleanupPolicy(ev.Name, ev.CleanupPolicy)
+			b.SetTopicConfig(ev.Name, ev.Config)
 			if ev.OldPartitions != ev.Partitions {
 				rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicResized, ev.Name)
 			}

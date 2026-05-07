@@ -7,6 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	operatorv1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
 
@@ -273,7 +274,13 @@ func TestTopicWatcher_AddedSurfacesCleanupPolicy(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(got))
 	}
-	want := TopicEvent{Type: TopicAdded, Name: "changelog", Partitions: 1, CleanupPolicy: "compact"}
+	want := TopicEvent{
+		Type:          TopicAdded,
+		Name:          "changelog",
+		Partitions:    1,
+		CleanupPolicy: "compact",
+		Config:        handlers.TopicConfig{CleanupPolicy: "compact"},
+	}
 	if got[0] != want {
 		t.Errorf("Added event: got %+v, want %+v", got[0], want)
 	}
@@ -309,6 +316,7 @@ func TestTopicWatcher_PolicyMutationFiresModified(t *testing.T) {
 		Partitions:    1,
 		OldPartitions: 1,
 		CleanupPolicy: "compact",
+		Config:        handlers.TopicConfig{CleanupPolicy: "compact"},
 	}
 	if got[1] != want {
 		t.Errorf("Modified event on policy flip: got %+v, want %+v", got[1], want)
@@ -335,9 +343,91 @@ func TestTopicWatcher_PartitionExpansionWithPolicy(t *testing.T) {
 		Partitions:    5,
 		OldPartitions: 3,
 		CleanupPolicy: "compact",
+		Config:        handlers.TopicConfig{CleanupPolicy: "compact"},
 	}
 	if got[1] != want {
 		t.Errorf("dual-axis Modified: got %+v, want %+v", got[1], want)
+	}
+}
+
+// topicWithConfig builds a CR with a full Spec.Config (gh #93
+// retention/segment/compaction-lag/etc fixture). Used to drive the
+// retention-ms-flips-fire-Modified and SetTopicConfig-pipes-through
+// tests.
+func topicWithConfig(name string, partitions int32, cfg operatorv1.KafkaTopicConfig) *operatorv1.KafkaTopic {
+	return &operatorv1.KafkaTopic{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: operatorv1.KafkaTopicSpec{
+			Partitions: partitions,
+			Config:     cfg,
+		},
+	}
+}
+
+// int64Ptr is a one-liner used by gh #93 test fixtures that need
+// pointer-typed RetentionMs/RetentionBytes/etc literals.
+func int64Ptr(v int64) *int64 { return &v }
+
+// TestTopicWatcher_RetentionMsChangeFiresModified guards the gh #93
+// follow-up to gh #48: a CR whose ONLY change is retention.ms (or
+// any non-cleanup-policy config field) must fire TopicModified so
+// downstream registries get the new value. Pre-#93 only
+// cleanup-policy mutations triggered Modified, so a kubectl-edit
+// changing retention silently never landed in the broker until a
+// restart.
+func TestTopicWatcher_RetentionMsChangeFiresModified(t *testing.T) {
+	w, rec := newTestWatcher()
+	w.processEvent(watch.Added, topicWithConfig("retentive", 1, operatorv1.KafkaTopicConfig{
+		CleanupPolicy: "delete",
+		RetentionMs:   int64Ptr(86400000),
+	}))
+	w.processEvent(watch.Modified, topicWithConfig("retentive", 1, operatorv1.KafkaTopicConfig{
+		CleanupPolicy: "delete",
+		RetentionMs:   int64Ptr(604800000), // bumped from 1d to 7d
+	}))
+
+	got := rec.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 events (Added + Modified), got %d: %+v", len(got), got)
+	}
+	if got[1].Type != TopicModified {
+		t.Errorf("expected Modified on retention.ms change, got %v", got[1].Type)
+	}
+	if got[1].Config.RetentionMs == nil || *got[1].Config.RetentionMs != 604800000 {
+		t.Errorf("Modified event Config.RetentionMs=%v, want 604800000", got[1].Config.RetentionMs)
+	}
+}
+
+// TestTopicWatcher_NoConfigChangeSuppresses guards the inverse: a
+// re-observation of a CR with identical Spec.Config (and identical
+// partition count) MUST NOT fire Modified. Without this, every
+// watcher resync would re-fire downstream cleaner re-dispatch and
+// re-push the same configs into the registry — wasted work and a
+// noise source for kubectl-watching debugging.
+func TestTopicWatcher_NoConfigChangeSuppresses(t *testing.T) {
+	w, rec := newTestWatcher()
+	cfg := operatorv1.KafkaTopicConfig{
+		CleanupPolicy: "compact",
+		RetentionMs:   int64Ptr(-1),
+		SegmentBytes:  int64Ptr(1048576),
+	}
+	w.processEvent(watch.Added, topicWithConfig("steady", 1, cfg))
+	// Two re-observations with identical config — including the same
+	// pointer-target values, but new pointer instances each time.
+	w.processEvent(watch.Modified, topicWithConfig("steady", 1, operatorv1.KafkaTopicConfig{
+		CleanupPolicy: "compact",
+		RetentionMs:   int64Ptr(-1),
+		SegmentBytes:  int64Ptr(1048576),
+	}))
+	w.processEvent(watch.Modified, topicWithConfig("steady", 1, operatorv1.KafkaTopicConfig{
+		CleanupPolicy: "compact",
+		RetentionMs:   int64Ptr(-1),
+		SegmentBytes:  int64Ptr(1048576),
+	}))
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Errorf("expected 1 event (Added only), got %d: %+v", len(got), got)
 	}
 }
 

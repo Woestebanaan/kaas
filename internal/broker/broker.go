@@ -113,6 +113,15 @@ func (b *Broker) SetTopicCleanupPolicy(name, policy string) {
 	b.topics.SetCleanupPolicy(name, CleanupPolicy(policy))
 }
 
+// SetTopicConfig is the gh #93 hook: pipes the watcher-resolved
+// KafkaTopic CR Spec.Config into the registry so DescribeConfigs
+// returns effective per-topic values instead of broker defaults.
+// Supersedes SetTopicCleanupPolicy at the cmd/skafka onEvent
+// callsite — Cleanup gets propagated through Config.CleanupPolicy.
+func (b *Broker) SetTopicConfig(name string, cfg handlers.TopicConfig) {
+	b.topics.SetTopicConfig(name, cfg)
+}
+
 // Topics returns the underlying topic registry. Phase 4+5: cmd/skafka
 // wraps this as the controller's TopicSource so the AssignmentLoop sees
 // every topic the broker knows about.

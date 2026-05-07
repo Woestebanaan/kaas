@@ -50,6 +50,35 @@ type TopicSource interface {
 	All() []TopicEntry
 }
 
+// TopicConfig is the per-topic configuration the broker tracks for
+// each KafkaTopic CR. Mirrors the recognised subset of
+// `cleanup.policy`, `retention.ms`, `retention.bytes`, `segment.bytes`,
+// `min.compaction.lag.ms`, and `delete.retention.ms` — the same set
+// CreateTopics persists into the CR via TopicCRWriter.translateConfigs.
+//
+// Pointer fields are nil when the CR didn't set the corresponding
+// override; the DescribeConfigs handler then surfaces the broker
+// default for that key (with ConfigSource=DEFAULT_CONFIG), and the
+// CR-set fields surface as ConfigSource=TOPIC_CONFIG.
+type TopicConfig struct {
+	CleanupPolicy      string // "delete" | "compact" | "compact,delete"; "" means broker default
+	RetentionMs        *int64
+	RetentionBytes     *int64
+	SegmentBytes       *int64
+	MinCompactionLagMs *int64
+	DeleteRetentionMs  *int64
+}
+
+// TopicConfigSource is an optional supplement to TopicSource: when a
+// production TopicSource also implements TopicConfigSource the
+// DescribeConfigs handler consults it for per-topic overrides
+// (gh #93). Test stubs that only implement TopicSource get the old
+// "broker defaults for everything" behaviour, which matches what
+// they exercised before this contract existed.
+type TopicConfigSource interface {
+	TopicConfig(name string) (TopicConfig, bool)
+}
+
 // TopicEntry is a single topic visible to the metadata handler.
 type TopicEntry struct {
 	Name       string

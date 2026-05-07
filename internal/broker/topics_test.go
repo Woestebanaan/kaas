@@ -1,6 +1,10 @@
 package broker
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/woestebanaan/skafka/internal/protocol/handlers"
+)
 
 // TestCleanupPolicyClassification pins the gh #48 dispatch-key
 // behavior: IsCompact / IsDelete decide which cleaner path a
@@ -83,5 +87,59 @@ func TestTopicRegistryCleanupPolicyForUnknownTopicSafe(t *testing.T) {
 	}
 	if !CleanupPolicy(r.CleanupPolicy("ghost")).IsDelete() {
 		t.Error("unknown-topic should default to IsDelete()=true (fail-safe)")
+	}
+}
+
+// TestTopicRegistrySetTopicConfigStoresAndReturns is the gh #93
+// round-trip: SetTopicConfig writes the full per-topic CR config
+// into the registry, and TopicConfig returns it as a value. Used
+// by the DescribeConfigs handler's TopicConfigSource path.
+func TestTopicRegistrySetTopicConfigStoresAndReturns(t *testing.T) {
+	r := NewTopicRegistry()
+	r.Add("foo", 1)
+	rms := int64(86400000)
+	sb := int64(524288)
+	cfg := handlers.TopicConfig{
+		CleanupPolicy: "compact",
+		RetentionMs:   &rms,
+		SegmentBytes:  &sb,
+	}
+	r.SetTopicConfig("foo", cfg)
+
+	got, ok := r.TopicConfig("foo")
+	if !ok {
+		t.Fatalf("TopicConfig: ok=false, want true")
+	}
+	if got.CleanupPolicy != "compact" {
+		t.Errorf("CleanupPolicy=%q, want compact", got.CleanupPolicy)
+	}
+	if got.RetentionMs == nil || *got.RetentionMs != 86400000 {
+		t.Errorf("RetentionMs=%v, want 86400000", got.RetentionMs)
+	}
+	if got.SegmentBytes == nil || *got.SegmentBytes != 524288 {
+		t.Errorf("SegmentBytes=%v, want 524288", got.SegmentBytes)
+	}
+	// And the cleaner-facing CleanupPolicy view stays consistent.
+	if r.CleanupPolicy("foo") != CleanupPolicyCompact {
+		t.Errorf("post-SetTopicConfig CleanupPolicy=%q, want compact (cleaner dispatch invariant)",
+			r.CleanupPolicy("foo"))
+	}
+}
+
+// TestTopicRegistryTopicConfigUnknownTopic: a TopicConfig for an
+// unknown topic returns ok=false so the DescribeConfigs handler's
+// fallthrough path activates (return broker defaults instead of a
+// zero-value override pretending to be set). The handler doesn't
+// rely on this — its UNKNOWN_TOPIC_OR_PARTITION error gates first
+// — but the registry's contract should match what the interface
+// promises.
+func TestTopicRegistryTopicConfigUnknownTopic(t *testing.T) {
+	r := NewTopicRegistry()
+	got, ok := r.TopicConfig("ghost")
+	if ok {
+		t.Errorf("ok=true for unknown topic, want false")
+	}
+	if got != (handlers.TopicConfig{}) {
+		t.Errorf("zero-value config expected, got %+v", got)
 	}
 }
