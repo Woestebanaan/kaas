@@ -78,16 +78,36 @@ Segment roll splits the work: the in-memory swap (`rollFast`: log fsync + create
 
 **Only the partition's current leader holds open log/index file descriptors** (gh #76 follow-up, v0.1.39+). `openPartition` at startup statifies segments without `OpenFile`. `TakeoverDriver` (registered on `Coordinator.OnAssignmentChange`) calls `storage.TakeOver` which `openHandles()` before recovery; `Relinquish` calls `closeHandles()`. This makes leader-side `os.Remove` (segment retention, DeleteRecords, segment roll cleanup) actually free disk on NFS rather than silly-renaming the file because peer brokers held it open. The committer goroutine snapshots the `*os.File` pointer (not the segment) so a concurrent Relinquish can't race the Sync into a nil deref.
 
+### Idempotent producer (gh #12, #22, #30)
+
+The Java producer enables idempotence by default since Kafka 3.0, so every `kafka-console-producer` / `kafka-verifiable-producer` invocation hits this path. Three layers of state, all on the shared PVC:
+
+- **InitProducerId handler** (`internal/protocol/handlers/init_producer_id.go`, API key 22, v0–v4). For non-transactional producers (empty `transactional.id`): hands out a fresh PID from a monotonic counter seeded at boot, epoch=0. For transactional producers: looks up the txn ID in `TxnStateStore` and returns the **same PID with epoch+1** on every reconnect — the gh #22 fence-on-rejoin contract.
+- **Per-partition sequence tracking** (`internal/storage/idempotence.go`). `partitionState.producerStates` is a `map[int64]*producerEntry` with a 5-batch ring buffer per (PID, epoch) — mirrors Java's `max.in.flight.requests.per.connection=5`. `classifyIdempotence` runs under `ps.mu` before `appendBatch`: returns `idemDuplicate` (echo cached `baseOffset`, no log write), `idemOutOfOrder` (wire 45), `idemInvalidEpoch` (wire 47), or `idemAccept`.
+- **Snapshot persistence** (`internal/storage/producer_snapshot.go`). `producer-state.snapshot` next to `manifest.json`; written on segment roll + `Relinquish` (whatever calls `persistManifestLocked`); restored on `openPartition`. Without it, broker restart loses the dedupe window and in-flight retries get OUT_OF_ORDER.
+- **TxnStateStore** (`internal/coordinator/txn_state.go`). `/data/__cluster/transactional_state.json` maps `transactional.id → {PID, epoch}`. Per-broker file (multi-broker coordinator routing is filed as gh #91; producers reconnecting to a *different* broker for the same txn ID get a fresh PID).
+- **Cross-partition fence on bump** (`DiskStorageEngine.FenceProducerEpoch`). Called from `InitProducerIdHandler` after every `epoch > 0` rejoin. Walks every partition, advances `producerStates[PID].epoch` and clears the dedupe window, so a zombie batch from the old session is fenced even on partitions the new session hasn't yet touched.
+
+### Consumer-group coordinator routing (gh #92)
+
+`coordinator-of-G` is a **pure function**: `hash(groupID) % numBrokers` with the divisor pinned to the full broker set (NOT `len(alive)`), preferred-slot-down falling back to a deterministic alternate from the alive subset. Mirrors Apache Kafka's `partitionFor(groupId)` (which leases the question to `__consumer_offsets` partition leadership); skafka has no `__consumer_offsets` topic, so we hash directly into the broker set. Implementation in `internal/broker/group_hash.go`.
+
+`broker.Coordinator.OwnsGroup` and `GroupCoordinator` are two-tier: explicit `assignment.json.consumerGroups[]` entries win first (the controller's `BalanceGroups` writes them; this is the forward-compat lever for sticky-rebalance), hash fallback otherwise. The two converge for stable broker sets, so the hash is the load-bearing path in steady state.
+
+`coordinator.Manager.SetGroupAssignmentSource` is a hot-swap setter called from `cluster_runtime.go` after `broker.Coordinator` boots — the bootstrap source is a `LocalGroupSource` stub (always-true) used during the brief window before the runtime is up; tests can substitute their own source. **Don't unwire the swap** without re-reading the gh #92 issue; v0.1.52 tried and hit the chicken-and-egg (strict `isCoordinator` blocks fresh-group bootstrap) and was reverted in v0.1.53.
+
+`GroupTakeoverDriver.OnAssignmentChange` runs both a prev→next diff AND an orphan sweep (`m.groups` keys ⊆ `nextOurs`). The sweep keeps memory bounded across alive-set churn and fixes the gh #89 stale-`--list` symptom. `ListGroups` and `DescribeGroups` filter by `isCoordinator` so a stale `m.groups` entry on a non-coordinator broker isn't visible to clients via the AdminClient's union across brokers.
+
 ### KafkaTopic delete on NFS
 
 When a `KafkaTopic` CR is deleted, `metadata.deletionTimestamp` goes non-nil. The topic-watcher fires `TopicDeleted` *immediately* (rather than waiting for the K8s `Deleted` event after finalizers clear); the broker calls `engine.ClosePartition` for each partition to drop its open log + index file handles on the leader broker (followers don't have them open per the previous section). Without this, NFS silly-renames the open files into `.nfsXXXX` entries that EBUSY the operator's `unlinkat` on the parent directory forever (gh #76). The topic-watcher also routes the initial reconcile through `processEvent` so brokers coming up while CRs are already mid-deletion close their handles on startup, not just on watch events.
 
 ### Code map
 
-- `internal/protocol/` — Kafka wire protocol. `codec/` (frames, primitives, CRC32C, per-API request/response types under `codec/api/`), `dispatch.go`, `server.go` (TCP listener + TLS), and `handlers/` (one file per API: `produce.go`, `fetch.go`, `metadata.go`, `consumer_group.go`, `list_offsets.go`, `admin.go`, `sasl.go`, `api_versions.go`).
-- `internal/storage/` — `DiskStorageEngine` with segment files, manifest, watcher, and cleaner. Single-writer enforcement is `BrokerCoordinator.Owns` + epoch-prefixed segment filenames (the old per-partition flock was removed in Phase 4). See "Storage hot path & file-handle ownership" above for the group-commit / lazy-open / async-roll-finalize semantics — those are easy to miss if you read the engine code in isolation.
-- `internal/coordinator/` — Kafka consumer-group coordinator (group state, offset commits). Offsets persisted under `dataDir`. Group ownership comes from a `GroupAssignmentSource`; the runtime variant is wired through the controller assignment, not per-group Leases.
-- `internal/broker/` — broker glue: `Broker` struct, the on-broker `Coordinator` (assignment.json watcher), `controller_watch.go` (1s poll of controller Lease for current epoch), `self_fence.go`, `takeover.go`, `group_takeover.go`, `heartbeat_client.go`.
+- `internal/protocol/` — Kafka wire protocol. `codec/` (frames, primitives, CRC32C, per-API request/response types under `codec/api/`), `dispatch.go`, `server.go` (TCP listener + TLS), and `handlers/` (one file per API: `produce.go`, `fetch.go`, `metadata.go`, `consumer_group.go` (incl. DeleteGroups gh #89), `list_offsets.go`, `admin.go`, `sasl.go`, `api_versions.go`, `init_producer_id.go` (gh #12)).
+- `internal/storage/` — `DiskStorageEngine` with segment files, manifest, watcher, and cleaner. Single-writer enforcement is `BrokerCoordinator.Owns` + epoch-prefixed segment filenames (the old per-partition flock was removed in Phase 4). `idempotence.go` + `producer_snapshot.go` carry the gh #12 idempotent-producer state — see "Idempotent producer" above. See "Storage hot path & file-handle ownership" for the group-commit / lazy-open / async-roll-finalize semantics — those are easy to miss if you read the engine code in isolation.
+- `internal/coordinator/` — Kafka consumer-group coordinator (group state, offset commits). Offsets persisted under `dataDir`. Group ownership comes from a `GroupAssignmentSource` — see "Consumer-group coordinator routing" above for the gh #92 hash-fallthrough. `txn_state.go` carries the gh #22 transactional-id rejoin map.
+- `internal/broker/` — broker glue: `Broker` struct, the on-broker `Coordinator` (assignment.json watcher with hash-fallthrough OwnsGroup/GroupCoordinator, gh #92), `controller_watch.go` (1s poll of controller Lease for current epoch), `self_fence.go`, `takeover.go`, `group_takeover.go` (incl. orphan sweep, gh #89), `group_hash.go` (gh #92 deterministic coordinator), `heartbeat_client.go`.
 - `internal/controller/` — controller-side logic (election, balancer, assignment writer, heartbeat server, k8s CR mirror).
 - `internal/auth/` — SCRAM-SHA-256/512, mTLS principal extraction, ACL evaluation, quotas. Loads from `/data/__cluster/credentials.json` and `acls.json` (written by the operator) with hot-reload via `ClusterFileWatcher`. Toggle off with `SKAFKA_AUTH_DISABLED=true`.
 - `internal/k8s/` — broker-side K8s helpers: `BrokerRegistry` (watches the headless service for peer endpoints), `BrokerIdentity` (parses the ordinal out of the StatefulSet pod name), `TopicWatcher` (fires `TopicDeleted` on `deletionTimestamp` so the broker can close handles before the operator's finalizer reconciles), `ReadinessUpdater` (satisfies the `skafka.io/PartitionsReady` readiness gate once partition directories have been created on the PVC).
@@ -98,9 +118,9 @@ When a `KafkaTopic` CR is deleted, `metadata.deletionTimestamp` goes non-nil. Th
 
 ### Storage layout
 
-Everything cluster-wide lives under `/data/__cluster/` on the shared RWX PVC: `assignment.json` (controller-written, broker-read), `acls.json`, `credentials.json` (operator-written, broker-read with hot-reload), and the `skafka-controller` Lease lives in K8s (not on the PVC).
+Everything cluster-wide lives under `/data/__cluster/` on the shared RWX PVC: `assignment.json` (controller-written, broker-read), `acls.json`, `credentials.json` (operator-written, broker-read with hot-reload), `transactional_state.json` (per-broker txn-id → (PID, epoch) map for gh #22), and per-group offset files under `__consumer_offsets/<groupID>.json`. The `skafka-controller` Lease lives in K8s (not on the PVC).
 
-Per-partition data lives at `/data/<topic>/<partition>/` with epoch-prefixed segment filenames so a stale leader's late writes can't corrupt a new leader's log.
+Per-partition data lives at `/data/<topic>/<partition>/` with epoch-prefixed segment filenames so a stale leader's late writes can't corrupt a new leader's log. Sibling files: `manifest.json` (epoch + HWM + logStartOffset) and `producer-state.snapshot` (gh #12 idempotent-producer dedupe window — see "Idempotent producer" above).
 
 ### Helm chart & deployment
 
