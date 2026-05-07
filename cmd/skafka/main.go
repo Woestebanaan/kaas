@@ -133,7 +133,8 @@ func runBroker(ctx context.Context) {
 		slog.Info("storage config",
 			"flushIntervalMessages", storageCfg.FlushIntervalMessages,
 			"segmentBytes", storageCfg.SegmentBytes,
-			"retentionMs", storageCfg.RetentionMs)
+			"retentionMs", storageCfg.RetentionMs,
+			"fsyncMaxLatency", storageCfg.FsyncMaxLatency)
 		var err error
 		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, storageCfg)
 		if err != nil {

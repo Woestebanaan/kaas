@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -291,8 +292,23 @@ func (ps *partitionState) committerLoop() {
 		// Track storage_stalled as a sticky-but-recoverable flag
 		// (gh #95). Sets on ErrStorageStalled, clears on the first
 		// successful cycle after recovery. healthz unions across
-		// partitions.
-		ps.stalled = errors.Is(err, ErrStorageStalled)
+		// partitions. Log on the rising and falling edges so
+		// operators have a broker-side breadcrumb to correlate with
+		// producer-side REQUEST_TIMED_OUT — silent stalls were the
+		// exact UX gap that motivated #95.
+		nowStalled := errors.Is(err, ErrStorageStalled)
+		switch {
+		case nowStalled && !ps.stalled:
+			slog.Warn("storage: fsync watchdog timeout — backend stalled",
+				"partition_dir", ps.dir,
+				"deadline", ps.fsyncMaxLatency,
+				"seq", seqAtStart)
+		case !nowStalled && ps.stalled:
+			slog.Info("storage: fsync recovered",
+				"partition_dir", ps.dir,
+				"seq", seqAtStart)
+		}
+		ps.stalled = nowStalled
 		ps.completedFlushSeq = seqAtStart
 		ps.flushCond.Broadcast()
 		ps.mu.Unlock()
