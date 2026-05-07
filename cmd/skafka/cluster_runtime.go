@@ -159,16 +159,16 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 	coord := broker.NewCoordinator(cfg.brokerIDStr, store, ctrlWatch, heart)
 	go func() { _ = coord.Start(ctx) }()
 
-	// NOTE: a previous v0.1.52 attempted to swap the consumer-group
-	// manager's GroupAssignmentSource from LocalGroupSource (always-
-	// true) to broker.Coordinator. That broke fresh-group bootstrap:
-	// JoinGroup gates by isCoordinator, but new groups aren't in
-	// assignment.json until the controller observes them via heartbeat
-	// (which only happens after a JoinGroup populates m.groups).
-	// Chicken-and-egg. A proper fix needs hash-based default-coordinator
-	// for unknown groups; tracked separately. Until then, LocalGroupSource
-	// stays — and the v0.1.50/v0.1.51 orphan sweep + read-side filter
-	// are harmless no-ops awaiting the real source.
+	// gh #92: swap the consumer-group manager's GroupAssignmentSource
+	// from the bootstrap LocalGroupSource (always-true) to the real
+	// broker.Coordinator that consults assignment.json with hash
+	// fallback for unknown groups. The hash fallback (Apache Kafka's
+	// partitionFor analogue) bootstraps fresh groups without
+	// controller registration, closing the chicken-and-egg that broke
+	// the earlier v0.1.52 attempt.
+	if cfg.coordMgr != nil {
+		cfg.coordMgr.SetGroupAssignmentSource(coord)
+	}
 
 	// Build the runtime handle early so the onAcquired closure below can
 	// reach back into it (to publish/withdraw the active AssignmentLoop

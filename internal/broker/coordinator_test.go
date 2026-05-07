@@ -225,5 +225,152 @@ func TestCoordinatorReadsExistingFileOnStart(t *testing.T) {
 	}
 }
 
+// hashFallthroughAssignment builds a 3-broker assignment with NO
+// explicit ConsumerGroups entries — exercising the hash fallback
+// path added in gh #92.
+func hashFallthroughAssignment() *kafkaapi.Assignment {
+	return &kafkaapi.Assignment{
+		ControllerEpoch:   1,
+		AssignmentVersion: 1,
+		GeneratedAt:       time.Now(),
+		Controller:        "skafka-0",
+		Brokers: []kafkaapi.BrokerAssignment{
+			{ID: "skafka-0", Health: kafkaapi.BrokerHealthAlive, LastSeen: time.Now()},
+			{ID: "skafka-1", Health: kafkaapi.BrokerHealthAlive, LastSeen: time.Now()},
+			{ID: "skafka-2", Health: kafkaapi.BrokerHealthAlive, LastSeen: time.Now()},
+		},
+		// ConsumerGroups intentionally empty — the hash fallback is
+		// what we're testing.
+	}
+}
+
+// TestCoordinatorOwnsGroupHashFallthrough guards gh #92's headline
+// behaviour: with no explicit ConsumerGroups entry, exactly ONE
+// broker out of three returns true for OwnsGroup(G), and that
+// broker matches PickGroupCoordinator's prediction. Without this,
+// either zero brokers (chicken-and-egg deadlock) or all three
+// brokers (LocalGroupSource leak) would claim the group.
+func TestCoordinatorOwnsGroupHashFallthrough(t *testing.T) {
+	a := hashFallthroughAssignment()
+	const groupID = "my-test-group"
+
+	// Build a Coordinator on each broker and apply the assignment.
+	coords := make(map[string]*Coordinator, 3)
+	for _, brokerID := range []string{"skafka-0", "skafka-1", "skafka-2"} {
+		c := NewCoordinator(brokerID, nil, nil, nil)
+		c.mu.Lock()
+		c.current = a
+		c.mu.Unlock()
+		coords[brokerID] = c
+	}
+
+	// Exactly one broker owns the group.
+	owners := 0
+	var ownerID string
+	for id, c := range coords {
+		if c.OwnsGroup(groupID) {
+			owners++
+			ownerID = id
+		}
+	}
+	if owners != 1 {
+		t.Errorf("OwnsGroup(%q) returned true on %d brokers, want 1", groupID, owners)
+	}
+
+	// And that owner matches the standalone hash function.
+	wantOwner := PickGroupCoordinator(groupID,
+		[]string{"skafka-0", "skafka-1", "skafka-2"},
+		map[string]bool{"skafka-0": true, "skafka-1": true, "skafka-2": true})
+	if ownerID != wantOwner {
+		t.Errorf("OwnsGroup picked %q, but PickGroupCoordinator says %q (broker disagrees with helper)", ownerID, wantOwner)
+	}
+}
+
+// TestCoordinatorGroupCoordinatorHashFallthrough: GroupCoordinator
+// returns the hashed broker for unknown groups instead of
+// (-, false). FindCoordinator delegates to this — without the
+// fallthrough, every fresh group's FindCoordinator would surface
+// CoordinatorNotAvailable and Java clients would retry forever.
+func TestCoordinatorGroupCoordinatorHashFallthrough(t *testing.T) {
+	a := hashFallthroughAssignment()
+	c := NewCoordinator("skafka-0", nil, nil, nil)
+	c.mu.Lock()
+	c.current = a
+	c.mu.Unlock()
+
+	pick, ok := c.GroupCoordinator("fresh-group")
+	if !ok {
+		t.Fatal("GroupCoordinator returned not-found for an unknown group; hash fallback never fired")
+	}
+	if pick != "skafka-0" && pick != "skafka-1" && pick != "skafka-2" {
+		t.Errorf("GroupCoordinator returned %q, want one of skafka-{0,1,2}", pick)
+	}
+}
+
+// TestCoordinatorExplicitAssignmentOverridesHash pins the
+// controller's override channel: an explicit ConsumerGroups entry
+// wins over the hash fallback. This is the lever sticky-rebalance
+// will eventually use; if we ever drop the explicit-first check,
+// this test catches it.
+func TestCoordinatorExplicitAssignmentOverridesHash(t *testing.T) {
+	a := hashFallthroughAssignment()
+	const groupID = "pinned-group"
+	// Whichever broker the hash would NOT pick — pin the group there
+	// to prove the explicit entry overrides.
+	hashOwner := PickGroupCoordinator(groupID,
+		[]string{"skafka-0", "skafka-1", "skafka-2"},
+		map[string]bool{"skafka-0": true, "skafka-1": true, "skafka-2": true})
+	var explicitOwner string
+	for _, b := range []string{"skafka-0", "skafka-1", "skafka-2"} {
+		if b != hashOwner {
+			explicitOwner = b
+			break
+		}
+	}
+	a.ConsumerGroups = []kafkaapi.ConsumerGroupAssignment{
+		{GroupID: groupID, Broker: explicitOwner, Epoch: 1},
+	}
+
+	for _, brokerID := range []string{"skafka-0", "skafka-1", "skafka-2"} {
+		c := NewCoordinator(brokerID, nil, nil, nil)
+		c.mu.Lock()
+		c.current = a
+		c.mu.Unlock()
+		want := brokerID == explicitOwner
+		if got := c.OwnsGroup(groupID); got != want {
+			t.Errorf("on broker %q OwnsGroup=%v, want %v (explicit override should win over hash %q)",
+				brokerID, got, want, hashOwner)
+		}
+	}
+}
+
+// TestCoordinatorOwnsGroupNoAliveBrokers: defense in depth — every
+// broker is dead in the assignment view. OwnsGroup must return
+// false for every broker (otherwise a stale broker would self-claim
+// every group) and GroupCoordinator returns ok=false so
+// FindCoordinator surfaces CoordinatorNotAvailable.
+func TestCoordinatorOwnsGroupNoAliveBrokers(t *testing.T) {
+	a := &kafkaapi.Assignment{
+		ControllerEpoch:   1,
+		AssignmentVersion: 1,
+		GeneratedAt:       time.Now(),
+		Brokers: []kafkaapi.BrokerAssignment{
+			{ID: "skafka-0", Health: kafkaapi.BrokerHealthDead},
+			{ID: "skafka-1", Health: kafkaapi.BrokerHealthDead},
+		},
+	}
+	c := NewCoordinator("skafka-0", nil, nil, nil)
+	c.mu.Lock()
+	c.current = a
+	c.mu.Unlock()
+
+	if c.OwnsGroup("anything") {
+		t.Error("OwnsGroup returned true with all brokers dead")
+	}
+	if _, ok := c.GroupCoordinator("anything"); ok {
+		t.Error("GroupCoordinator returned ok=true with all brokers dead")
+	}
+}
+
 // Sanity: ensure fakeLeases compiles even though we ended up not using it.
 var _ = (&fakeLeases{}).CurrentEpoch

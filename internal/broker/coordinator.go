@@ -231,8 +231,21 @@ func (c *Coordinator) LastHeartbeat() time.Time {
 }
 
 // OwnsGroup reports whether this broker is the assigned coordinator for
-// groupID under the most recently applied assignment. Phase 5: replaces
-// the v2.6 per-group Lease IsCoordinator check.
+// groupID. Two-tier decision (gh #92):
+//
+//  1. Explicit assignment: if c.current.ConsumerGroups has an entry for
+//     groupID, the controller has overridden the default. This path is
+//     reserved for sticky / pinned assignments and is the controller's
+//     forward-compat lever.
+//  2. Hash fallback: pure function of (groupID, brokers). Mirrors
+//     Apache Kafka's partitionFor — no per-group registration, no
+//     bootstrap chicken-and-egg. Coordinator is computed locally on
+//     every broker; consensus is implicit because the (sorted brokers,
+//     hash) pair is the same everywhere.
+//
+// Returns false when no assignment has been loaded yet (the broker is
+// still starting). FindCoordinator surfaces that as
+// CoordinatorNotAvailable so the client retries.
 func (c *Coordinator) OwnsGroup(groupID string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -244,16 +257,15 @@ func (c *Coordinator) OwnsGroup(groupID string) bool {
 			return g.Broker == c.brokerID
 		}
 	}
-	return false
+	brokers, alive := assignmentBrokerSets(c.current)
+	return PickGroupCoordinator(groupID, brokers, alive) == c.brokerID
 }
 
 // GroupCoordinator returns the broker ID assigned to coordinate
-// groupID. Second return is false when the group has no row in the
-// current assignment — the controller hasn't registered it yet.
-// FindCoordinator surfaces that as CoordinatorNotAvailable so the
-// client retries; the next BrokerStatus heartbeat reports the group
-// in active_groups, the controller registers it, the client's next
-// FindCoordinator succeeds.
+// groupID. Same two-tier decision as OwnsGroup: explicit assignment
+// entry first, hash fallback otherwise. Second return is false only
+// when no assignment has been loaded yet OR no broker is alive in
+// the current assignment.
 func (c *Coordinator) GroupCoordinator(groupID string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -265,7 +277,29 @@ func (c *Coordinator) GroupCoordinator(groupID string) (string, bool) {
 			return g.Broker, true
 		}
 	}
-	return "", false
+	brokers, alive := assignmentBrokerSets(c.current)
+	pick := PickGroupCoordinator(groupID, brokers, alive)
+	if pick == "" {
+		return "", false
+	}
+	return pick, true
+}
+
+// assignmentBrokerSets builds (brokers, alive) views from an
+// assignment. brokers is the FULL list (every broker the controller
+// knows about, including draining/dead) so the hash divisor is
+// stable across rolling restarts. alive maps each broker to whether
+// it can currently serve traffic — only `BrokerHealthAlive` counts;
+// `Draining` is treated as down so we don't route fresh traffic to a
+// broker that's deliberately winding down.
+func assignmentBrokerSets(a *kafkaapi.Assignment) ([]string, map[string]bool) {
+	brokers := make([]string, 0, len(a.Brokers))
+	alive := make(map[string]bool, len(a.Brokers))
+	for _, b := range a.Brokers {
+		brokers = append(brokers, b.ID)
+		alive[b.ID] = b.Health == kafkaapi.BrokerHealthAlive
+	}
+	return brokers, alive
 }
 
 // Snapshot returns a defensive copy of the most recently applied
