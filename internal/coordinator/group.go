@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -169,30 +168,6 @@ func (g *group) completeRebalance() {
 	g.state = stateCompletingRebalance
 	g.generationID++
 	g.protocolName = selectProtocol(g.members, g.joinWaiters)
-
-	// gh #98 diagnostic: every completeRebalance logs the final
-	// protocolName, member count, and waiter count so we can trace
-	// "Coordinator selected invalid assignment protocol: null" back
-	// to its origin. To be reverted once the bug is identified.
-	{
-		var leaderID string
-		var leaderProtos int
-		if len(g.joinWaiters) > 0 {
-			leaderID = g.joinWaiters[0].memberID
-			if m := g.members[leaderID]; m != nil {
-				leaderProtos = len(m.protocols)
-			}
-		}
-		slog.Info("[gh-#98 debug] completeRebalance",
-			"group", g.id,
-			"generation", g.generationID,
-			"protocolName", g.protocolName,
-			"protocolType", g.protocolType,
-			"members", len(g.members),
-			"waiters", len(g.joinWaiters),
-			"leader", leaderID,
-			"leaderProtocols", leaderProtos)
-	}
 
 	observability.Global().GroupRebalances.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("consumer_group", g.id)))
