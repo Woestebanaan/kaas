@@ -13,7 +13,7 @@ import (
 func newTestWatcher() (*TopicWatcher, *recordedEvents) {
 	rec := &recordedEvents{}
 	w := &TopicWatcher{
-		cache:       make(map[string]int32),
+		cache:       make(map[string]watcherCacheEntry),
 		terminating: make(map[string]struct{}),
 		onEvent:     rec.append,
 	}
@@ -136,8 +136,8 @@ func TestTopicWatcher_PartitionDecreaseSuppressed(t *testing.T) {
 	w.mu.Lock()
 	cached := w.cache["smoke"]
 	w.mu.Unlock()
-	if cached != 5 {
-		t.Errorf("cache shrank: got %d want 5", cached)
+	if cached.Partitions != 5 {
+		t.Errorf("cache shrank: got %d want 5", cached.Partitions)
 	}
 }
 

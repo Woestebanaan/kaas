@@ -26,11 +26,17 @@ const (
 
 // TopicEvent is fired by TopicWatcher whenever the observed state of a KafkaTopic
 // CR diverges from the watcher's last known state for that topic.
+//
+// CleanupPolicy carries the resolved Spec.Config.CleanupPolicy from
+// the CR — empty when unset (which the broker treats as
+// cleanup.policy=delete, the safe default). Used by gh #48 to decide
+// which partitions enter the compactor's path.
 type TopicEvent struct {
-	Type          TopicEventType
-	Name          string
-	Partitions    int32 // current count for Added/Modified, last-seen count for Deleted
-	OldPartitions int32 // previous count (only set for Modified)
+	Type           TopicEventType
+	Name           string
+	Partitions     int32 // current count for Added/Modified, last-seen count for Deleted
+	OldPartitions  int32 // previous count (only set for Modified)
+	CleanupPolicy  string
 }
 
 // TopicWatcher streams KafkaTopic CR changes from the API server and fires a
@@ -46,8 +52,18 @@ type TopicWatcher struct {
 	backoff   time.Duration
 
 	mu          sync.Mutex
-	cache       map[string]int32
+	cache       map[string]watcherCacheEntry
 	terminating map[string]struct{} // gh #76: track CRs we've already fired TopicDeleted for while finalizers churn, suppress duplicates
+}
+
+// watcherCacheEntry is the watcher's per-topic cached view. Keeping
+// cleanupPolicy alongside partitions lets us fire TopicModified on
+// policy mutation (gh #48) — Modified used to fire only on partition
+// increase, but a CR change from cleanup.policy=delete to compact
+// is just as broker-relevant.
+type watcherCacheEntry struct {
+	Partitions    int32
+	CleanupPolicy string
 }
 
 // NewTopicWatcher builds a watcher bound to the KafkaTopic CRD in namespace.
@@ -65,7 +81,7 @@ func NewTopicWatcher(cfg *rest.Config, namespace string, onEvent func(TopicEvent
 		namespace:   namespace,
 		onEvent:     onEvent,
 		backoff:     time.Second,
-		cache:       make(map[string]int32),
+		cache:       make(map[string]watcherCacheEntry),
 		terminating: make(map[string]struct{}),
 	}, nil
 }
@@ -75,7 +91,7 @@ func NewTopicWatcher(cfg *rest.Config, namespace string, onEvent func(TopicEvent
 func (w *TopicWatcher) Prime(name string, partitions int32) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.cache[name] = partitions
+	w.cache[name] = watcherCacheEntry{Partitions: partitions}
 }
 
 // Run reconciles cache state against a List, then watches for changes.
@@ -217,33 +233,69 @@ func (w *TopicWatcher) handleTerminating(t *operatorv1.KafkaTopic) {
 	w.mu.Unlock()
 
 	if !existed {
-		last = t.Spec.Partitions
+		last = watcherCacheEntry{Partitions: t.Spec.Partitions}
 	}
-	if last <= 0 {
+	if last.Partitions <= 0 {
 		return
 	}
-	w.fire(TopicEvent{Type: TopicDeleted, Name: name, Partitions: last})
+	w.fire(TopicEvent{
+		Type:          TopicDeleted,
+		Name:          name,
+		Partitions:    last.Partitions,
+		CleanupPolicy: last.CleanupPolicy,
+	})
 }
 
 func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
 	name := t.EffectiveTopicName()
+	newPolicy := t.Spec.Config.CleanupPolicy
+	newParts := t.Spec.Partitions
+
 	w.mu.Lock()
 	old, existed := w.cache[name]
-	// Don't shrink the cached count — the operator rejects shrinks, and keeping
-	// the larger value lets a later legitimate expansion still produce a
-	// Modified event with the correct OldPartitions.
-	if !existed || t.Spec.Partitions > old {
-		w.cache[name] = t.Spec.Partitions
+	// Compute the next cached state. Don't shrink Partitions —
+	// operator rejects shrinks, and capping at max(old,new) lets a
+	// later legitimate expansion still produce Modified with the
+	// correct OldPartitions. Policy is the only mutation we accept
+	// in-place.
+	next := old
+	if !existed || newParts > old.Partitions {
+		next.Partitions = newParts
 	}
+	next.CleanupPolicy = newPolicy
+	w.cache[name] = next
 	w.mu.Unlock()
 
 	switch {
 	case !existed:
-		w.fire(TopicEvent{Type: TopicAdded, Name: name, Partitions: t.Spec.Partitions})
-	case old < t.Spec.Partitions:
-		w.fire(TopicEvent{Type: TopicModified, Name: name, Partitions: t.Spec.Partitions, OldPartitions: old})
-	case old > t.Spec.Partitions:
-		slog.Warn("topic watcher: ignoring partition decrease", "topic", name, "old", old, "new", t.Spec.Partitions)
+		w.fire(TopicEvent{
+			Type:          TopicAdded,
+			Name:          name,
+			Partitions:    newParts,
+			CleanupPolicy: newPolicy,
+		})
+	case newParts > old.Partitions:
+		w.fire(TopicEvent{
+			Type:          TopicModified,
+			Name:          name,
+			Partitions:    newParts,
+			OldPartitions: old.Partitions,
+			CleanupPolicy: newPolicy,
+		})
+	case newPolicy != old.CleanupPolicy:
+		// Policy-only mutation: emit Modified with unchanged
+		// partition count so the broker (gh #48) can
+		// re-dispatch the partition between retention-only and
+		// compactor paths.
+		w.fire(TopicEvent{
+			Type:          TopicModified,
+			Name:          name,
+			Partitions:    old.Partitions,
+			OldPartitions: old.Partitions,
+			CleanupPolicy: newPolicy,
+		})
+	case newParts < old.Partitions:
+		slog.Warn("topic watcher: ignoring partition decrease", "topic", name, "old", old.Partitions, "new", newParts)
 	}
 }
 
@@ -257,7 +309,12 @@ func (w *TopicWatcher) handleDelete(t *operatorv1.KafkaTopic) {
 	if !existed {
 		return
 	}
-	w.fire(TopicEvent{Type: TopicDeleted, Name: name, Partitions: last})
+	w.fire(TopicEvent{
+		Type:          TopicDeleted,
+		Name:          name,
+		Partitions:    last.Partitions,
+		CleanupPolicy: last.CleanupPolicy,
+	})
 }
 
 func (w *TopicWatcher) fire(ev TopicEvent) {

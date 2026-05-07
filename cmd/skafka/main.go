@@ -486,7 +486,7 @@ func startTopicWatcher(
 	onEvent := func(ev k8spkg.TopicEvent) {
 		switch ev.Type {
 		case k8spkg.TopicAdded:
-			slog.Info("kafkatopic added", "topic", ev.Name, "partitions", ev.Partitions)
+			slog.Info("kafkatopic added", "topic", ev.Name, "partitions", ev.Partitions, "cleanupPolicy", ev.CleanupPolicy)
 			// Just create partition directories on the PVC. Leadership
 			// is decided by the controller's balancer and surfaces via
 			// assignment.json — no per-partition Lease acquisition here
@@ -497,6 +497,7 @@ func startTopicWatcher(
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
+			b.SetTopicCleanupPolicy(ev.Name, ev.CleanupPolicy)
 			// Triggers an assignment recompute on whichever broker is
 			// currently controller. No-op on non-controller brokers and
 			// when the v3 runtime is disabled. Without this, new topics
@@ -504,14 +505,17 @@ func startTopicWatcher(
 			rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicCreated, ev.Name)
 
 		case k8spkg.TopicModified:
-			slog.Info("kafkatopic expanded", "topic", ev.Name, "old", ev.OldPartitions, "new", ev.Partitions)
+			slog.Info("kafkatopic modified", "topic", ev.Name, "oldPartitions", ev.OldPartitions, "newPartitions", ev.Partitions, "cleanupPolicy", ev.CleanupPolicy)
 			for p := ev.OldPartitions; p < ev.Partitions; p++ {
 				if err := engine.CreatePartition(ev.Name, p); err != nil {
 					slog.Warn("topic watcher: create partition", "topic", ev.Name, "partition", p, "err", err)
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
-			rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicResized, ev.Name)
+			b.SetTopicCleanupPolicy(ev.Name, ev.CleanupPolicy)
+			if ev.OldPartitions != ev.Partitions {
+				rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicResized, ev.Name)
+			}
 
 		case k8spkg.TopicDeleted:
 			slog.Info("kafkatopic deleted", "topic", ev.Name, "partitions", ev.Partitions)

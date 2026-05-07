@@ -104,6 +104,15 @@ func (b *Broker) AddTopic(name string, partitions int32) {
 	b.topics.Add(name, partitions)
 }
 
+// SetTopicCleanupPolicy is the gh #48 hook: cmd/skafka calls this
+// from the topic-watcher onEvent so the broker's cleaner knows
+// whether to dispatch a partition through retention-only or the
+// compactor. Empty policy is fine — the registry treats it as the
+// default (delete).
+func (b *Broker) SetTopicCleanupPolicy(name, policy string) {
+	b.topics.SetCleanupPolicy(name, CleanupPolicy(policy))
+}
+
 // Topics returns the underlying topic registry. Phase 4+5: cmd/skafka
 // wraps this as the controller's TopicSource so the AssignmentLoop sees
 // every topic the broker knows about.
