@@ -251,6 +251,21 @@ func runBroker(ctx context.Context) {
 		b.AddTopic(t.Name, t.Partitions)
 	}
 
+	// gh #48: combined retention (gh #47) + compaction cleaner.
+	// Per-topic cleanup.policy decides which path each partition
+	// takes. Policy source is the broker's TopicRegistry — the
+	// topic-watcher (started below) pushes CR-driven values into
+	// it via b.SetTopicCleanupPolicy on every observation. The
+	// adapter shaves the typed broker.CleanupPolicy down to the
+	// string the storage-side interface expects (avoids a typed
+	// dependency from internal/storage onto internal/broker).
+	if engine != nil {
+		cleaner := storage.NewRetentionCleaner(engine, leaseManager, 0).
+			WithPolicySource(cleanupPolicyAdapter{b.Topics()})
+		go cleaner.Run(ctx)
+		slog.Info("retention + compaction cleaner started")
+	}
+
 	// v3 cluster runtime must boot BEFORE RegisterHandlers so the
 	// BrokerCoordinator is available for the produce handler to pick up
 	// via WithCoordinator. In single-broker dev mode (no k8sClient or
@@ -682,6 +697,18 @@ func applyStorageEnv(cfg storage.Config) storage.Config {
 // returns it as a time.Duration. Empty / unparseable returns def. Used
 // for the Phase 8 controllerLease.* knobs; passing 0 to the cluster
 // runtime falls back to controller.New's hardcoded defaults.
+// cleanupPolicyAdapter satisfies storage.CleanupPolicySource by
+// shaving the typed broker.CleanupPolicy down to a plain string.
+// Keeps internal/storage from having to import internal/broker
+// (which would form a cycle: broker imports storage).
+type cleanupPolicyAdapter struct {
+	r *broker.TopicRegistry
+}
+
+func (a cleanupPolicyAdapter) CleanupPolicy(topic string) string {
+	return string(a.r.CleanupPolicy(topic))
+}
+
 func envSecondsOr(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {

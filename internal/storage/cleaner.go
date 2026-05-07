@@ -9,12 +9,40 @@ import (
 	"github.com/woestebanaan/skafka/internal/lease"
 )
 
-// RetentionCleaner deletes log segments that exceed the configured retention period.
-// Only the partition leader runs the cleaner for each partition.
+// CleanupPolicySource is the gh #48 hook the cleaner uses to learn
+// each topic's cleanup.policy. Production wires
+// *broker.TopicRegistry through a thin adapter — keeping the
+// dependency at this small interface avoids importing
+// internal/broker from internal/storage (which would form a
+// cycle: broker imports storage already).
+//
+// Empty string means "default", which the cleaner treats as
+// cleanup.policy=delete (retention-only). Unknown strings also
+// fall through to the default — fail-safe: never silently start
+// compacting based on a misspelled policy.
+type CleanupPolicySource interface {
+	CleanupPolicy(topic string) string
+}
+
+// RetentionCleaner runs both retention (delete-by-age and
+// delete-by-size, gh #47) and log compaction (gh #48). Which path
+// each partition takes is decided by its cleanup.policy:
+//
+//   ""              → retention only (the default)
+//   "delete"        → retention only
+//   "compact"       → compaction only
+//   "compact,delete" → both passes (Apache supports this combo;
+//                      Streams uses it for changelog topics
+//                      under EOS)
+//
+// Only the partition leader runs the cleaner for each partition;
+// followers (in skafka's RF=1 model, that's the broker that lost
+// the assignment) skip via the lease check.
 type RetentionCleaner struct {
-	engine  *DiskStorageEngine
-	leases  lease.LeaseManager
-	interval time.Duration
+	engine    *DiskStorageEngine
+	leases    lease.LeaseManager
+	interval  time.Duration
+	policySrc CleanupPolicySource
 }
 
 // NewRetentionCleaner creates a cleaner that runs every interval (default 5 minutes).
@@ -23,6 +51,23 @@ func NewRetentionCleaner(engine *DiskStorageEngine, leases lease.LeaseManager, i
 		interval = 5 * time.Minute
 	}
 	return &RetentionCleaner{engine: engine, leases: leases, interval: interval}
+}
+
+// WithPolicySource wires the gh #48 cleanup.policy lookup. Without
+// it, every partition is treated as cleanup.policy=delete (the
+// pre-#48 behaviour) — that's the safe default for tests and
+// dev mode.
+func (c *RetentionCleaner) WithPolicySource(src CleanupPolicySource) *RetentionCleaner {
+	c.policySrc = src
+	return c
+}
+
+// policyIsCompact / policyIsDelete: tiny dispatch helpers. Live in
+// storage rather than re-importing broker.CleanupPolicy because
+// the dependency direction is broker → storage.
+func policyIsCompact(p string) bool { return p == "compact" || p == "compact,delete" }
+func policyIsDelete(p string) bool {
+	return p == "" || p == "delete" || p == "compact,delete"
 }
 
 // Run starts the retention loop, blocking until ctx is cancelled.
@@ -51,6 +96,29 @@ func (c *RetentionCleaner) runOnce() {
 func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 	ps, ok := c.engine.getPartition(p.Topic, p.Partition)
 	if !ok {
+		return
+	}
+
+	policy := ""
+	if c.policySrc != nil {
+		policy = c.policySrc.CleanupPolicy(p.Topic)
+	}
+
+	// gh #48: if the topic's policy involves compaction, run it
+	// first. Compaction operates on closed segments and produces
+	// a single replacement segment — the retention pass that
+	// follows still applies its time/size rules to whatever
+	// remains. compactPartition takes ps.mu briefly at the head
+	// and tail; we don't hold it during compaction's I/O.
+	if policyIsCompact(policy) {
+		if _, _, cerr := c.engine.compactPartition(ps); cerr != nil {
+			slog.Warn("compactor: partition failed",
+				"topic", p.Topic, "partition", p.Partition, "err", cerr)
+		}
+	}
+
+	if !policyIsDelete(policy) {
+		// Pure compaction (no retention) — done.
 		return
 	}
 
