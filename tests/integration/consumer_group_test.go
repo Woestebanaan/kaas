@@ -279,6 +279,164 @@ func TestOffsetCommitFetch(t *testing.T) {
 	}
 }
 
+// TestManagerSetGroupAssignmentSourceHotSwap pins gh #92's load-
+// bearing wiring: the manager starts with one source (the bootstrap
+// LocalGroupSource in production; alwaysGroupSource in tests) and
+// the cluster_runtime swaps in broker.Coordinator after it boots.
+// The setter is the channel that flip happens through; without it
+// production would be stuck on always-true and the v0.1.51 read-
+// side filter would be a no-op.
+func TestManagerSetGroupAssignmentSourceHotSwap(t *testing.T) {
+	mgr := coordinator.NewManager(context.Background(), &alwaysGroupSource{brokerID: "test"},
+		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+		coordinator.NewOffsetStore(t.TempDir()))
+
+	// alwaysGroupSource: every group is owned by this broker.
+	r := mgr.JoinGroup(fastJoin("hotswap", "consumer"), "c")
+	if r.ErrorCode != 0 {
+		t.Fatalf("first Join (alwaysGroupSource): errCode=%d", r.ErrorCode)
+	}
+
+	// Swap in a never-source: this broker now owns nothing.
+	mgr.SetGroupAssignmentSource(&neverGroupSource{})
+
+	// Subsequent JoinGroup must be rejected with NOT_COORDINATOR
+	// — proves the swap took effect on the live hot path.
+	r2 := mgr.JoinGroup(fastJoin("post-swap", "consumer"), "c2")
+	if r2.ErrorCode != 16 {
+		t.Errorf("post-swap Join errCode=%d, want 16 (NOT_COORDINATOR) — swap did not take effect on JoinGroup", r2.ErrorCode)
+	}
+
+	// And FindCoordinator on the now-not-coordinator broker
+	// returns CoordinatorNotAvailable so the client retries.
+	fc := mgr.FindCoordinator(&api.FindCoordinatorRequest{Key: "any-group"})
+	if fc.ErrorCode != 15 {
+		t.Errorf("post-swap FindCoordinator errCode=%d, want 15 (CoordinatorNotAvailable)", fc.ErrorCode)
+	}
+}
+
+// hashRoutingSource is a coordinator.GroupAssignmentSource that
+// hash-routes groups to a fixed broker set. Mirrors what
+// broker.Coordinator does in production via assignment.json's
+// brokers list. Used to drive the manager's isCoordinator gate
+// through Apache-Kafka-style deterministic routing without
+// spinning up a full Coordinator + assignment file.
+type hashRoutingSource struct {
+	selfBrokerID string
+	brokers      []string
+}
+
+func (h *hashRoutingSource) OwnsGroup(groupID string) bool {
+	owner := h.coord(groupID)
+	return owner == h.selfBrokerID
+}
+func (h *hashRoutingSource) GroupCoordinator(groupID string) (string, bool) {
+	owner := h.coord(groupID)
+	return owner, owner != ""
+}
+func (h *hashRoutingSource) coord(groupID string) string {
+	if len(h.brokers) == 0 {
+		return ""
+	}
+	// Use the same FNV-1a hash + modulo as production
+	// (internal/broker/group_hash.go). Re-implemented locally so
+	// this test doesn't depend on the broker package — keeps
+	// integration tests self-contained.
+	const offset32 = 2166136261
+	const prime32 = 16777619
+	hash := uint32(offset32)
+	for i := 0; i < len(groupID); i++ {
+		hash ^= uint32(groupID[i])
+		hash *= prime32
+	}
+	return h.brokers[int(hash%uint32(len(h.brokers)))]
+}
+
+// TestJoinGroupHashRoutingExactlyOneOwner pins the gh #92 chain:
+// with broker.Coordinator-shaped GroupAssignmentSource (deterministic
+// hash), exactly ONE of three Manager instances accepts a JoinGroup
+// for any given group. The other two return NOT_COORDINATOR.
+// Without hash routing, either zero (chicken-and-egg deadlock) or
+// all three (LocalGroupSource leak) accept — the live cluster's
+// behaviour is determined by THIS contract.
+func TestJoinGroupHashRoutingExactlyOneOwner(t *testing.T) {
+	const groupID = "hash-routed-group"
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+
+	// Build one Manager per broker, each with its own self-aware
+	// hashRoutingSource. This is the test analogue of three
+	// brokers each running their own coordinator.Manager wired
+	// to their own broker.Coordinator.
+	managers := make(map[string]*coordinator.Manager, 3)
+	for _, b := range brokers {
+		src := &hashRoutingSource{selfBrokerID: b, brokers: brokers}
+		mgr := coordinator.NewManager(context.Background(), src,
+			func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
+			coordinator.NewOffsetStore(t.TempDir()))
+		managers[b] = mgr
+	}
+
+	owners := 0
+	var ownerID string
+	for id, mgr := range managers {
+		r := mgr.JoinGroup(fastJoin(groupID, "consumer"), "c")
+		if r.ErrorCode == 0 {
+			owners++
+			ownerID = id
+		} else if r.ErrorCode != 16 {
+			t.Errorf("%s: unexpected errCode=%d (want 0=accept or 16=NOT_COORDINATOR)", id, r.ErrorCode)
+		}
+	}
+	if owners != 1 {
+		t.Errorf("JoinGroup accepted on %d brokers, want 1", owners)
+	}
+	// Bonus: the broker that accepted matches the standalone hash
+	// — proves the manager's gate uses the source's answer
+	// faithfully.
+	expected := (&hashRoutingSource{brokers: brokers}).coord(groupID)
+	if ownerID != expected {
+		t.Errorf("acceptor=%s, but hash predicts %s", ownerID, expected)
+	}
+}
+
+// TestFindCoordinatorHashFallthroughEndToEnd pins the
+// FindCoordinator → groupSrc.GroupCoordinator chain. Production
+// wires broker.Coordinator as the source; this test uses
+// hashRoutingSource (the same answer shape) to drive the Manager
+// without a full broker.Coordinator. The contract: FindCoordinator
+// returns the hashed broker for an unknown group, with errCode=0.
+// Without this end-to-end coverage, a refactor that breaks the
+// FindCoordinator handler's lookupOne path could ship without the
+// unit-level Coordinator tests catching it.
+func TestFindCoordinatorHashFallthroughEndToEnd(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	src := &hashRoutingSource{selfBrokerID: "skafka-1", brokers: brokers}
+	mgr := coordinator.NewManager(context.Background(), src,
+		// lookupBroker translates broker IDs to advertised host:port.
+		func(id string) (int32, string, int32, bool) {
+			switch id {
+			case "skafka-0":
+				return 0, "skafka-0.svc", 9092, true
+			case "skafka-1":
+				return 1, "skafka-1.svc", 9092, true
+			case "skafka-2":
+				return 2, "skafka-2.svc", 9092, true
+			}
+			return 0, "", 0, false
+		},
+		coordinator.NewOffsetStore(t.TempDir()))
+
+	resp := mgr.FindCoordinator(&api.FindCoordinatorRequest{Key: "fresh-group"})
+	if resp.ErrorCode != 0 {
+		t.Fatalf("FindCoordinator errCode=%d, want 0 (hash fallthrough should resolve unknown groups)", resp.ErrorCode)
+	}
+	expected := src.coord("fresh-group")
+	wantHost := expected + ".svc"
+	if resp.Host != wantHost {
+		t.Errorf("FindCoordinator host=%q, want %q (hash routes to %q)", resp.Host, wantHost, expected)
+	}
+}
+
 // TestListGroupsHidesNonCoordinatorEntries pins the read-side
 // filter that fixes the v0.1.49 verification bug: a broker that
 // has a stale m.groups entry (e.g. left over from a previous
