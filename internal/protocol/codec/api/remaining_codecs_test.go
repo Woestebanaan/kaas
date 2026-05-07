@@ -302,6 +302,63 @@ func TestSyncGroupRoundTripV0(t *testing.T) {
 	}
 }
 
+// TestSyncGroupResponseAssignmentNonNullableV3 pins the gh #96
+// fix: Apache Kafka's schema declares SyncGroupResponse.Assignment
+// non-nullable at every version. Pre-fix skafka encoded it via
+// WriteNullableBytes, so a nil assignment (e.g. in error responses
+// or transient handler paths) emitted int32(-1) on the wire and
+// the Java client's generated decoder threw
+// `RuntimeException: non-nullable field assignment was serialized
+// as null`. After the fix, a nil assignment must encode as
+// int32(0) — empty bytes, never null marker.
+func TestSyncGroupResponseAssignmentNonNullableV3(t *testing.T) {
+	resp := &SyncGroupResponse{ErrorCode: 27, Assignment: nil} // RebalanceInProgress
+	w := codec.NewWriter()
+	EncodeSyncGroupResponse(w, resp, 3)
+
+	// v3 wire shape: ThrottleTimeMs(int32) | ErrorCode(int16) | Assignment(int32 len + bytes)
+	// throttle 0, errorCode 27, assignment length 0 → 4+2+4 = 10 bytes total.
+	got := w.Bytes()
+	if len(got) != 10 {
+		t.Fatalf("len(got)=%d, want 10. raw=%x", len(got), got)
+	}
+	// Last 4 bytes are the assignment length prefix.
+	prefix := got[len(got)-4:]
+	if prefix[0] == 0xFF && prefix[1] == 0xFF && prefix[2] == 0xFF && prefix[3] == 0xFF {
+		t.Fatalf("assignment prefix is int32(-1) — null marker, the gh #96 bug. raw=%x", got)
+	}
+	if prefix[0] != 0 || prefix[1] != 0 || prefix[2] != 0 || prefix[3] != 0 {
+		t.Errorf("assignment prefix=%x, want 00000000 (length 0). raw=%x", prefix, got)
+	}
+}
+
+// TestSyncGroupResponseAssignmentNonNullableV4Flexible covers the
+// flexible-version wire shape (v4+). Compact-bytes uses varint
+// (length+1); empty bytes is varint(1) = 0x01. Null is varint(0)
+// = 0x00 — what the pre-fix code emitted via
+// WriteCompactNullableBytes(nil), tripping the same Java-client
+// non-nullable decode.
+func TestSyncGroupResponseAssignmentNonNullableV4Flexible(t *testing.T) {
+	resp := &SyncGroupResponse{ErrorCode: 27, Assignment: nil}
+	w := codec.NewWriter()
+	EncodeSyncGroupResponse(w, resp, 4)
+
+	got := w.Bytes()
+	// v4 wire (no v5 fields): ThrottleTimeMs(int32) | ErrorCode(int16) |
+	// Assignment(varint(len+1)) | empty tagged fields (varint 0)
+	// → 4 + 2 + 1 + 1 = 8 bytes for empty assignment.
+	if len(got) != 8 {
+		t.Fatalf("len(got)=%d, want 8. raw=%x", len(got), got)
+	}
+	// Byte at offset 6 is the assignment varint prefix.
+	if got[6] == 0x00 {
+		t.Fatalf("assignment varint is 0 — null marker, the gh #96 bug. raw=%x", got)
+	}
+	if got[6] != 0x01 {
+		t.Errorf("assignment varint=%x, want 0x01 (compact len 0). raw=%x", got[6], got)
+	}
+}
+
 // ---- OffsetCommit ----
 
 func TestOffsetCommitRoundTripV2(t *testing.T) {

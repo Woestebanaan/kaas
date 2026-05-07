@@ -107,10 +107,18 @@ func EncodeSyncGroupResponse(w *codec.Writer, resp *SyncGroupResponse, version i
 			w.WriteNullableString(resp.ProtocolName, resp.ProtocolName == "")
 		}
 	}
+	// Assignment is NON-nullable in Apache Kafka's schema for every
+	// version of SyncGroupResponse — error responses ship an empty
+	// ByteBuffer, not null. Skafka used to emit it via the nullable
+	// writers, which writes int32(-1) / varint(0) when Assignment ==
+	// nil; the Java client's generated decoder throws
+	// `RuntimeException: non-nullable field assignment was serialized
+	// as null` during the next rebalance, killing the consumer.
+	// Mirror Apache by always writing length-prefixed empty bytes.
 	if flexible {
-		w.WriteCompactNullableBytes(resp.Assignment)
+		w.WriteCompactBytes(resp.Assignment)
 		w.WriteEmptyTaggedFields()
 	} else {
-		w.WriteNullableBytes(resp.Assignment)
+		w.WriteBytes(resp.Assignment)
 	}
 }

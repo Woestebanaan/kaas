@@ -139,10 +139,18 @@ func EncodeJoinGroupResponse(w *codec.Writer, resp *JoinGroupResponse, version i
 			if version >= 5 {
 				w.WriteCompactNullableString(m.GroupInstanceID, m.GroupInstanceID == "")
 			}
+			// Members[].Metadata is non-nullable in Apache Kafka's
+			// schema (gh #96 fix mirror) — same wire-encoding bug
+			// class as SyncGroupResponse.Assignment. Non-leader
+			// members get an empty-but-non-null bytes payload; the
+			// leader gets each member's protocol metadata so it
+			// can run assign(). Writing a null marker would crash
+			// the Java consumer's generated decoder during the
+			// rebalance.
 			if flexible {
-				w.WriteCompactNullableBytes(m.Metadata)
+				w.WriteCompactBytes(m.Metadata)
 			} else {
-				w.WriteNullableBytes(m.Metadata)
+				w.WriteBytes(m.Metadata)
 			}
 			if flexible {
 				w.WriteEmptyTaggedFields()

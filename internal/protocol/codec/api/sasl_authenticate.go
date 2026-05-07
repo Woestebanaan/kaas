@@ -40,10 +40,14 @@ func EncodeSaslAuthenticateResponse(w *codec.Writer, resp *SaslAuthenticateRespo
 	w.WriteInt16(resp.ErrorCode)
 	if flexible {
 		w.WriteCompactNullableString(resp.ErrorMessage, resp.ErrorMessage == "")
-		w.WriteCompactNullableBytes(resp.AuthBytes)
+		// AuthBytes is non-nullable in Apache Kafka's schema
+		// (gh #96 fix mirror). Even on auth completion when the
+		// server has no further challenge to issue, the wire
+		// payload is empty bytes, not null.
+		w.WriteCompactBytes(resp.AuthBytes)
 	} else {
 		w.WriteNullableString(resp.ErrorMessage, resp.ErrorMessage == "")
-		w.WriteNullableBytes(resp.AuthBytes)
+		w.WriteBytes(resp.AuthBytes)
 	}
 	if version >= 1 {
 		w.WriteInt64(resp.SessionTTLMs)
