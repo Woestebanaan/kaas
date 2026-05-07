@@ -159,6 +159,17 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 	coord := broker.NewCoordinator(cfg.brokerIDStr, store, ctrlWatch, heart)
 	go func() { _ = coord.Start(ctx) }()
 
+	// gh #89/v0.1.51 follow-up: hot-swap the consumer-group manager's
+	// GroupAssignmentSource from the bootstrap LocalGroupSource
+	// (always-true) to the real broker.Coordinator that consults
+	// assignment.json. Without this, every broker thinks it owns
+	// every group, the read-side filter on ListGroups/DescribeGroups
+	// is a no-op, and stale entries surface in --list across all
+	// brokers.
+	if cfg.coordMgr != nil {
+		cfg.coordMgr.SetGroupAssignmentSource(coord)
+	}
+
 	// Build the runtime handle early so the onAcquired closure below can
 	// reach back into it (to publish/withdraw the active AssignmentLoop
 	// pointer used by NotifyTopicChange).

@@ -41,9 +41,16 @@ type BrokerLookup func(brokerID string) (nodeID int32, host string, port int32, 
 // assigns groups via assignment.json, validated by BrokerCoordinator).
 type Manager struct {
 	ctx          context.Context
-	groupSrc     GroupAssignmentSource
 	lookupBroker BrokerLookup
 	offsets      *OffsetStore
+
+	// groupSrcMu protects atomic swap of groupSrc — cluster_runtime
+	// hot-replaces the bootstrap LocalGroupSource with the real
+	// broker.Coordinator once the cluster runtime is up. Read on
+	// every isCoordinator call (hot path: JoinGroup, OffsetCommit,
+	// ListGroups, ...).
+	groupSrcMu sync.RWMutex
+	groupSrc   GroupAssignmentSource
 
 	mu     sync.Mutex
 	groups map[string]*group
@@ -118,10 +125,30 @@ func (m *Manager) RelinquishGroup(groupID string) {
 // isCoordinator returns true if this broker is the assigned coordinator
 // for groupID under the cluster's current assignment.
 func (m *Manager) isCoordinator(groupID string) bool {
-	if m.groupSrc == nil {
+	m.groupSrcMu.RLock()
+	src := m.groupSrc
+	m.groupSrcMu.RUnlock()
+	if src == nil {
 		return false
 	}
-	return m.groupSrc.OwnsGroup(groupID)
+	return src.OwnsGroup(groupID)
+}
+
+// SetGroupAssignmentSource atomically replaces the source the
+// Manager consults to decide "do I own this group?". cmd/skafka
+// uses it to swap the bootstrap LocalGroupSource (always-true,
+// good enough until the cluster runtime is up) for the real
+// broker.Coordinator that consults assignment.json.
+//
+// gh #89/v0.1.51 follow-up: with LocalGroupSource still wired in
+// production, the read-side filter on ListGroups and DescribeGroups
+// has nothing to filter against — every broker reports every group
+// it has ever seen. Swapping in broker.Coordinator makes the filter
+// load-bearing.
+func (m *Manager) SetGroupAssignmentSource(src GroupAssignmentSource) {
+	m.groupSrcMu.Lock()
+	m.groupSrc = src
+	m.groupSrcMu.Unlock()
 }
 
 // ---- API handler entry points ----
@@ -130,10 +157,13 @@ func (m *Manager) FindCoordinator(req *api.FindCoordinatorRequest) *api.FindCoor
 	resp := &api.FindCoordinatorResponse{}
 
 	lookupOne := func(groupID string) (int32, string, int32, int16) {
-		if m.groupSrc == nil {
+		m.groupSrcMu.RLock()
+		src := m.groupSrc
+		m.groupSrcMu.RUnlock()
+		if src == nil {
 			return 0, "", 0, int16(codec.ErrCoordinatorNotAvailable)
 		}
-		brokerID, ok := m.groupSrc.GroupCoordinator(groupID)
+		brokerID, ok := src.GroupCoordinator(groupID)
 		if !ok {
 			// Group not yet in the cluster assignment. The client should
 			// retry — the controller will register the group on the next
