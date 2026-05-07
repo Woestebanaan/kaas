@@ -147,6 +147,105 @@ func TestRetentionCleaner_NoLimitNoDeletes(t *testing.T) {
 
 // TestReadTopicConfig_RoundTrip writes a per-topic config and reads it
 // back. Asserts the operator → broker rendezvous file works end-to-end.
+// staticPolicy implements CleanupPolicySource for tests — returns
+// a fixed string regardless of topic name.
+type staticPolicy string
+
+func (p staticPolicy) CleanupPolicy(_ string) string { return string(p) }
+
+// TestRetentionCleaner_DispatchByPolicy guards the gh #48 phase 4
+// branch table: which path each policy takes through cleanPartition.
+// Without this test, a refactor of the policy switch could silently
+// flip "compact" to "delete" or skip retention on "compact,delete"
+// — both production-critical regressions.
+//
+// We can't easily run a real compaction in this lightweight unit
+// (compaction needs valid segment files with batches), so we use a
+// proxy: count whether the retention pass executes by checking
+// whether OLD-timestamped closed segments get deleted. The
+// retention cleaner only walks them when policyIsDelete returns
+// true.
+func TestRetentionCleaner_DispatchByPolicy(t *testing.T) {
+	cases := []struct {
+		policy           string
+		wantRetentionRun bool
+	}{
+		{"", true},                // default = retention only
+		{"delete", true},          // explicit delete = retention only
+		{"compact", false},        // compaction only — retention skipped
+		{"compact,delete", true},  // both — retention also runs
+		{"unknown-string", false}, // fail-safe — neither runs
+	}
+	for _, tc := range cases {
+		t.Run(tc.policy, func(t *testing.T) {
+			dir := t.TempDir()
+			leases := &neverLeaderLeases{}
+			cfg := DefaultConfig()
+			cfg.RetentionMs = 1 // any segment with maxTimestamp older than this gets dropped
+			e, err := NewDiskStorageEngine(dir, leases, cfg)
+			if err != nil {
+				t.Fatalf("engine: %v", err)
+			}
+
+			pdir := filepath.Join(dir, "t", "0")
+			_ = os.MkdirAll(pdir, 0o755)
+			// Build a closed segment with maxTimestamp far in the
+			// past so retention would delete it if the path runs.
+			seg := makeClosedSegment(t, pdir, 0, 1024)
+			seg.maxTimestamp = 1 // 1ms since epoch — well past any cutoff
+			ps := &partitionState{
+				dir:      pdir,
+				segments: []segmentMeta{seg},
+			}
+			active, _ := createSegment(pdir, 1000, 0)
+			ps.active = active
+			e.partitions[e.partKey("t", 0)] = ps
+
+			cleaner := NewRetentionCleaner(e, leases, 0).
+				WithPolicySource(staticPolicy(tc.policy))
+			cleaner.cleanPartition(PartitionID{Topic: "t", Partition: 0})
+
+			retentionRan := len(ps.segments) == 0
+			if retentionRan != tc.wantRetentionRun {
+				t.Errorf("policy=%q: retention ran=%v, want %v (segments left=%d)",
+					tc.policy, retentionRan, tc.wantRetentionRun, len(ps.segments))
+			}
+		})
+	}
+}
+
+// TestRetentionCleaner_NoPolicySourceFallsBackToDelete: a cleaner
+// constructed without WithPolicySource must still run retention
+// (the pre-#48 behaviour). Defense in depth — the broker's
+// production path always wires a source, but tests / dev mode
+// might not.
+func TestRetentionCleaner_NoPolicySourceFallsBackToDelete(t *testing.T) {
+	dir := t.TempDir()
+	leases := &neverLeaderLeases{}
+	cfg := DefaultConfig()
+	cfg.RetentionMs = 1
+	e, _ := NewDiskStorageEngine(dir, leases, cfg)
+	pdir := filepath.Join(dir, "t", "0")
+	_ = os.MkdirAll(pdir, 0o755)
+	seg := makeClosedSegment(t, pdir, 0, 1024)
+	seg.maxTimestamp = 1
+	ps := &partitionState{
+		dir:      pdir,
+		segments: []segmentMeta{seg},
+	}
+	active, _ := createSegment(pdir, 1000, 0)
+	ps.active = active
+	e.partitions[e.partKey("t", 0)] = ps
+
+	// No WithPolicySource — c.policySrc stays nil.
+	cleaner := NewRetentionCleaner(e, leases, 0)
+	cleaner.cleanPartition(PartitionID{Topic: "t", Partition: 0})
+
+	if len(ps.segments) != 0 {
+		t.Errorf("nil-source cleaner left %d segments; should have deleted (default = retention)", len(ps.segments))
+	}
+}
+
 func TestReadTopicConfig_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	want := int64(10 << 30)
