@@ -191,14 +191,20 @@ func heartbeatFresh(c kafkaapi.BrokerCoordinator) bool {
 // codes so the Java client can react correctly: 45 raises a
 // fatal OutOfOrderSequenceException; 47 fences the producer
 // (it stops sending and surfaces InvalidProducerEpochException).
-// Anything else collapses to UNKNOWN_SERVER_ERROR (-1) — the
-// producer's blanket "broker failure" path.
+// ErrStorageStalled (gh #95) maps to REQUEST_TIMED_OUT (7) — the
+// Java client treats it as a retriable timeout, which is exactly
+// what the operator wants while waiting for NFS / the storage
+// backend to recover. Anything else collapses to
+// UNKNOWN_SERVER_ERROR (-1) — the producer's blanket "broker
+// failure" path.
 func errCodeForAppendError(err error) int16 {
 	switch {
 	case errors.Is(err, storage.ErrOutOfOrderSequence):
 		return int16(codec.ErrOutOfOrderSequenceNumber)
 	case errors.Is(err, storage.ErrInvalidProducerEpoch):
 		return int16(codec.ErrInvalidProducerEpoch)
+	case errors.Is(err, storage.ErrStorageStalled):
+		return int16(codec.ErrRequestTimedOut)
 	default:
 		return int16(codec.ErrUnknownServerError)
 	}

@@ -18,6 +18,7 @@ type stubRuntime struct {
 	partitionsLed        int
 	partitionsAssigned   int
 	partitionsRecovering int
+	storageStalled       bool
 }
 
 func (s *stubRuntime) IsController() bool         { return s.isController }
@@ -30,6 +31,7 @@ func (s *stubRuntime) AssignmentAgeMs() int64     { return s.assignmentAgeMs }
 func (s *stubRuntime) PartitionsLed() int         { return s.partitionsLed }
 func (s *stubRuntime) PartitionsAssigned() int    { return s.partitionsAssigned }
 func (s *stubRuntime) PartitionsRecovering() int  { return s.partitionsRecovering }
+func (s *stubRuntime) StorageStalled() bool       { return s.storageStalled }
 
 // hitHandler runs the handler once and returns the decoded body.
 func hitHandler(t *testing.T, brokerID string, listeners []string, tls *TLSInfo, src RuntimeState) map[string]any {

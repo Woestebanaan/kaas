@@ -38,6 +38,19 @@ var (
 	// backwards, which should never happen on a healthy connection
 	// but is the correct response if it does.
 	ErrInvalidProducerEpoch = errors.New("storage: invalid producer epoch")
+
+	// ErrStorageStalled fires when the partition committer's fsync
+	// exceeds Config.FsyncMaxLatency (gh #95). The underlying RWX
+	// backend is unreachable / unresponsive — typically a crashed NFS
+	// server. Without the watchdog, fsync sits in an uninterruptible
+	// kernel syscall for as long as the backend takes to recover, and
+	// every appender on the partition queues silently behind ps.mu
+	// while the broker still passes /healthz. Surfacing the timeout
+	// as a real error makes the Produce handler fail fast with
+	// REQUEST_TIMED_OUT, lets /healthz flag storage_stalled, and
+	// gives the Java client's idempotent retry loop something
+	// recoverable to chew on instead of dropping the connection.
+	ErrStorageStalled = errors.New("storage: fsync exceeded FsyncMaxLatency")
 )
 
 // StorageEngine is the interface for reading and writing topic partition data.
@@ -92,6 +105,23 @@ type Config struct {
 	// replication-equivalent guarantees from below can relax this; 0 disables
 	// message-driven flushing entirely (sync only at segment roll).
 	FlushIntervalMessages int64
+
+	// FsyncMaxLatency bounds how long the committer waits for one
+	// logFile.Sync() before concluding the storage backend has stalled
+	// (gh #95). When the deadline fires, committerLoop sets
+	// flushErr=ErrStorageStalled, broadcasts the flushCond so queued
+	// appenders fail fast, and continues — the next Append cycle gets
+	// a fresh attempt. The orphaned Sync goroutine sticks around until
+	// the kernel returns; on a healthy backend that's milliseconds, on
+	// a hung NFS it can be minutes, but it doesn't block any other
+	// committer or appender.
+	//
+	// Default 30 s — short enough to surface inside the Java
+	// idempotent producer's request.timeout.ms (typically 30-120 s),
+	// long enough to ride out a normal NFS server restart. 0 disables
+	// the watchdog and restores pre-#95 behaviour (Sync may block
+	// indefinitely).
+	FsyncMaxLatency time.Duration
 }
 
 func DefaultConfig() Config {
@@ -100,6 +130,7 @@ func DefaultConfig() Config {
 		IndexIntervalBytes:    4096,
 		RetentionMs:           7 * 24 * int64(time.Hour/time.Millisecond),
 		FlushIntervalMessages: 1,
+		FsyncMaxLatency:       30 * time.Second,
 	}
 }
 
@@ -160,6 +191,24 @@ type partitionState struct {
 	flushErr          error
 	committerDone     chan struct{}
 	closing           bool
+
+	// fsyncMaxLatency mirrors Config.FsyncMaxLatency at the moment
+	// startCommitter ran. Per-partition rather than per-engine so the
+	// committer's tight loop doesn't have to chase the engine pointer
+	// through ps.mu (#95).
+	fsyncMaxLatency time.Duration
+
+	// stalled is true while the most recent fsync timed out and
+	// hasn't recovered. healthz aggregates this over all partitions
+	// to surface a cluster-level "storage backend hung" signal.
+	stalled bool
+
+	// syncOverride is a test-only hook that replaces the default
+	// logFile.Sync() in committerLoop. Production callers leave it
+	// nil and the committer falls through to the real syscall.
+	// Used by gh #95 timeout tests to simulate an NFS hang without
+	// needing an actual hung filesystem.
+	syncOverride func() error
 
 	// producerStates tracks per-(producerID) idempotence state for
 	// Apache Kafka's idempotent-producer guarantees (gh #12 stage B):
@@ -226,7 +275,11 @@ func (ps *partitionState) committerLoop() {
 		var err error
 		if logFile != nil {
 			start := time.Now()
-			err = logFile.Sync()
+			syncFn := func() error { return logFile.Sync() }
+			if ps.syncOverride != nil {
+				syncFn = ps.syncOverride
+			}
+			err = syncWithDeadline(syncFn, ps.fsyncMaxLatency)
 			observability.Global().FsyncLatency.Record(context.Background(), time.Since(start).Seconds())
 		}
 
@@ -235,9 +288,38 @@ func (ps *partitionState) committerLoop() {
 		// cycle. Lets a transient EBADF from a Relinquish race recover
 		// once the next leadership takes over and signals fresh.
 		ps.flushErr = err
+		// Track storage_stalled as a sticky-but-recoverable flag
+		// (gh #95). Sets on ErrStorageStalled, clears on the first
+		// successful cycle after recovery. healthz unions across
+		// partitions.
+		ps.stalled = errors.Is(err, ErrStorageStalled)
 		ps.completedFlushSeq = seqAtStart
 		ps.flushCond.Broadcast()
 		ps.mu.Unlock()
+	}
+}
+
+// syncWithDeadline runs syncFn in a child goroutine and waits up to
+// max for it to return (gh #95). When the deadline fires, returns
+// ErrStorageStalled and lets the syncFn goroutine continue running
+// to completion in the background. The orphan eventually exits when
+// the underlying syscall returns; on a hung NFS that can be minutes
+// (the kernel can't preempt an in-flight RPC) but doesn't block the
+// next committer cycle from issuing a fresh attempt.
+//
+// max <= 0 disables the watchdog: syncFn is called inline. Matches
+// the documented "0 disables" semantics on Config.FsyncMaxLatency.
+func syncWithDeadline(syncFn func() error, max time.Duration) error {
+	if max <= 0 {
+		return syncFn()
+	}
+	done := make(chan error, 1)
+	go func() { done <- syncFn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(max):
+		return ErrStorageStalled
 	}
 }
 
@@ -510,6 +592,10 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 
 	// Group-commit committer goroutine. Spawned exactly once per
 	// partitionState before it's exposed to Append callers (gh #82).
+	// FsyncMaxLatency snapshot stamps the watchdog deadline (gh #95);
+	// per-partition rather than per-engine so the committer hot path
+	// doesn't have to chase the engine pointer.
+	ps.fsyncMaxLatency = e.cfg.FsyncMaxLatency
 	ps.startCommitter()
 
 	e.mu.Lock()
@@ -640,6 +726,15 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 	// serial fsyncs into 1 (best case) or O(N/batch_arrival_rate)
 	// in steady state.
 	if e.cfg.FlushIntervalMessages > 0 && ps.pendingFlushRecords >= e.cfg.FlushIntervalMessages {
+		// Clear any stale error from a previous cycle (gh #95). flushErr
+		// is "sticky" so concurrent appenders that piggybacked onto a
+		// failed cycle all see the same error — but a NEW request that
+		// arrives after the failed cycle completed should not fail
+		// immediately on a leftover sentinel; it deserves its own
+		// fresh attempt. Without this, ErrStorageStalled (or any
+		// transient EBADF from a Relinquish race) would lock the
+		// partition into a permanent error state until restart.
+		ps.flushErr = nil
 		ps.requestedFlushSeq++
 		mySeq := ps.requestedFlushSeq
 		ps.pendingFlushRecords = 0
@@ -1083,6 +1178,25 @@ func (e *DiskStorageEngine) FenceProducerEpoch(pid int64, epoch int16) {
 		}
 		ps.mu.Unlock()
 	}
+}
+
+// AnyStalled reports whether at least one partition's most recent
+// committer fsync exceeded FsyncMaxLatency (gh #95). Healthz aggregates
+// this into a cluster-level signal so operators see "storage backend
+// hung" before queued appenders accumulate to the point that the broker
+// looks externally idle. Cleared per-partition by the next clean fsync.
+func (e *DiskStorageEngine) AnyStalled() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, ps := range e.partitions {
+		ps.mu.Lock()
+		stalled := ps.stalled
+		ps.mu.Unlock()
+		if stalled {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *DiskStorageEngine) AllPartitions() []PartitionID {

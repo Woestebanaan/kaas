@@ -685,6 +685,11 @@ func envOr(key, def string) string {
 //     1 (default) = fsync per record; N > 1 = fsync every N records;
 //     0 = no message-driven flush (only segment roll).
 //
+//   SKAFKA_FSYNC_MAX_LATENCY_MS — fsync watchdog deadline (gh #95).
+//     30000 ms (default) = surface ErrStorageStalled if a single
+//     committer fsync exceeds 30 s. 0 disables the watchdog so Sync
+//     can block indefinitely (pre-#95 behaviour).
+//
 // Invalid values are logged and ignored so a typo doesn't crash the broker.
 func applyStorageEnv(cfg storage.Config) storage.Config {
 	if v := os.Getenv("SKAFKA_FLUSH_INTERVAL_MESSAGES"); v != "" {
@@ -693,6 +698,14 @@ func applyStorageEnv(cfg storage.Config) storage.Config {
 		} else {
 			slog.Warn("invalid SKAFKA_FLUSH_INTERVAL_MESSAGES, keeping default",
 				"value", v, "default", cfg.FlushIntervalMessages)
+		}
+	}
+	if v := os.Getenv("SKAFKA_FSYNC_MAX_LATENCY_MS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			cfg.FsyncMaxLatency = time.Duration(n) * time.Millisecond
+		} else {
+			slog.Warn("invalid SKAFKA_FSYNC_MAX_LATENCY_MS, keeping default",
+				"value", v, "default", cfg.FsyncMaxLatency)
 		}
 	}
 	return cfg

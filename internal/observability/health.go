@@ -28,6 +28,13 @@ type RuntimeState interface {
 	PartitionsLed() int
 	PartitionsAssigned() int
 	PartitionsRecovering() int
+	// StorageStalled reports whether at least one partition's most
+	// recent committer fsync timed out per Config.FsyncMaxLatency
+	// (gh #95). Lets healthz surface a "storage backend wedged" signal
+	// before the broker accumulates enough queued appenders to look
+	// outwardly idle. Implementations that don't track storage health
+	// should return false.
+	StorageStalled() bool
 }
 
 // HealthState matches the schema in skafka-plan-v3.md (Phase 10). The
@@ -52,6 +59,7 @@ type HealthState struct {
 	PartitionsLed        int    `json:"partitions_led"`
 	PartitionsAssigned   int    `json:"partitions_assigned"`
 	PartitionsRecovering int    `json:"partitions_recovering"`
+	StorageStalled       bool   `json:"storage_stalled,omitempty"`
 }
 
 // TLSInfo reports TLS listener readiness.
@@ -97,6 +105,7 @@ func HealthHandler(brokerID string, listeners []string, tls *TLSInfo, source Run
 			s.PartitionsLed = source.PartitionsLed()
 			s.PartitionsAssigned = source.PartitionsAssigned()
 			s.PartitionsRecovering = source.PartitionsRecovering()
+			s.StorageStalled = source.StorageStalled()
 		}
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(s)

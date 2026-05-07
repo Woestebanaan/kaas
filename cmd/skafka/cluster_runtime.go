@@ -387,6 +387,17 @@ func (s *healthRuntimeState) PartitionsAssigned() int {
 // 0 here, which is correct in steady state.
 func (s *healthRuntimeState) PartitionsRecovering() int { return 0 }
 
+// StorageStalled rolls up the per-partition committer fsync watchdog
+// state (gh #95). True when any partition's most recent fsync exceeded
+// FsyncMaxLatency — operators see this on /healthz before queued
+// appenders accumulate to "broker looks idle" levels.
+func (s *healthRuntimeState) StorageStalled() bool {
+	if s.rt == nil || s.rt.engine == nil {
+		return false
+	}
+	return s.rt.engine.AnyStalled()
+}
+
 // runtimeGaugeSource adapts clusterRuntime to observability.GaugeSource
 // so the Phase 10 ObservableGauges (is_controller, assignment_version,
 // per-partition leader/epoch/HWM, broker counts, file size) sample from
