@@ -20,10 +20,25 @@ import (
 )
 
 // Config holds TCP server configuration.
+//
+// Listener / TLSPlainListener are optional pre-bound listeners that
+// take precedence over the corresponding *Addr fields when non-nil.
+// Tests use them to eliminate the address-allocation race when
+// multiple in-process brokers want loopback-OS-assigned ports —
+// allocating with `net.Listen("tcp", "127.0.0.1:0")` and passing
+// the listener directly closes the gap between port assignment and
+// rebind that would otherwise let a parallel test grab the port.
+// In production both are nil and Start binds via *Addr as before.
+//
+// TLSPlainListener is the plaintext TCP listener; Server wraps it
+// with `tls.NewListener(_, TLSConfig)`. (`tls.Listen(addr, cfg)`
+// would re-do the listen step we're trying to skip.)
 type Config struct {
-	ListenAddr    string      // default ":9092"
-	TLSListenAddr string      // optional, e.g. ":9093"; empty = disabled
-	TLSConfig     *tls.Config // required if TLSListenAddr is set
+	ListenAddr        string      // default ":9092"
+	Listener          net.Listener // optional pre-bound; takes precedence over ListenAddr
+	TLSListenAddr     string      // optional, e.g. ":9093"; empty = disabled
+	TLSPlainListener  net.Listener // optional pre-bound plaintext listener wrapped with TLSConfig
+	TLSConfig         *tls.Config  // required if TLSListenAddr or TLSPlainListener is set
 }
 
 // Server is the Kafka protocol TCP server.
@@ -48,21 +63,33 @@ func (s *Server) SetAuthEngine(e auth.AuthEngine) { s.authEngine = e }
 // Start opens the listener(s) and begins accepting connections.
 // It returns once all listeners are bound (or on error).
 func (s *Server) Start(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("server: listen %s: %w", s.cfg.ListenAddr, err)
+	var ln net.Listener
+	if s.cfg.Listener != nil {
+		ln = s.cfg.Listener
+	} else {
+		var err error
+		ln, err = net.Listen("tcp", s.cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("server: listen %s: %w", s.cfg.ListenAddr, err)
+		}
 	}
 	s.listeners = append(s.listeners, ln)
-	slog.Info("skafka listening", "addr", s.cfg.ListenAddr)
+	slog.Info("skafka listening", "addr", ln.Addr().String())
 
-	if s.cfg.TLSListenAddr != "" && s.cfg.TLSConfig != nil {
-		tlsLn, err := tls.Listen("tcp", s.cfg.TLSListenAddr, s.cfg.TLSConfig)
-		if err != nil {
-			_ = ln.Close()
-			return fmt.Errorf("server: tls listen %s: %w", s.cfg.TLSListenAddr, err)
+	if s.cfg.TLSConfig != nil && (s.cfg.TLSListenAddr != "" || s.cfg.TLSPlainListener != nil) {
+		var tlsLn net.Listener
+		if s.cfg.TLSPlainListener != nil {
+			tlsLn = tls.NewListener(s.cfg.TLSPlainListener, s.cfg.TLSConfig)
+		} else {
+			var err error
+			tlsLn, err = tls.Listen("tcp", s.cfg.TLSListenAddr, s.cfg.TLSConfig)
+			if err != nil {
+				_ = ln.Close()
+				return fmt.Errorf("server: tls listen %s: %w", s.cfg.TLSListenAddr, err)
+			}
 		}
 		s.listeners = append(s.listeners, tlsLn)
-		slog.Info("skafka TLS listening", "addr", s.cfg.TLSListenAddr)
+		slog.Info("skafka TLS listening", "addr", tlsLn.Addr().String())
 	}
 
 	for _, l := range s.listeners {

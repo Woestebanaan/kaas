@@ -92,13 +92,18 @@ func (s staticBrokerSource) Self() handlers.BrokerEndpoint {
 }
 func (s staticBrokerSource) All() []handlers.BrokerEndpoint { return s.all }
 
-// startExternalBroker boots a TLS-only broker at the given preallocated
-// loopback port. The shared brokerSource + leaseManager give every
-// broker the same view of the cluster so Metadata responses agree.
+// startExternalBroker boots a TLS-only broker on the given pre-bound
+// TLS listener. Pre-binding eliminates the port-allocation race that
+// the previous "alloc port via :0, close, hope nobody grabs it before
+// our rebind" pattern hit under contended CI runners (gh CI flake on
+// TestExternalListenerNotLeaderRedirect with two parallel tests both
+// landing on the same OS-assigned port). The shared brokerSource +
+// leaseManager give every broker the same view of the cluster so
+// Metadata responses agree.
 func startExternalBroker(
 	t *testing.T,
 	brokerID int32,
-	port int,
+	tlsListener net.Listener,
 	dir string,
 	bundle *tlscerts.Bundle,
 	brokerSource handlers.BrokerSource,
@@ -120,7 +125,7 @@ func startExternalBroker(
 		t.Fatalf("WatchingCertificate: %v", err)
 	}
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	port := portFromListener(t, tlsListener)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	b := broker.NewWithBrokerSource(
@@ -138,9 +143,9 @@ func startExternalBroker(
 
 	srv := protocol.NewServer(protocol.Config{
 		// TLS-only — the external listener is the only one the test cares about.
-		ListenAddr:    "127.0.0.1:0",
-		TLSListenAddr: addr,
-		TLSConfig:     tlsCfg,
+		ListenAddr:       "127.0.0.1:0",
+		TLSPlainListener: tlsListener,
+		TLSConfig:        tlsCfg,
 	}, d)
 	if err := srv.Start(ctx); err != nil {
 		cancel()
@@ -153,19 +158,31 @@ func startExternalBroker(
 	}
 }
 
-// allocLoopbackPort grabs a free TCP port on 127.0.0.1, closes the
-// listener, and returns the port number. Race window before the test
-// re-binds is acceptable in practice — same trick the existing
-// startMTLSBroker helper uses.
-func allocLoopbackPort(t *testing.T) int {
+// allocLoopbackListener grabs a free TCP port on 127.0.0.1 and
+// returns the still-listening listener. Caller passes the listener
+// directly into startExternalBroker, so there's no close-then-rebind
+// gap for a parallel test to slip into. Replaces the older
+// allocLoopbackPort which had a documented "race window before the
+// test re-binds" — fine on a quiet workstation, racy on contended
+// CI.
+func allocLoopbackListener(t *testing.T) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
+	return ln
+}
+
+// portFromListener pulls the OS-assigned port out of a TCP listener
+// for use in BrokerEndpoint.Port / advertised host:port strings.
+func portFromListener(t *testing.T, ln net.Listener) int {
+	t.Helper()
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener Addr is not *net.TCPAddr: %T", ln.Addr())
+	}
+	return addr.Port
 }
 
 // dialTracker wraps a TLS dialer that maps test hostnames to their
@@ -235,8 +252,10 @@ func TestExternalListenerPerBrokerHostnames(t *testing.T) {
 	// Metadata response, regardless of which broker answers.
 	leaders := map[int32]int32{0: 0, 1: 1}
 
-	port0 := allocLoopbackPort(t)
-	port1 := allocLoopbackPort(t)
+	ln0 := allocLoopbackListener(t)
+	ln1 := allocLoopbackListener(t)
+	port0 := portFromListener(t, ln0)
+	port1 := portFromListener(t, ln1)
 
 	// External advertised endpoints — the per-broker hostnames are what
 	// the Metadata handler returns when the request arrives over the
@@ -255,13 +274,13 @@ func TestExternalListenerPerBrokerHostnames(t *testing.T) {
 
 	src0 := source
 	src0.selfID = 0
-	stop0 := startExternalBroker(t, 0, port0, dir0, bundle, src0,
+	stop0 := startExternalBroker(t, 0, ln0, dir0, bundle, src0,
 		&stubLeaseManager{selfID: 0, leaders: leaders})
 	defer stop0()
 
 	src1 := source
 	src1.selfID = 1
-	stop1 := startExternalBroker(t, 1, port1, dir1, bundle, src1,
+	stop1 := startExternalBroker(t, 1, ln1, dir1, bundle, src1,
 		&stubLeaseManager{selfID: 1, leaders: leaders})
 	defer stop1()
 
@@ -355,8 +374,10 @@ func TestExternalListenerNotLeaderRedirect(t *testing.T) {
 	}
 
 	leaders := map[int32]int32{0: 0, 1: 1}
-	port0 := allocLoopbackPort(t)
-	port1 := allocLoopbackPort(t)
+	ln0 := allocLoopbackListener(t)
+	ln1 := allocLoopbackListener(t)
+	port0 := portFromListener(t, ln0)
+	port1 := portFromListener(t, ln1)
 
 	source := staticBrokerSource{
 		all: []handlers.BrokerEndpoint{
@@ -371,13 +392,13 @@ func TestExternalListenerNotLeaderRedirect(t *testing.T) {
 
 	src0 := source
 	src0.selfID = 0
-	stop0 := startExternalBroker(t, 0, port0, dir0, bundle, src0,
+	stop0 := startExternalBroker(t, 0, ln0, dir0, bundle, src0,
 		&stubLeaseManager{selfID: 0, leaders: leaders})
 	defer stop0()
 
 	src1 := source
 	src1.selfID = 1
-	stop1 := startExternalBroker(t, 1, port1, dir1, bundle, src1,
+	stop1 := startExternalBroker(t, 1, ln1, dir1, bundle, src1,
 		&stubLeaseManager{selfID: 1, leaders: leaders})
 	defer stop1()
 
