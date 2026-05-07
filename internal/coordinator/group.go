@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -169,17 +168,6 @@ func (g *group) completeRebalance() {
 	g.state = stateCompletingRebalance
 	g.generationID++
 	g.protocolName = selectProtocol(g.members, g.joinWaiters)
-	slog.Info("[gh-#94 debug] completeRebalance",
-		"groupID", g.id, "generation", g.generationID,
-		"protocolName", g.protocolName, "members", len(g.members), "waiters", len(g.joinWaiters))
-	for mid, m := range g.members {
-		var protoNames []string
-		for _, p := range m.protocols {
-			protoNames = append(protoNames, p.Name)
-		}
-		slog.Info("[gh-#94 debug] member protocols",
-			"groupID", g.id, "memberID", mid, "protocols", protoNames)
-	}
 
 	observability.Global().GroupRebalances.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("consumer_group", g.id)))
@@ -444,15 +432,9 @@ func (g *group) startRebalanceTimer(initial bool) {
 	if g.rebalanceTimer != nil {
 		g.rebalanceTimer.Stop()
 	}
-	slog.Info("[gh-#94 debug] rebalance timer scheduled",
-		"groupID", g.id, "maxMs", maxMs, "initial", initial,
-		"members", len(g.members), "waiters", len(g.joinWaiters))
 	g.rebalanceTimer = time.AfterFunc(time.Duration(maxMs)*time.Millisecond, func() {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		slog.Info("[gh-#94 debug] rebalance timer fired",
-			"groupID", g.id, "state", g.state, "members", len(g.members),
-			"waiters", len(g.joinWaiters))
 		if g.state == statePreparingRebalance && len(g.joinWaiters) > 0 {
 			g.completeRebalance()
 		}
