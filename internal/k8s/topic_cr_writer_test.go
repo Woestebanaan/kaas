@@ -236,6 +236,41 @@ func TestTranslateConfigsMalformedNumericSkipsField(t *testing.T) {
 	}
 }
 
+// TestTopicCRWriter_CreateAnnotatesIgnoreExtraneous (gh #84) pins the
+// ArgoCD-coexistence contract: admin-protocol-created CRs must carry
+// `argocd.argoproj.io/compare-options: IgnoreExtraneous`. Without the
+// annotation, an Application with selfHeal=true deletes admin-created
+// topics on the next reconcile (because they aren't in git); without
+// selfHeal it just sits OutOfSync forever. Either way GitOps users
+// who also create topics from Kafbat / kafka-topics.sh / Streams
+// AdminClient get a confusing experience.
+//
+// The annotation is scoped to CreateTopic *by construction* —
+// TopicCRWriter is the only origination path for admin-created CRs;
+// CRs that originated in git stay un-annotated and Argo continues to
+// own them normally.
+func TestTopicCRWriter_CreateAnnotatesIgnoreExtraneous(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka")
+
+	if err := w.CreateTopic(ctx, "admin-created", 1, nil); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "admin-created"}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	v, ok := got.Annotations[argoCompareOptionsAnnotation]
+	if !ok {
+		t.Fatalf("missing annotation %q on admin-created CR; got annotations=%v",
+			argoCompareOptionsAnnotation, got.Annotations)
+	}
+	if v != "IgnoreExtraneous" {
+		t.Errorf("annotation value=%q, want IgnoreExtraneous", v)
+	}
+}
+
 // TestTopicCRWriter_CreateWithConfigsLandsOnCR: end-to-end
 // integration via the fake apiserver — configs passed to
 // CreateTopic actually land on the CR's Spec.Config field. Catches

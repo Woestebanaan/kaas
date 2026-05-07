@@ -50,6 +50,19 @@ func NewTopicCRWriter(c client.Client, namespace string) *TopicCRWriter {
 	return &TopicCRWriter{client: c, namespace: namespace}
 }
 
+// argoCompareOptionsAnnotation marks admin-protocol-created CRs as
+// "Argo, please don't compare this against git" (gh #84). Without it,
+// AdminClient.createTopics → KafkaTopic CR (gh #51 path) trips
+// ArgoCD's drift detection: with auto-sync + selfHeal the CR is
+// deleted minutes after creation, and without selfHeal the
+// Application sits in OutOfSync forever.
+//
+// IgnoreExtraneous tells Argo "this resource exists but isn't owned
+// by git" — the matching scope is "extra resource present in cluster
+// but not declared in the Application source." See
+// https://argo-cd.readthedocs.io/en/stable/user-guide/compare-options/.
+const argoCompareOptionsAnnotation = "argocd.argoproj.io/compare-options"
+
 // CreateTopic creates a new KafkaTopic CR. Wraps apierrors.IsAlreadyExists
 // in handlers.ErrTopicAlreadyExists so the handler can surface
 // TOPIC_ALREADY_EXISTS to the client.
@@ -68,6 +81,9 @@ func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      metaName,
 			Namespace: w.namespace,
+			Annotations: map[string]string{
+				argoCompareOptionsAnnotation: "IgnoreExtraneous",
+			},
 		},
 		Spec: v1alpha1.KafkaTopicSpec{
 			TopicName:  topicName, // empty when metaName == name (clean common case)
