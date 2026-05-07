@@ -15,18 +15,20 @@ import (
 type fakeCRW struct {
 	mu        sync.Mutex
 	created   []string
+	createdConfigs []map[string]string // per-create configs, gh #33 audit
 	deleted   []string
 	createErr map[string]error
 	deleteErr map[string]error
 }
 
-func (f *fakeCRW) CreateTopic(_ context.Context, name string, _ int32) error {
+func (f *fakeCRW) CreateTopic(_ context.Context, name string, _ int32, configs map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err, ok := f.createErr[name]; ok {
 		return err
 	}
 	f.created = append(f.created, name)
+	f.createdConfigs = append(f.createdConfigs, configs)
 	return nil
 }
 
@@ -169,6 +171,121 @@ func encodeCreateRequestV6(t *testing.T, name string, partitions int32) []byte {
 	w.WriteInt8(0)              // validate_only=false
 	w.WriteEmptyTaggedFields()
 	return w.Bytes()
+}
+
+// encodeCreateRequestV6WithConfigs is the gh #33 variant — same shape
+// as encodeCreateRequestV6 but with arbitrary topic-level configs
+// (cleanup.policy, segment.bytes, etc.) attached to the single
+// topic in the request. Streams clients exercise this exact path
+// at startup for changelog/repartition topics.
+func encodeCreateRequestV6WithConfigs(t *testing.T, name string, partitions int32, configs map[string]string) []byte {
+	t.Helper()
+	w := codec.NewWriter()
+	w.WriteCompactArray(1, func() {
+		w.WriteCompactString(name)
+		w.WriteInt32(partitions)
+		w.WriteInt16(1)                   // ReplicationFactor
+		w.WriteCompactArray(0, func() {}) // Assignments
+		w.WriteCompactArray(len(configs), func() {
+			for k, v := range configs {
+				w.WriteCompactString(k)
+				w.WriteCompactNullableString(v, false)
+				w.WriteEmptyTaggedFields()
+			}
+		})
+		w.WriteEmptyTaggedFields()
+	})
+	w.WriteInt32(0) // timeout_ms
+	w.WriteInt8(0)  // validate_only=false
+	w.WriteEmptyTaggedFields()
+	return w.Bytes()
+}
+
+// TestCreateTopicsHandler_ConfigsPassedThrough pins gh #33's wire
+// contract: a Streams-style request with cleanup.policy=compact +
+// segment.bytes=1048576 + retention.ms=-1 makes it through the
+// handler to the TopicCRWriter as a flat map. Without this, the
+// request appears to succeed (skafka silently ignored configs) but
+// downstream DescribeConfigs returns the static default — Streams
+// can't tell its compact changelog wasn't actually compact.
+func TestCreateTopicsHandler_ConfigsPassedThrough(t *testing.T) {
+	reg := &fakeRegistry{}
+	crw := &fakeCRW{}
+	h := NewCreateTopicsHandler(reg).WithCRWriter(crw)
+
+	// Configs a real Kafka Streams hello-world sends for its
+	// changelog topic.
+	configs := map[string]string{
+		"cleanup.policy": "compact",
+		"segment.bytes":  "1048576",
+		"retention.ms":   "-1",
+	}
+	body := encodeCreateRequestV6WithConfigs(t, "myapp-changelog-store-0", 4, configs)
+	if _, err := h.Handle(&connstate.ConnState{}, 6, body); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if len(crw.created) != 1 || crw.created[0] != "myapp-changelog-store-0" {
+		t.Fatalf("CR writer received: %v, want [myapp-changelog-store-0]", crw.created)
+	}
+	if len(crw.createdConfigs) != 1 {
+		t.Fatalf("expected 1 createdConfigs entry, got %d", len(crw.createdConfigs))
+	}
+	got := crw.createdConfigs[0]
+	for k, want := range configs {
+		if got[k] != want {
+			t.Errorf("config[%q]=%q, want %q", k, got[k], want)
+		}
+	}
+}
+
+// TestCreateTopicsHandler_NoConfigsEmptyMap pins the no-config case:
+// AdminClient.createTopics(NewTopic(name, partitions)) with no
+// configs() call sends an empty configs array. The handler must
+// pass an EMPTY map (not nil) so writers don't have to
+// nil-check; if it ever passed nil, the test fake's lookup
+// would still work but real translateConfigs would skip its
+// fast-path on an explicit length check.
+func TestCreateTopicsHandler_NoConfigsEmptyMap(t *testing.T) {
+	reg := &fakeRegistry{}
+	crw := &fakeCRW{}
+	h := NewCreateTopicsHandler(reg).WithCRWriter(crw)
+
+	body := encodeCreateRequestV6(t, "no-configs", 1)
+	if _, err := h.Handle(&connstate.ConnState{}, 6, body); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(crw.createdConfigs) != 1 {
+		t.Fatalf("expected 1 createdConfigs entry, got %d", len(crw.createdConfigs))
+	}
+	if len(crw.createdConfigs[0]) != 0 {
+		t.Errorf("expected empty config map, got %+v", crw.createdConfigs[0])
+	}
+}
+
+// TestCreateTopicsHandler_DefaultsNegativePartitions pins the
+// gh #33 safety net for Streams' "use broker default" idiom.
+// AdminClient.createTopics with NumPartitions=-1 means "use
+// what the broker defaults to". skafka has no concept of a
+// broker-default partition count yet; treating -1 as 1 keeps
+// the create flow alive for the Streams hello-world. Real
+// apps tend to override anyway.
+func TestCreateTopicsHandler_DefaultsNegativePartitions(t *testing.T) {
+	reg := &fakeRegistry{}
+	crw := &fakeCRW{}
+	h := NewCreateTopicsHandler(reg).WithCRWriter(crw)
+
+	body := encodeCreateRequestV6(t, "broker-default-parts", -1)
+	if _, err := h.Handle(&connstate.ConnState{}, 6, body); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(crw.created) != 1 {
+		t.Fatalf("CR writer not called: %+v", crw.created)
+	}
+	// fakeRegistry also got called with the same default.
+	if len(reg.added) != 1 || reg.added[0] != "broker-default-parts" {
+		t.Errorf("registry added: %+v, want [broker-default-parts]", reg.added)
+	}
 }
 
 // encodeDeleteRequestV5 hand-encodes a v5 DeleteTopicsRequest body

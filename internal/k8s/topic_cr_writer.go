@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"regexp"
+	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,7 +53,16 @@ func NewTopicCRWriter(c client.Client, namespace string) *TopicCRWriter {
 // CreateTopic creates a new KafkaTopic CR. Wraps apierrors.IsAlreadyExists
 // in handlers.ErrTopicAlreadyExists so the handler can surface
 // TOPIC_ALREADY_EXISTS to the client.
-func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions int32) error {
+//
+// configs (gh #33) maps Kafka-wire config keys → values from the
+// CreateTopics request — typically what a Kafka Streams client
+// sends for changelog/repartition topics: cleanup.policy=compact,
+// segment.bytes=1048576, retention.ms=-1, etc. The translation is
+// best-effort: known keys land in the typed KafkaTopic Config,
+// unknown keys are silently dropped (rejecting on unknown would
+// break Streams' setUp because it sends configs skafka doesn't
+// honour at runtime yet, e.g. compression.type, message.format.version).
+func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions int32, configs map[string]string) error {
 	metaName, topicName := nameForCR(name)
 	t := &v1alpha1.KafkaTopic{
 		ObjectMeta: metav1.ObjectMeta{
@@ -62,6 +72,7 @@ func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions
 		Spec: v1alpha1.KafkaTopicSpec{
 			TopicName:  topicName, // empty when metaName == name (clean common case)
 			Partitions: partitions,
+			Config:     translateConfigs(configs),
 		},
 	}
 	if err := w.client.Create(ctx, t); err != nil {
@@ -71,6 +82,55 @@ func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions
 		return fmt.Errorf("create KafkaTopic %s: %w", name, err)
 	}
 	return nil
+}
+
+// translateConfigs maps Kafka-wire topic config keys onto the typed
+// KafkaTopic CR Config schema. Keys outside the known set are
+// silently ignored (gh #33's contract — be liberal in what we
+// accept). Parse errors on int values fall through to "unset"
+// rather than rejecting — a malformed numeric is no worse than
+// the key not being present.
+func translateConfigs(configs map[string]string) v1alpha1.KafkaTopicConfig {
+	out := v1alpha1.KafkaTopicConfig{}
+	if v, ok := configs["cleanup.policy"]; ok {
+		// CRD validates enum: delete | compact | "compact,delete".
+		// Pass through verbatim; operator + DescribeConfigs handler
+		// surface the value back to clients.
+		out.CleanupPolicy = v
+	}
+	if v, ok := configs["retention.ms"]; ok {
+		if n, err := parseInt64(v); err == nil {
+			out.RetentionMs = &n
+		}
+	}
+	if v, ok := configs["retention.bytes"]; ok {
+		if n, err := parseInt64(v); err == nil {
+			out.RetentionBytes = &n
+		}
+	}
+	if v, ok := configs["segment.bytes"]; ok {
+		if n, err := parseInt64(v); err == nil {
+			out.SegmentBytes = &n
+		}
+	}
+	if v, ok := configs["min.compaction.lag.ms"]; ok {
+		if n, err := parseInt64(v); err == nil {
+			out.MinCompactionLagMs = &n
+		}
+	}
+	if v, ok := configs["delete.retention.ms"]; ok {
+		if n, err := parseInt64(v); err == nil {
+			out.DeleteRetentionMs = &n
+		}
+	}
+	return out
+}
+
+// parseInt64 wraps strconv.ParseInt with sane defaults. Used by
+// translateConfigs; returning err lets the caller decide whether
+// to skip the field (we always skip — see the function comment).
+func parseInt64(s string) (int64, error) {
+	return strconv.ParseInt(s, 10, 64)
 }
 
 // DeleteTopic removes a KafkaTopic CR. Resolves the Kafka name to the

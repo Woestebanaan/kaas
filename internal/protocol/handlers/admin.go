@@ -25,8 +25,17 @@ import (
 // nil on a handler, the broker falls back to local-registry-only
 // updates — fine for in-process tests, broken in multi-broker
 // production because the other brokers won't observe the change.
+//
+// configs (gh #33) carries Kafka-wire config names → values from
+// the CreateTopics request (cleanup.policy, retention.ms,
+// segment.bytes, etc.). Implementations translate the subset they
+// recognise into typed KafkaTopic CR fields and silently drop
+// unknown keys — Streams clients send a handful of topic-level
+// configs at startup; rejecting on an unrecognised key would break
+// app-side compatibility for properties skafka doesn't yet honour
+// at runtime (e.g. compression.type).
 type TopicCRWriter interface {
-	CreateTopic(ctx context.Context, name string, partitions int32) error
+	CreateTopic(ctx context.Context, name string, partitions int32, configs map[string]string) error
 	DeleteTopic(ctx context.Context, name string) error
 }
 
@@ -81,8 +90,25 @@ func (h *CreateTopicsHandler) Handle(_ *connstate.ConnState, version int16, body
 			ReplicationFactor: t.ReplicationFactor,
 		}
 		if !req.ValidateOnly {
+			// gh #33: a Streams client uses NumPartitions=-1 +
+			// ReplicationFactor=-1 to mean "use the broker default" for
+			// internal topics. skafka has no broker-default-partitions
+			// concept yet; treat -1 as 1 partition. Real apps tend to
+			// override anyway — this is the safety net for the
+			// hello-world Streams flow that wants any non-zero count.
+			parts := t.NumPartitions
+			if parts < 1 {
+				parts = 1
+			}
+			// gh #33: translate Kafka-wire CreateableTopicConfig entries
+			// into a flat map for the CR writer. Empty map (no configs)
+			// is fine — writer writes a CR with default Config{}.
+			configs := make(map[string]string, len(t.Configs))
+			for _, c := range t.Configs {
+				configs[c.Name] = c.Value
+			}
 			if h.crw != nil {
-				if err := h.crw.CreateTopic(context.Background(), t.Name, t.NumPartitions); err != nil {
+				if err := h.crw.CreateTopic(context.Background(), t.Name, parts, configs); err != nil {
 					switch {
 					case errors.Is(err, ErrTopicAlreadyExists):
 						result.ErrorCode = int16(codec.ErrTopicAlreadyExists)
@@ -97,7 +123,7 @@ func (h *CreateTopicsHandler) Handle(_ *connstate.ConnState, version int16, body
 			// Local-registry update is a fast hint; in CR-writer mode
 			// the broker's TopicWatcher will redundantly call
 			// b.topics.Add as the CR's Added event fires (idempotent).
-			h.topics.Add(t.Name, t.NumPartitions)
+			h.topics.Add(t.Name, parts)
 		}
 		resp.Topics = append(resp.Topics, result)
 	}

@@ -105,7 +105,7 @@ func TestTopicCRWriter_Roundtrip(t *testing.T) {
 	w := NewTopicCRWriter(cli, "skafka")
 
 	// Valid name — metadata.name is the Kafka name, spec.topicName empty.
-	if err := w.CreateTopic(ctx, "events", 3); err != nil {
+	if err := w.CreateTopic(ctx, "events", 3, nil); err != nil {
 		t.Fatalf("CreateTopic events: %v", err)
 	}
 	var got v1alpha1.KafkaTopic
@@ -120,13 +120,13 @@ func TestTopicCRWriter_Roundtrip(t *testing.T) {
 	}
 
 	// Re-create same valid name → AlreadyExists.
-	if err := w.CreateTopic(ctx, "events", 3); !errors.Is(err, handlers.ErrTopicAlreadyExists) {
+	if err := w.CreateTopic(ctx, "events", 3, nil); !errors.Is(err, handlers.ErrTopicAlreadyExists) {
 		t.Errorf("re-create: err=%v, want ErrTopicAlreadyExists", err)
 	}
 
 	// Streams-style name forces the synthesised path.
 	const streamsName = "KSTREAM-AGGREGATE-STATE-STORE-0000000003-repartition"
-	if err := w.CreateTopic(ctx, streamsName, 1); err != nil {
+	if err := w.CreateTopic(ctx, streamsName, 1, nil); err != nil {
 		t.Fatalf("CreateTopic streams-style: %v", err)
 	}
 	syntheticMeta, _ := nameForCR(streamsName)
@@ -160,4 +160,108 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestTranslateConfigsKnownKeys is the gh #33 unit-level mapping:
+// every Kafka-wire config name skafka understands gets stamped into
+// the typed KafkaTopic CR Config field. Catches a typo in the key
+// name (e.g. "cleanup_policy" vs "cleanup.policy" — Apache uses
+// dotted) faster than a full integration round-trip.
+func TestTranslateConfigsKnownKeys(t *testing.T) {
+	cfg := translateConfigs(map[string]string{
+		"cleanup.policy":         "compact",
+		"retention.ms":           "604800000",
+		"retention.bytes":        "1073741824",
+		"segment.bytes":          "1048576",
+		"min.compaction.lag.ms":  "60000",
+		"delete.retention.ms":    "86400000",
+	})
+	if cfg.CleanupPolicy != "compact" {
+		t.Errorf("CleanupPolicy=%q, want compact", cfg.CleanupPolicy)
+	}
+	if cfg.RetentionMs == nil || *cfg.RetentionMs != 604800000 {
+		t.Errorf("RetentionMs=%v, want 604800000", cfg.RetentionMs)
+	}
+	if cfg.RetentionBytes == nil || *cfg.RetentionBytes != 1073741824 {
+		t.Errorf("RetentionBytes=%v, want 1073741824", cfg.RetentionBytes)
+	}
+	if cfg.SegmentBytes == nil || *cfg.SegmentBytes != 1048576 {
+		t.Errorf("SegmentBytes=%v, want 1048576", cfg.SegmentBytes)
+	}
+	if cfg.MinCompactionLagMs == nil || *cfg.MinCompactionLagMs != 60000 {
+		t.Errorf("MinCompactionLagMs=%v, want 60000", cfg.MinCompactionLagMs)
+	}
+	if cfg.DeleteRetentionMs == nil || *cfg.DeleteRetentionMs != 86400000 {
+		t.Errorf("DeleteRetentionMs=%v, want 86400000", cfg.DeleteRetentionMs)
+	}
+}
+
+// TestTranslateConfigsUnknownKeysSilentlyDropped: a Streams client
+// sends configs skafka doesn't understand (compression.type,
+// message.format.version, etc.). The translation must silently
+// ignore them — rejecting on unknown would break Streams' setUp,
+// the exact gh #33 symptom we're closing.
+func TestTranslateConfigsUnknownKeysSilentlyDropped(t *testing.T) {
+	cfg := translateConfigs(map[string]string{
+		"compression.type":         "lz4",
+		"message.format.version":   "3.0",
+		"unclean.leader.election.enable": "false",
+		"cleanup.policy":           "delete", // recognised; should still land
+	})
+	if cfg.CleanupPolicy != "delete" {
+		t.Errorf("CleanupPolicy=%q, want delete (recognised key didn't land)", cfg.CleanupPolicy)
+	}
+	// All other fields stay zero-valued — defense in depth, the
+	// test should fail loudly if a refactor accidentally writes
+	// unknown keys into stub fields.
+	if cfg.RetentionMs != nil || cfg.SegmentBytes != nil {
+		t.Errorf("unexpected non-nil stub fields: %+v", cfg)
+	}
+}
+
+// TestTranslateConfigsMalformedNumericSkipsField: a malformed int
+// value (truncated, non-numeric) shouldn't reject the create —
+// just skip the field. Same liberal-acceptance reasoning as
+// unknown keys.
+func TestTranslateConfigsMalformedNumericSkipsField(t *testing.T) {
+	cfg := translateConfigs(map[string]string{
+		"retention.ms":  "not-a-number",
+		"segment.bytes": "1048576",
+	})
+	if cfg.RetentionMs != nil {
+		t.Errorf("RetentionMs=%v, want nil for malformed value", cfg.RetentionMs)
+	}
+	if cfg.SegmentBytes == nil || *cfg.SegmentBytes != 1048576 {
+		t.Errorf("SegmentBytes=%v, want 1048576 (parallel valid key shouldn't be affected)", cfg.SegmentBytes)
+	}
+}
+
+// TestTopicCRWriter_CreateWithConfigsLandsOnCR: end-to-end
+// integration via the fake apiserver — configs passed to
+// CreateTopic actually land on the CR's Spec.Config field. Catches
+// the wiring gap between handler.translateConfigs and
+// w.client.Create that the unit-level translateConfigs test alone
+// can't cover.
+func TestTopicCRWriter_CreateWithConfigsLandsOnCR(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka")
+
+	configs := map[string]string{
+		"cleanup.policy": "compact",
+		"segment.bytes":  "524288",
+	}
+	if err := w.CreateTopic(ctx, "compact-topic", 1, configs); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "compact-topic"}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Spec.Config.CleanupPolicy != "compact" {
+		t.Errorf("CR CleanupPolicy=%q, want compact", got.Spec.Config.CleanupPolicy)
+	}
+	if got.Spec.Config.SegmentBytes == nil || *got.Spec.Config.SegmentBytes != 524288 {
+		t.Errorf("CR SegmentBytes=%v, want 524288", got.Spec.Config.SegmentBytes)
+	}
 }
