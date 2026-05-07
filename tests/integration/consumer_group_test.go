@@ -176,6 +176,201 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	}
 }
 
+// TestHeartbeatKeepsMemberAlivePastTimeout pins the gh #19 happy
+// path: a member that heartbeats faster than its session timeout
+// stays in the group indefinitely. Existing TestHeartbeatAndSession
+// Timeout below covers the eviction case; this one covers the
+// "consumer is healthy" case the rebalance state machine depends
+// on. Without it, a regression where heartbeats fail to reset the
+// timer would silently evict every consumer in <1s.
+func TestHeartbeatKeepsMemberAlivePastTimeout(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "alive-group"
+
+	join := mgr.JoinGroup(&api.JoinGroupRequest{
+		GroupID:            groupID,
+		SessionTimeoutMs:   200,
+		RebalanceTimeoutMs: 100,
+		ProtocolType:       "consumer",
+		Protocols:          []api.JoinGroupProtocol{{Name: "range"}},
+	}, "alive-client")
+	if join.ErrorCode != 0 {
+		t.Fatalf("Join: %d", join.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: join.MemberID, Assignment: []byte("p0")}},
+	})
+
+	// Heartbeat every 50ms (a quarter of the 200ms timeout) for 600ms total
+	// — well past 3× session timeout. No errCode should ever go non-zero.
+	hbReq := &api.HeartbeatRequest{GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID}
+	deadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if resp := mgr.Heartbeat(hbReq); resp.ErrorCode != 0 {
+			t.Errorf("heartbeat errCode=%d, want 0 (timer not resetting)", resp.ErrorCode)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestSessionTimeoutEvictsSilentMemberOnly pins the gh #19
+// multi-member contract: in a 2-member group, the member that
+// stops heartbeating is evicted while the other one stays. Any
+// regression that evicts both (e.g. a shared timer bug) or
+// neither (timer not arming) corrupts every multi-consumer group.
+func TestSessionTimeoutEvictsSilentMemberOnly(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "two-member-group"
+
+	// Both members join concurrently — the JoinGroup state machine
+	// blocks the first arriving until the second arrives or the
+	// rebalance timer fires.
+	var r1, r2 *api.JoinGroupResponse
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		r1 = mgr.JoinGroup(&api.JoinGroupRequest{
+			GroupID: groupID, SessionTimeoutMs: 200, RebalanceTimeoutMs: 100,
+			ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
+		}, "alive")
+	}()
+	go func() {
+		defer wg.Done()
+		r2 = mgr.JoinGroup(&api.JoinGroupRequest{
+			GroupID: groupID, SessionTimeoutMs: 200, RebalanceTimeoutMs: 100,
+			ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
+		}, "silent")
+	}()
+	wg.Wait()
+	if r1.ErrorCode != 0 || r2.ErrorCode != 0 {
+		t.Fatalf("Join: r1=%d r2=%d", r1.ErrorCode, r2.ErrorCode)
+	}
+	syncBoth(t, mgr, groupID, r1, r2)
+
+	// r1 heartbeats; r2 stays silent. After 400ms (2× timeout)
+	// only r2 should be evicted.
+	for i := 0; i < 8; i++ {
+		mgr.Heartbeat(&api.HeartbeatRequest{
+			GroupID: groupID, GenerationID: r1.GenerationID, MemberID: r1.MemberID,
+		})
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// r1 should still be alive — but the eviction of r2 triggers a
+	// rebalance, so r1's heartbeat returns RebalanceInProgress (27)
+	// rather than 0. That's the correct transition signalling the
+	// client to re-join. The wrong behaviours we're guarding against
+	// are UnknownMemberId (25 — r1 was evicted too) and 0 (no
+	// rebalance triggered, both still in Stable).
+	r1Hb := mgr.Heartbeat(&api.HeartbeatRequest{
+		GroupID: groupID, GenerationID: r1.GenerationID, MemberID: r1.MemberID,
+	})
+	if r1Hb.ErrorCode == 25 {
+		t.Errorf("r1 (alive member) got UnknownMemberId — was evicted alongside r2")
+	}
+	if r1Hb.ErrorCode == 0 {
+		t.Errorf("r1's heartbeat returned 0 — eviction of r2 did not trigger rebalance")
+	}
+
+	// r2 (silent) should be UnknownMemberId.
+	r2Hb := mgr.Heartbeat(&api.HeartbeatRequest{
+		GroupID: groupID, GenerationID: r2.GenerationID, MemberID: r2.MemberID,
+	})
+	if r2Hb.ErrorCode != 25 {
+		t.Errorf("r2 (silent) errCode=%d, want 25 (UnknownMemberId)", r2Hb.ErrorCode)
+	}
+}
+
+// TestSessionTimeoutLastMemberTransitionsToEmpty pins the
+// single-member edge case: when the last member of a group times
+// out, the group state machine drops to Empty rather than firing
+// a rebalance for nobody. Catches a regression where the timer
+// fires startRebalanceTimer on len(members)==0 — which would
+// hang the group's state machine forever in PreparingRebalance.
+func TestSessionTimeoutLastMemberTransitionsToEmpty(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "lonely-group"
+
+	join := mgr.JoinGroup(&api.JoinGroupRequest{
+		GroupID: groupID, SessionTimeoutMs: 150, RebalanceTimeoutMs: 100,
+		ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
+	}, "alone")
+	if join.ErrorCode != 0 {
+		t.Fatalf("Join: %d", join.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: join.MemberID, Assignment: []byte("p0")}},
+	})
+
+	// Wait past the timeout; member gets evicted.
+	time.Sleep(300 * time.Millisecond)
+
+	// Heartbeat post-eviction returns UnknownMemberId.
+	hb := mgr.Heartbeat(&api.HeartbeatRequest{
+		GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID,
+	})
+	if hb.ErrorCode != 25 {
+		t.Errorf("post-eviction heartbeat errCode=%d, want 25", hb.ErrorCode)
+	}
+
+	// A fresh JoinGroup on the same groupID succeeds at generation 1
+	// (the group reset to Empty, not Dead). If the group state
+	// machine had hung in PreparingRebalance, this Join would block
+	// until the rebalance timer fires (~100ms from now) — the test
+	// caps that with the timer-based completion.
+	rejoin := mgr.JoinGroup(&api.JoinGroupRequest{
+		GroupID: groupID, SessionTimeoutMs: 150, RebalanceTimeoutMs: 100,
+		ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
+	}, "rejoiner")
+	if rejoin.ErrorCode != 0 {
+		t.Errorf("rejoin after sole-member eviction: errCode=%d, want 0 (group should be Empty + acceptable)", rejoin.ErrorCode)
+	}
+	if rejoin.GenerationID < 1 {
+		t.Errorf("rejoin GenerationID=%d, want >=1", rejoin.GenerationID)
+	}
+}
+
+// TestSessionTimeoutTimerResetsOnEveryHeartbeat is a defense-in-
+// depth check on the timer-reset logic. Issues a heartbeat at
+// 0ms, 100ms, 200ms, 300ms with sessionTimeout=150ms — every
+// heartbeat must reset the timer so the member survives the
+// full 400ms window. Without proper timer reset, the member
+// would get evicted at the 150ms mark.
+func TestSessionTimeoutTimerResetsOnEveryHeartbeat(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "reset-group"
+
+	join := mgr.JoinGroup(&api.JoinGroupRequest{
+		GroupID: groupID, SessionTimeoutMs: 150, RebalanceTimeoutMs: 100,
+		ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
+	}, "ticker")
+	if join.ErrorCode != 0 {
+		t.Fatalf("Join: %d", join.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: join.MemberID, Assignment: []byte("p0")}},
+	})
+
+	hb := &api.HeartbeatRequest{GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID}
+
+	// Heartbeats at 0, 100, 200, 300ms (intervals of 100 < 150 timeout).
+	// Each one must reset; final heartbeat at 300ms must still see 0
+	// errCode despite total elapsed exceeding 2× sessionTimeout.
+	for i := 0; i < 4; i++ {
+		if resp := mgr.Heartbeat(hb); resp.ErrorCode != 0 {
+			t.Errorf("heartbeat at %dms: errCode=%d, want 0 (timer not reset)", i*100, resp.ErrorCode)
+		}
+		if i < 3 {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
 func TestHeartbeatAndSessionTimeout(t *testing.T) {
 	mgr := newTestCoordinator(t, "broker-0")
 	const groupID = "timeout-group"
