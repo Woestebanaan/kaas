@@ -354,7 +354,18 @@ func runBroker(ctx context.Context) {
 		topicCRScheme := runtime.NewScheme()
 		if err := operatorv1.AddToScheme(topicCRScheme); err == nil {
 			if cl, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: topicCRScheme}); err == nil {
-				b.UseTopicCRWriter(k8spkg.NewTopicCRWriter(cl, namespace))
+				// gh #106: optional ArgoCD integration. When
+				// SKAFKA_ARGOCD_APPLICATION_NAME is set, admin-
+				// protocol-created CRs get tracking-id +
+				// IgnoreExtraneous annotations so they coexist
+				// cleanly with git-managed CRs in the same
+				// ArgoCD Application's resource tree. Empty (the
+				// default) produces plain CRs with no
+				// argocd.argoproj.io/* annotations.
+				argoCfg := k8spkg.ArgoCDConfig{
+					ApplicationName: os.Getenv("SKAFKA_ARGOCD_APPLICATION_NAME"),
+				}
+				b.UseTopicCRWriter(k8spkg.NewTopicCRWriter(cl, namespace, argoCfg))
 			} else {
 				slog.Warn("admin: build CR writer failed; CreateTopics will be local-only", "err", err)
 			}

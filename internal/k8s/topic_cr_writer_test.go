@@ -102,7 +102,7 @@ func TestNameForCR_Deterministic(t *testing.T) {
 func TestTopicCRWriter_Roundtrip(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
-	w := NewTopicCRWriter(cli, "skafka")
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{})
 
 	// Valid name — metadata.name is the Kafka name, spec.topicName empty.
 	if err := w.CreateTopic(ctx, "events", 3, nil); err != nil {
@@ -236,23 +236,15 @@ func TestTranslateConfigsMalformedNumericSkipsField(t *testing.T) {
 	}
 }
 
-// TestTopicCRWriter_CreateAnnotatesIgnoreExtraneous (gh #84) pins the
-// ArgoCD-coexistence contract: admin-protocol-created CRs must carry
-// `argocd.argoproj.io/compare-options: IgnoreExtraneous`. Without the
-// annotation, an Application with selfHeal=true deletes admin-created
-// topics on the next reconcile (because they aren't in git); without
-// selfHeal it just sits OutOfSync forever. Either way GitOps users
-// who also create topics from Kafbat / kafka-topics.sh / Streams
-// AdminClient get a confusing experience.
-//
-// The annotation is scoped to CreateTopic *by construction* —
-// TopicCRWriter is the only origination path for admin-created CRs;
-// CRs that originated in git stay un-annotated and Argo continues to
-// own them normally.
-func TestTopicCRWriter_CreateAnnotatesIgnoreExtraneous(t *testing.T) {
+// TestTopicCRWriter_NoArgoCDOmitsAnnotations (gh #106) pins the
+// non-ArgoCD-install contract: ArgoCDConfig{} (zero value) means
+// admin-protocol-created CRs get NO argocd.argoproj.io/* annotations.
+// Plain Kubernetes installs without ArgoCD shouldn't see ArgoCD-
+// specific metadata in the CR spec.
+func TestTopicCRWriter_NoArgoCDOmitsAnnotations(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
-	w := NewTopicCRWriter(cli, "skafka")
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{}) // disabled
 
 	if err := w.CreateTopic(ctx, "admin-created", 1, nil); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
@@ -261,13 +253,74 @@ func TestTopicCRWriter_CreateAnnotatesIgnoreExtraneous(t *testing.T) {
 	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "admin-created"}, &got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	v, ok := got.Annotations[argoCompareOptionsAnnotation]
-	if !ok {
-		t.Fatalf("missing annotation %q on admin-created CR; got annotations=%v",
-			argoCompareOptionsAnnotation, got.Annotations)
+	for k, v := range got.Annotations {
+		if strings.HasPrefix(k, "argocd.argoproj.io/") {
+			t.Errorf("non-ArgoCD config still produced annotation %q=%q", k, v)
+		}
 	}
-	if v != "IgnoreExtraneous" {
-		t.Errorf("annotation value=%q, want IgnoreExtraneous", v)
+}
+
+// TestTopicCRWriter_ArgoCDIntegrationStampsBoth (gh #106) pins the
+// ArgoCD-coexistence contract when ArgoCDConfig.ApplicationName is
+// set: admin-protocol-created CRs carry BOTH:
+//   - argocd.argoproj.io/compare-options: IgnoreExtraneous (gh #84)
+//     so the Application's selfHeal sync doesn't delete them.
+//   - argocd.argoproj.io/tracking-id: <app>:skafka.io/KafkaTopic:<ns>/<name>
+//     so they show up in the Application's UI tree alongside the
+//     git-managed CRs (rather than being invisible — the
+//     gh #106 improvement over gh #84's silent-coexistence).
+//
+// The annotations are scoped to CreateTopic *by construction* —
+// TopicCRWriter is the only origination path for admin-created CRs;
+// CRs that originated in git stay un-annotated and Argo continues to
+// own them normally.
+func TestTopicCRWriter_ArgoCDIntegrationStampsBoth(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{ApplicationName: "skafka"})
+
+	if err := w.CreateTopic(ctx, "admin-created", 1, nil); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "admin-created"}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Annotations[argoCompareOptionsAnnotation] != "IgnoreExtraneous" {
+		t.Errorf("compare-options=%q, want IgnoreExtraneous",
+			got.Annotations[argoCompareOptionsAnnotation])
+	}
+	wantTracking := "skafka:skafka.io/KafkaTopic:skafka/admin-created"
+	if got.Annotations[argoTrackingIDAnnotation] != wantTracking {
+		t.Errorf("tracking-id=%q, want %q",
+			got.Annotations[argoTrackingIDAnnotation], wantTracking)
+	}
+}
+
+// TestTopicCRWriter_ArgoCDTrackingIDUsesSyntheticMeta covers the
+// gh #86 path interaction: Streams-style topic names that aren't
+// RFC-1123-valid land at a synthesised metadata.name. The
+// tracking-id must reference the synthesised name, not the literal
+// Kafka name, since ArgoCD's Application tree is keyed by
+// metadata.name.
+func TestTopicCRWriter_ArgoCDTrackingIDUsesSyntheticMeta(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{ApplicationName: "skafka"})
+
+	const streamsName = "KSTREAM-AGGREGATE-STATE-STORE-0000000003-repartition"
+	if err := w.CreateTopic(ctx, streamsName, 1, nil); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	syntheticMeta, _ := nameForCR(streamsName)
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: syntheticMeta}, &got); err != nil {
+		t.Fatalf("Get synthetic: %v", err)
+	}
+	wantTracking := "skafka:skafka.io/KafkaTopic:skafka/" + syntheticMeta
+	if got.Annotations[argoTrackingIDAnnotation] != wantTracking {
+		t.Errorf("tracking-id=%q, want %q (must reference synthetic metadata.name, not Kafka name)",
+			got.Annotations[argoTrackingIDAnnotation], wantTracking)
 	}
 }
 
@@ -280,7 +333,7 @@ func TestTopicCRWriter_CreateAnnotatesIgnoreExtraneous(t *testing.T) {
 func TestTopicCRWriter_CreateWithConfigsLandsOnCR(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
-	w := NewTopicCRWriter(cli, "skafka")
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{})
 
 	configs := map[string]string{
 		"cleanup.policy": "compact",

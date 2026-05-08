@@ -112,6 +112,10 @@ spec:
             - name: OTEL_TRACES_SAMPLER_ARG
               value: "{{ .Values.observability.otlp.traces.samplerRatio }}"
             {{- end }}
+            {{- if .Values.admin.argocd.applicationName }}
+            - name: SKAFKA_ARGOCD_APPLICATION_NAME
+              value: {{ .Values.admin.argocd.applicationName | quote }}
+            {{- end }}
             {{- if .Values.listeners.external.enabled }}
             # TLS listener for external clients. Hostname pattern is fmt-style
             # with the pod ordinal as the single %d argument. The broker reads

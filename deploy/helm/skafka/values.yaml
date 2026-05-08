@@ -100,6 +100,27 @@ auth:
     existingSecret: ""          # Secret with tls.crt + tls.key
     certManagerIssuer: ""
 
+admin:
+  # Optional ArgoCD integration for admin-protocol-created KafkaTopic
+  # CRs (gh #84 + gh #106). When AdminClient.createTopics / kafka-
+  # topics.sh / Kafbat-UI creates a topic, skafka writes a KafkaTopic
+  # CR via TopicCRWriter — but those CRs aren't in git, so a vanilla
+  # ArgoCD Application either deletes them on the next selfHeal sync
+  # or sits OutOfSync forever.
+  #
+  # When applicationName is non-empty, runtime-created CRs are
+  # stamped with two annotations:
+  #   - argocd.argoproj.io/compare-options: IgnoreExtraneous
+  #     (no drift, no prune)
+  #   - argocd.argoproj.io/tracking-id: <app>:skafka.io/KafkaTopic:<ns>/<name>
+  #     (visible in the named Application's UI tree)
+  #
+  # When empty (the default), no argocd.argoproj.io/* annotations
+  # are added — non-ArgoCD installs get plain CRs with no
+  # ArgoCD-specific metadata.
+  argocd:
+    applicationName: ""
+
 podDisruptionBudget:
   enabled: true
   maxUnavailable: 1
