@@ -127,10 +127,15 @@ admin:
   #
   # `syncOptions` accepts ArgoCD's sync-options string (see
   # https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/).
-  # Default empty (no annotation). Common non-default values:
-  #   - "Prune=false" — surface as drift in UI but don't delete
-  #   - "Delete=false" — survive parent Application delete
-  #   - "Prune=false,Delete=false" — both
+  # Default "Delete=false" — production safety: a runtime-created
+  # topic survives `kubectl delete application skafka`, so a typo or
+  # an operator-driven Application teardown doesn't cascade-delete
+  # every Kafbat-/AdminClient-created topic. Common alternatives:
+  #   - ""                         — runtime topics cascade-delete
+  #     with the parent Application (no safety net)
+  #   - "Prune=false"              — show as drift in UI, never prune
+  #   - "Prune=false,Delete=false" — both: surfaced as drift AND
+  #     survive Application delete
   # The string is passed through verbatim; skafka doesn't validate.
   #
   # `enabled: false` (the default) produces plain CRs with no
@@ -140,7 +145,7 @@ admin:
     enabled: false
     applicationName: ""
     compareOptions: "IgnoreExtraneous"
-    syncOptions: ""
+    syncOptions: "Delete=false"
 
 podDisruptionBudget:
   enabled: true
