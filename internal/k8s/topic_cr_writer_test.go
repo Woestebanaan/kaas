@@ -360,6 +360,69 @@ func TestTopicCRWriter_ArgoCDTrackingIDOnly(t *testing.T) {
 	}
 }
 
+// TestTopicCRWriter_ArgoCDSyncOptionsDefaultEmpty pins that the
+// sync-options annotation is NOT stamped when SyncOptions is empty
+// (the default). Most operators want the IgnoreExtraneous compare-
+// option pattern; sync-options is opt-in for specific
+// "alert-but-don't-delete" / "survive-Application-delete" use cases.
+func TestTopicCRWriter_ArgoCDSyncOptionsDefaultEmpty(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		ApplicationName: "skafka",
+		CompareOptions:  "IgnoreExtraneous",
+		// SyncOptions intentionally empty
+	})
+
+	if err := w.CreateTopic(ctx, "no-sync-opts", 1, nil); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "no-sync-opts"}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, has := got.Annotations[argoSyncOptionsAnnotation]; has {
+		t.Errorf("SyncOptions=\"\" should skip the sync-options annotation; got=%q",
+			got.Annotations[argoSyncOptionsAnnotation])
+	}
+}
+
+// TestTopicCRWriter_ArgoCDSyncOptionsPassthrough pins that whatever
+// string the operator sets in SyncOptions lands on the wire
+// verbatim. ArgoCD's sync-options accepts comma-separated combos
+// like "Prune=false,Delete=false" — skafka shouldn't interpret or
+// validate the string.
+func TestTopicCRWriter_ArgoCDSyncOptionsPassthrough(t *testing.T) {
+	cases := []string{
+		"Prune=false",
+		"Delete=false",
+		"Prune=false,Delete=false",
+	}
+	for _, want := range cases {
+		t.Run(want, func(t *testing.T) {
+			ctx := context.Background()
+			cli := newFakeClient(t)
+			w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+				ApplicationName: "skafka",
+				SyncOptions:     want,
+			})
+			topic := "sync-opts-" + strings.ReplaceAll(strings.ReplaceAll(want, ",", "-"), "=", "-")
+			topic = strings.ToLower(topic)
+			if err := w.CreateTopic(ctx, topic, 1, nil); err != nil {
+				t.Fatalf("CreateTopic: %v", err)
+			}
+			var got v1alpha1.KafkaTopic
+			if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: topic}, &got); err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Annotations[argoSyncOptionsAnnotation] != want {
+				t.Errorf("sync-options=%q, want %q",
+					got.Annotations[argoSyncOptionsAnnotation], want)
+			}
+		})
+	}
+}
+
 // TestTopicCRWriter_ArgoCDTrackingIDUsesSyntheticMeta covers the
 // gh #86 path interaction: Streams-style topic names that aren't
 // RFC-1123-valid land at a synthesised metadata.name. The

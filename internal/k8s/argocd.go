@@ -51,6 +51,25 @@ type ArgoCDConfig struct {
 	// SKAFKA_ARGOCD_COMPARE_OPTIONS env var, exposed in the chart as
 	// admin.argocd.compareOptions.
 	CompareOptions string
+
+	// SyncOptions is the value for `argocd.argoproj.io/sync-options`.
+	// Empty (the default) skips the annotation entirely. Common
+	// non-default values:
+	//
+	//   - "Prune=false" — resource shows as out-of-sync in the UI
+	//     but ArgoCD won't delete it on prune. Pairs with empty
+	//     CompareOptions for "alert me without deleting" patterns.
+	//   - "Delete=false" — resource survives even when the parent
+	//     Application is deleted. Production safety: topics outlive
+	//     a chart uninstall.
+	//   - "Prune=false,Delete=false" — both at once.
+	//
+	// See https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/.
+	// The string is passed through verbatim — skafka doesn't validate
+	// or interpret it. Operators set this via SKAFKA_ARGOCD_SYNC_OPTIONS
+	// (chart: admin.argocd.syncOptions). Only consulted when
+	// ApplicationName is non-empty.
+	SyncOptions string
 }
 
 // Annotations returns the argocd.argoproj.io/* annotations a CR
@@ -76,6 +95,9 @@ func (c ArgoCDConfig) Annotations(group, kind, namespace, metaName string) map[s
 	if c.CompareOptions != "" {
 		out[argoCompareOptionsAnnotation] = c.CompareOptions
 	}
+	if c.SyncOptions != "" {
+		out[argoSyncOptionsAnnotation] = c.SyncOptions
+	}
 	return out
 }
 
@@ -95,5 +117,6 @@ func argoTrackingID(applicationName, group, kind, namespace, metaName string) st
 // hand.
 const (
 	argoCompareOptionsAnnotation = "argocd.argoproj.io/compare-options"
+	argoSyncOptionsAnnotation    = "argocd.argoproj.io/sync-options"
 	argoTrackingIDAnnotation     = "argocd.argoproj.io/tracking-id"
 )

@@ -370,12 +370,16 @@ func runBroker(ctx context.Context) {
 				argoCfg := k8spkg.ArgoCDConfig{
 					ApplicationName: os.Getenv("SKAFKA_ARGOCD_APPLICATION_NAME"),
 					CompareOptions:  os.Getenv("SKAFKA_ARGOCD_COMPARE_OPTIONS"),
+					SyncOptions:     os.Getenv("SKAFKA_ARGOCD_SYNC_OPTIONS"),
 				}
 				// Default compare-options to IgnoreExtraneous when
 				// ArgoCD integration is on but the env var was not
 				// explicitly set. Empty stays empty when the env
 				// var was set to "" deliberately (operators wanting
-				// tracking-id without drift suppression).
+				// tracking-id without drift suppression). SyncOptions
+				// defaults to empty (no annotation) — opt-in only,
+				// since the common case is already covered by
+				// IgnoreExtraneous.
 				if argoCfg.ApplicationName != "" {
 					if _, set := os.LookupEnv("SKAFKA_ARGOCD_COMPARE_OPTIONS"); !set {
 						argoCfg.CompareOptions = "IgnoreExtraneous"

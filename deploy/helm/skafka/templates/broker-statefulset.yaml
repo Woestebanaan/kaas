@@ -124,6 +124,10 @@ spec:
               # checks LookupEnv to distinguish "set to empty" from
               # "not set".
               value: {{ .Values.admin.argocd.compareOptions | quote }}
+            - name: SKAFKA_ARGOCD_SYNC_OPTIONS
+              # Empty (default) → no sync-options annotation on CRs.
+              # Set e.g. "Prune=false" or "Delete=false" to opt in.
+              value: {{ .Values.admin.argocd.syncOptions | quote }}
             {{- end }}
             {{- if .Values.listeners.external.enabled }}
             # TLS listener for external clients. Hostname pattern is fmt-style

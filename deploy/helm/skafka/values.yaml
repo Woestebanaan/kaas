@@ -125,6 +125,14 @@ admin:
   # tracking-id (use case: surface runtime-created topics as
   # deliberate drift in ArgoCD's UI as an alert).
   #
+  # `syncOptions` accepts ArgoCD's sync-options string (see
+  # https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/).
+  # Default empty (no annotation). Common non-default values:
+  #   - "Prune=false" — surface as drift in UI but don't delete
+  #   - "Delete=false" — survive parent Application delete
+  #   - "Prune=false,Delete=false" — both
+  # The string is passed through verbatim; skafka doesn't validate.
+  #
   # `enabled: false` (the default) produces plain CRs with no
   # argocd.argoproj.io/* annotations — non-ArgoCD installs get
   # nothing extra in the CR metadata.
@@ -132,6 +140,7 @@ admin:
     enabled: false
     applicationName: ""
     compareOptions: "IgnoreExtraneous"
+    syncOptions: ""
 
 podDisruptionBudget:
   enabled: true
