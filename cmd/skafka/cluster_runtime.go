@@ -166,8 +166,16 @@ func startClusterRuntime(ctx context.Context, cfg clusterRuntimeConfig) *cluster
 	// partitionFor analogue) bootstraps fresh groups without
 	// controller registration, closing the chicken-and-egg that broke
 	// the earlier v0.1.52 attempt.
+	//
+	// gh #91 PR 3: same swap for the txn-coordinator path —
+	// FindCoordinator(KeyType=transaction) routes via OwnsTxn /
+	// TxnCoordinator on the same broker.Coordinator. Before this
+	// call the txn path returns COORDINATOR_NOT_AVAILABLE; after,
+	// it hash-routes by transactional.id into the StatefulSet
+	// broker set.
 	if cfg.coordMgr != nil {
 		cfg.coordMgr.SetGroupAssignmentSource(coord)
+		cfg.coordMgr.SetTxnAssignmentSource(coord)
 	}
 
 	// Build the runtime handle early so the onAcquired closure below can

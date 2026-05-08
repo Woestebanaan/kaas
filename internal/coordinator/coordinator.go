@@ -28,6 +28,27 @@ type GroupAssignmentSource interface {
 	GroupCoordinator(groupID string) (brokerID string, ok bool)
 }
 
+// TxnAssignmentSource is the gh #91 sibling of GroupAssignmentSource:
+// the contract Manager uses to answer FindCoordinator(KeyType=
+// transaction). Same structural shape — *internal/broker.Coordinator
+// satisfies it via OwnsTxn / TxnCoordinator (PR 1).
+//
+// Two interfaces instead of one because (a) the gh #92 explicit-
+// override tier in assignment.json is group-only and may stay that
+// way, (b) tests / boot-time stubs already substitute group-only
+// sources and we don't want to force a no-op TxnCoordinator on them.
+type TxnAssignmentSource interface {
+	// OwnsTxn reports whether this broker is the assigned txn
+	// coordinator for transactionalID under the most recently
+	// applied assignment.
+	OwnsTxn(transactionalID string) bool
+	// TxnCoordinator returns the broker ID assigned to coordinate
+	// transactionalID. Second return is false when no broker is
+	// alive in the current assignment (or no assignment is loaded
+	// yet — bootstrap).
+	TxnCoordinator(transactionalID string) (brokerID string, ok bool)
+}
+
 // BrokerLookup maps a broker ID string to the (NodeID, host, port)
 // triple Kafka clients need to address it. v2.6 used ordinal-based
 // lookups; v3's controller-driven assignment uses string IDs (matching
@@ -51,6 +72,14 @@ type Manager struct {
 	// ListGroups, ...).
 	groupSrcMu sync.RWMutex
 	groupSrc   GroupAssignmentSource
+
+	// txnSrcMu / txnSrc are the gh #91 sibling lookup used by
+	// FindCoordinator(KeyType=transaction). Same hot-swap shape as
+	// groupSrc; nil ⇒ KeyType=transaction returns
+	// COORDINATOR_NOT_AVAILABLE (boot-time before cluster_runtime
+	// wires the broker.Coordinator).
+	txnSrcMu sync.RWMutex
+	txnSrc   TxnAssignmentSource
 
 	mu     sync.Mutex
 	groups map[string]*group
@@ -151,23 +180,72 @@ func (m *Manager) SetGroupAssignmentSource(src GroupAssignmentSource) {
 	m.groupSrcMu.Unlock()
 }
 
+// SetTxnAssignmentSource is the gh #91 sibling of
+// SetGroupAssignmentSource. cluster_runtime hot-swaps in the real
+// *broker.Coordinator once the cluster runtime is up so
+// FindCoordinator(KeyType=transaction) can answer with a real
+// broker. Before this is called the txn path returns
+// COORDINATOR_NOT_AVAILABLE — the same retry-friendly shape group
+// requests get during boot.
+func (m *Manager) SetTxnAssignmentSource(src TxnAssignmentSource) {
+	m.txnSrcMu.Lock()
+	m.txnSrc = src
+	m.txnSrcMu.Unlock()
+}
+
 // ---- API handler entry points ----
 
 func (m *Manager) FindCoordinator(req *api.FindCoordinatorRequest) *api.FindCoordinatorResponse {
 	resp := &api.FindCoordinatorResponse{}
 
-	lookupOne := func(groupID string) (int32, string, int32, int16) {
+	// Resolve the lookup function once per request — KeyType applies
+	// at the request level (not per-key in the v4 array). Apache 3.7
+	// defines two key types: 0=group, 1=transaction (gh #91 PR 3).
+	// Anything else is INVALID_REQUEST — Apache returns the same code
+	// (FindCoordinatorRequest.scala:91) and we mirror that to keep
+	// the wire surface boring.
+	var resolve func(string) (string, bool)
+	var fixedErr int16
+	switch req.KeyType {
+	case 0:
 		m.groupSrcMu.RLock()
 		src := m.groupSrc
 		m.groupSrcMu.RUnlock()
 		if src == nil {
-			return 0, "", 0, int16(codec.ErrCoordinatorNotAvailable)
+			fixedErr = int16(codec.ErrCoordinatorNotAvailable)
+		} else {
+			resolve = src.GroupCoordinator
 		}
-		brokerID, ok := src.GroupCoordinator(groupID)
+	case 1:
+		m.txnSrcMu.RLock()
+		src := m.txnSrc
+		m.txnSrcMu.RUnlock()
+		if src == nil {
+			// Boot window: cluster_runtime hasn't called
+			// SetTxnAssignmentSource yet. Retry-friendly so the
+			// producer's Java client falls into its standard
+			// markCoordinatorUnknown loop instead of hard-failing.
+			fixedErr = int16(codec.ErrCoordinatorNotAvailable)
+		} else {
+			resolve = src.TxnCoordinator
+		}
+	default:
+		fixedErr = int16(codec.ErrInvalidRequest)
+	}
+
+	lookupOne := func(key string) (int32, string, int32, int16) {
+		if fixedErr != 0 {
+			return 0, "", 0, fixedErr
+		}
+		brokerID, ok := resolve(key)
 		if !ok {
-			// Group not yet in the cluster assignment. The client should
-			// retry — the controller will register the group on the next
-			// recompute (driven by ActiveGroups in BrokerStatus).
+			// Group/txn not yet in the cluster assignment. The
+			// client should retry — the controller will register
+			// the group on the next recompute (driven by
+			// ActiveGroups in BrokerStatus). For the txn path
+			// today, this means no broker is alive in the current
+			// assignment (the gh #91 hash routing always answers
+			// when at least one broker is alive).
 			return 0, "", 0, int16(codec.ErrCoordinatorNotAvailable)
 		}
 		nodeID, host, port, ok := m.lookupBroker(brokerID)
@@ -178,7 +256,7 @@ func (m *Manager) FindCoordinator(req *api.FindCoordinatorRequest) *api.FindCoor
 	}
 
 	if len(req.CoordinatorKeys) > 0 {
-		// v3+: multiple groups in one request.
+		// v4+: multiple keys in one request.
 		for _, key := range req.CoordinatorKeys {
 			nodeID, host, port, errCode := lookupOne(key)
 			resp.Coordinators = append(resp.Coordinators, api.CoordinatorResult{
@@ -190,7 +268,7 @@ func (m *Manager) FindCoordinator(req *api.FindCoordinatorRequest) *api.FindCoor
 			})
 		}
 	} else {
-		// v0–v2: single group.
+		// v0–v3: single key.
 		nodeID, host, port, errCode := lookupOne(req.Key)
 		resp.NodeID = nodeID
 		resp.Host = host

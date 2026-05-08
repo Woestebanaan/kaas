@@ -171,16 +171,105 @@ func TestFindCoordinatorResponseV0(t *testing.T) {
 	}
 }
 
+// TestFindCoordinatorRequestV3 pins gh #91 PR 3's codec fix: at v3
+// the wire shape is single Key + KeyType + flexible tagged fields
+// (Apache schema: Key has versions "0-3"). Before the fix the
+// decoder treated v3 like v4 and tried to read a CompactArray —
+// which would fail to parse a real franz-go / Java client v3 frame.
+// The compat suite never hit this because clients negotiate v4 max,
+// but pinning a v3 round-trip catches a silent regression that
+// would only surface against a v3-pinned client.
+func TestFindCoordinatorRequestV3(t *testing.T) {
+	w := codec.NewWriter()
+	w.WriteCompactString("my-txn")
+	w.WriteInt8(1) // KeyType = transaction
+	w.WriteEmptyTaggedFields()
+	r := codec.NewReader(w.Bytes())
+	req, err := DecodeFindCoordinatorRequest(r, 3)
+	if err != nil {
+		t.Fatalf("decode v3: %v", err)
+	}
+	if req.Key != "my-txn" {
+		t.Errorf("v3 Key=%q, want %q", req.Key, "my-txn")
+	}
+	if req.KeyType != 1 {
+		t.Errorf("v3 KeyType=%d, want 1", req.KeyType)
+	}
+	if len(req.CoordinatorKeys) != 0 {
+		t.Errorf("v3 unexpected CoordinatorKeys=%v (array form is v4+)", req.CoordinatorKeys)
+	}
+}
+
+// TestFindCoordinatorRequestV4 pins the v4 array form: KeyType
+// followed by a CompactArray of keys (no single Key field).
+func TestFindCoordinatorRequestV4(t *testing.T) {
+	w := codec.NewWriter()
+	w.WriteInt8(0) // KeyType = group
+	w.WriteCompactArray(2, func() {
+		w.WriteCompactString("group-a")
+		w.WriteCompactString("group-b")
+	})
+	w.WriteEmptyTaggedFields()
+	r := codec.NewReader(w.Bytes())
+	req, err := DecodeFindCoordinatorRequest(r, 4)
+	if err != nil {
+		t.Fatalf("decode v4: %v", err)
+	}
+	if req.Key != "" {
+		t.Errorf("v4 Key=%q, want empty (v4 uses CoordinatorKeys)", req.Key)
+	}
+	if got := req.CoordinatorKeys; len(got) != 2 || got[0] != "group-a" || got[1] != "group-b" {
+		t.Errorf("v4 CoordinatorKeys=%v, want [group-a group-b]", got)
+	}
+}
+
+// TestFindCoordinatorResponseV3 round-trips the v3 wire format:
+// single coord (NodeID/Host/Port) wrapped in flexible tagged
+// fields. Encoding the array form here would be the pre-fix bug.
 func TestFindCoordinatorResponseV3(t *testing.T) {
+	resp := &FindCoordinatorResponse{
+		ThrottleTimeMs: 0,
+		NodeID:         0,
+		Host:           "broker-0",
+		Port:           9092,
+	}
+	w := codec.NewWriter()
+	EncodeFindCoordinatorResponse(w, resp, 3)
+	r := codec.NewReader(w.Bytes())
+	if _, err := r.ReadInt32(); err != nil { // throttle
+		t.Fatal(err)
+	}
+	if errCode, err := r.ReadInt16(); err != nil || errCode != 0 {
+		t.Fatalf("v3 errCode=%d err=%v", errCode, err)
+	}
+	if msg, _, err := r.ReadCompactNullableString(); err != nil || msg != "" {
+		t.Fatalf("v3 errMsg=%q err=%v", msg, err)
+	}
+	if nodeID, err := r.ReadInt32(); err != nil || nodeID != 0 {
+		t.Fatalf("v3 nodeID=%d err=%v", nodeID, err)
+	}
+	if host, err := r.ReadCompactString(); err != nil || host != "broker-0" {
+		t.Fatalf("v3 host=%q err=%v", host, err)
+	}
+	if port, err := r.ReadInt32(); err != nil || port != 9092 {
+		t.Fatalf("v3 port=%d err=%v", port, err)
+	}
+	if err := r.ReadTaggedFields(); err != nil {
+		t.Fatalf("v3 tagged fields: %v", err)
+	}
+}
+
+// TestFindCoordinatorResponseV4 round-trips the v4 array form.
+func TestFindCoordinatorResponseV4(t *testing.T) {
 	resp := &FindCoordinatorResponse{
 		Coordinators: []CoordinatorResult{
 			{Key: "my-group", NodeID: 0, Host: "broker-0", Port: 9092},
 		},
 	}
 	w := codec.NewWriter()
-	EncodeFindCoordinatorResponse(w, resp, 3)
+	EncodeFindCoordinatorResponse(w, resp, 4)
 	if len(w.Bytes()) == 0 {
-		t.Error("empty response")
+		t.Error("v4 empty response")
 	}
 }
 
