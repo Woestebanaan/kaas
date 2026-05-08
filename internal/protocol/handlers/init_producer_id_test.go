@@ -257,6 +257,192 @@ func TestInitProducerIdFencerNotCalledForEmptyTxnID(t *testing.T) {
 	}
 }
 
+// fakeTxnOwnership stubs the gh #91 routing gate. ownsAll=true
+// mirrors the "every broker is the coordinator" boot-time stub;
+// flip false and pre-populate ownsByID for negative tests.
+type fakeTxnOwnership struct {
+	ownsAll   bool
+	ownsByID  map[string]bool
+	callsLog  []string
+}
+
+func (f *fakeTxnOwnership) OwnsTxn(txnID string) bool {
+	f.callsLog = append(f.callsLog, txnID)
+	if f.ownsAll {
+		return true
+	}
+	return f.ownsByID[txnID]
+}
+
+// TestInitProducerIdGateAcceptsOwner: routing-gate-wired handler
+// with the broker's OwnsTxn returning true accepts the request and
+// hands out a PID with epoch=0 (first-time) — same shape as a no-
+// gate handler. Without this, gh #91 PR 2 would reject every
+// transactional producer everywhere.
+func TestInitProducerIdGateAcceptsOwner(t *testing.T) {
+	h := NewInitProducerIdHandler().
+		WithTxnStateStore(newFakeTxnStore()).
+		WithTxnOwnership(&fakeTxnOwnership{ownsAll: true})
+
+	errCode, pid, epoch := callInitPIDWithErrCode(t, h, "txn-A", 4)
+	if errCode != 0 {
+		t.Errorf("owner-broker errCode=%d, want 0", errCode)
+	}
+	if pid <= 0 {
+		t.Errorf("owner-broker pid=%d, want >0", pid)
+	}
+	if epoch != 0 {
+		t.Errorf("owner-broker first-call epoch=%d, want 0", epoch)
+	}
+}
+
+// TestInitProducerIdGateRejectsNonOwner pins the gh #91 PR 2 wire
+// contract: a non-empty transactional.id on a non-owning broker
+// returns NOT_COORDINATOR (16) with pid=-1, epoch=-1. The Java
+// client treats 16 as the "markCoordinatorUnknown + retry" trigger
+// — same surface the consumer-group coordinator uses for
+// JoinGroup/Heartbeat/etc.
+func TestInitProducerIdGateRejectsNonOwner(t *testing.T) {
+	h := NewInitProducerIdHandler().
+		WithTxnStateStore(newFakeTxnStore()).
+		WithTxnOwnership(&fakeTxnOwnership{ownsByID: map[string]bool{"some-other": true}})
+
+	errCode, pid, epoch := callInitPIDWithErrCode(t, h, "txn-not-mine", 4)
+	if errCode != int16(codec.ErrNotCoordinator) {
+		t.Errorf("non-owner errCode=%d, want %d (NOT_COORDINATOR)",
+			errCode, int16(codec.ErrNotCoordinator))
+	}
+	if pid != -1 {
+		t.Errorf("rejected pid=%d, want -1", pid)
+	}
+	if epoch != -1 {
+		t.Errorf("rejected epoch=%d, want -1", epoch)
+	}
+}
+
+// TestInitProducerIdGateAllowsEmptyTxnID: idempotent producers
+// (empty transactional.id) bypass the gate even when ownership
+// would say "not mine" for a hypothetical key. There is no per-
+// txnID state for the idempotent case, so every broker can serve
+// it locally; if the gate fired, every Java producer with the
+// default enable.idempotence=true would break on every broker but
+// one.
+func TestInitProducerIdGateAllowsEmptyTxnID(t *testing.T) {
+	ownership := &fakeTxnOwnership{} // ownsAll=false, ownsByID nil → owns nothing
+	h := NewInitProducerIdHandler().WithTxnOwnership(ownership)
+
+	errCode, pid, _ := callInitPIDWithErrCode(t, h, "", 4)
+	if errCode != 0 {
+		t.Errorf("empty-txn errCode=%d, want 0 (idempotent path bypasses gate)", errCode)
+	}
+	if pid <= 0 {
+		t.Errorf("empty-txn pid=%d, want >0", pid)
+	}
+	if len(ownership.callsLog) != 0 {
+		t.Errorf("empty-txn consulted ownership %d times, want 0 (gate must short-circuit on empty)",
+			len(ownership.callsLog))
+	}
+}
+
+// TestInitProducerIdNoOwnershipWiredKeepsCurrentBehaviour: the
+// gate is opt-in. A handler with no WithTxnOwnership keeps today's
+// "every broker accepts every txnID" behaviour — that's the
+// boot-time / dev-mode / unit-test path, and we must not regress
+// it. PR 1's broker.go wiring uses a type-assertion that fails on
+// the dev stub, so this test stands in for that branch.
+func TestInitProducerIdNoOwnershipWiredKeepsCurrentBehaviour(t *testing.T) {
+	h := NewInitProducerIdHandler().WithTxnStateStore(newFakeTxnStore())
+
+	errCode, pid, _ := callInitPIDWithErrCode(t, h, "txn-anything", 4)
+	if errCode != 0 {
+		t.Errorf("no-ownership errCode=%d, want 0 (gate opt-in)", errCode)
+	}
+	if pid <= 0 {
+		t.Errorf("no-ownership pid=%d, want >0", pid)
+	}
+}
+
+// TestInitProducerIdGateRejectionDoesNotConsumePID: a rejected
+// request must NOT bump the monotonic next-PID counter. A
+// misrouted client retrying FindCoordinator at line rate would
+// otherwise burn through int63 PID space, and rejected sessions
+// would leak distinct PIDs into the broker's logs / metrics
+// surface. Assert that within a single handler the legitimate
+// pre-reject and post-reject PIDs are exactly N and N+1 with five
+// rejected calls in between (i.e. the rejected calls bumped the
+// counter zero times).
+func TestInitProducerIdGateRejectionDoesNotConsumePID(t *testing.T) {
+	h := NewInitProducerIdHandler().
+		WithTxnStateStore(newFakeTxnStore()).
+		WithTxnOwnership(&fakeTxnOwnership{ownsAll: true})
+
+	// Pre-reject: one accepted call.
+	preRejectPID := callInitPID(t, h, 4)
+
+	// Swap ownership to refuse and fire five rejected calls.
+	h.ownership = &fakeTxnOwnership{}
+	for i := 0; i < 5; i++ {
+		errCode, _, _ := callInitPIDWithErrCode(t, h, "rejected-txn", 4)
+		if errCode != int16(codec.ErrNotCoordinator) {
+			t.Fatalf("setup: rejection round %d returned errCode=%d, want NOT_COORDINATOR", i, errCode)
+		}
+	}
+
+	// Restore accepting ownership and fire one more accepted call.
+	h.ownership = &fakeTxnOwnership{ownsAll: true}
+	postRejectPID := callInitPID(t, h, 4)
+
+	// allocate() does h.next.Add(1) on each accepted call, so the
+	// two accepted calls should be exactly one apart even with five
+	// rejections in between. A leaky gate that bumped per-rejection
+	// would surface as gap=6.
+	gap := postRejectPID - preRejectPID
+	if gap != 1 {
+		t.Errorf("post-reject PID gap=%d (pre=%d, post=%d), want 1 — rejections leaked allocations",
+			gap, preRejectPID, postRejectPID)
+	}
+}
+
+// callInitPIDWithErrCode is callInitPIDWithTxn that surfaces the
+// ErrorCode field (the existing helper discards it).
+func callInitPIDWithErrCode(t *testing.T, h *InitProducerIdHandler, txnID string, version int16) (int16, int64, int16) {
+	t.Helper()
+	w := codec.NewWriter()
+	if version >= 2 {
+		w.WriteCompactNullableString(txnID, txnID == "")
+		w.WriteInt32(60_000)
+		if version >= 3 {
+			w.WriteInt64(-1)
+			w.WriteInt16(-1)
+		}
+		w.WriteEmptyTaggedFields()
+	} else {
+		w.WriteNullableString(txnID, txnID == "")
+		w.WriteInt32(60_000)
+	}
+	out, err := h.Handle(&connstate.ConnState{}, version, w.Bytes())
+	if err != nil {
+		t.Fatalf("Handle v%d: %v", version, err)
+	}
+	r := codec.NewReader(out)
+	if _, err = r.ReadInt32(); err != nil {
+		t.Fatal(err)
+	}
+	errCode, err := r.ReadInt16()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := r.ReadInt64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := r.ReadInt16()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return errCode, pid, epoch
+}
+
 // callInitPIDWithTxn is callInitPID with a non-empty
 // transactional.id field. v4 only — v0/v1 don't have the
 // PID/epoch echo fields but they DO carry transactional.id.

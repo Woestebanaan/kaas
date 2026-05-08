@@ -255,6 +255,15 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	if fencer, ok := b.store.(handlers.ProducerEpochFencer); ok {
 		initPIDHandler = initPIDHandler.WithFencer(fencer)
 	}
+	// gh #91: route InitProducerId for non-empty transactional.id to
+	// the txn-coordinator broker (hash of txnID into the StatefulSet
+	// broker set). Wiring is opt-in; in dev mode brokerCoord is the
+	// LocalLeaseManager-backed stub which does not implement
+	// TxnOwnership, so the cast fails and the gate stays disabled —
+	// exactly the same back-compat shape as WithFencer above.
+	if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
+		initPIDHandler = initPIDHandler.WithTxnOwnership(ownership)
+	}
 	d.Register(22, 0, 4, initPIDHandler)
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())

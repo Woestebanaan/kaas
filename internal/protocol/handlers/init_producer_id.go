@@ -10,6 +10,21 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
 
+// TxnOwnership reports whether this broker is the routed
+// transactional coordinator for a given transactional.id (gh #91).
+// Mirrors the GroupAssignmentSource shape consumed by the consumer-
+// group coordinator (`internal/coordinator.GroupAssignmentSource.
+// OwnsGroup`). Production wires `*broker.Coordinator` (its OwnsTxn
+// method hashes txnID into the StatefulSet broker set, with an
+// alive-subset deterministic fallback). Tests can substitute a fake.
+//
+// The gate is opt-in: when no ownership source is wired the handler
+// keeps today's "every broker hands out a fresh PID" behaviour, so
+// boot / local-dev / unit-test wiring stays uninterrupted.
+type TxnOwnership interface {
+	OwnsTxn(transactionalID string) bool
+}
+
 // TxnStateStore is the slim interface InitProducerIdHandler needs
 // from the coordinator's TxnStateStore. Defined here to avoid an
 // import cycle (handlers → coordinator → handlers via Manager's
@@ -50,9 +65,10 @@ type ProducerEpochFencer interface {
 // trades the strong guarantees of Apache Kafka's TransactionCoordinator
 // for simplicity; revisit if/when transactions arrive.
 type InitProducerIdHandler struct {
-	next     atomic.Int64
-	txnStore TxnStateStore       // nil ⇒ stage A behaviour for transactional IDs (always fresh PID)
-	fencer   ProducerEpochFencer // nil ⇒ gh #30 cross-partition fence is lazy (only on next Append)
+	next      atomic.Int64
+	txnStore  TxnStateStore       // nil ⇒ stage A behaviour for transactional IDs (always fresh PID)
+	fencer    ProducerEpochFencer // nil ⇒ gh #30 cross-partition fence is lazy (only on next Append)
+	ownership TxnOwnership        // nil ⇒ gh #91 routing gate disabled (every broker accepts every txn ID)
 }
 
 func NewInitProducerIdHandler() *InitProducerIdHandler {
@@ -91,11 +107,51 @@ func (h *InitProducerIdHandler) WithFencer(f ProducerEpochFencer) *InitProducerI
 	return h
 }
 
+// WithTxnOwnership wires the gh #91 transactional-coordinator routing
+// gate. When set, an InitProducerId carrying a non-empty
+// transactional.id is rejected with NOT_COORDINATOR (16) on every
+// broker except the one PickTxnCoordinator routes the txn ID to —
+// the producer's Java client will markCoordinatorUnknown and retry
+// FindCoordinator (KeyType=transaction; PR 3 wires that side), then
+// land on the right broker. Without this, a transactional producer
+// reconnecting to a different broker for the same txn ID gets a
+// fresh PID with epoch=0 and the gh #22 fence-on-rejoin contract is
+// silently broken (zombie writes from the previous session can't be
+// distinguished from the new one's).
+//
+// Only the non-empty (transactional) path is gated. Empty
+// transactional.id is the idempotent-producer case (no routing
+// concept — there's no per-txnID state) and every broker continues
+// to allocate a fresh PID locally.
+func (h *InitProducerIdHandler) WithTxnOwnership(o TxnOwnership) *InitProducerIdHandler {
+	h.ownership = o
+	return h
+}
+
 func (h *InitProducerIdHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
 	r := codec.NewReader(body)
 	req, err := api.DecodeInitProducerIdRequest(r, version)
 	if err != nil {
 		return nil, err
+	}
+
+	// gh #91 routing gate. Only the transactional path is routed —
+	// idempotent producers (empty txn ID) have no per-key state to
+	// pin and every broker can answer locally. Returning before
+	// allocate() means the wrong-broker case never bumps the
+	// monotonic PID counter or touches the TxnStateStore, so a
+	// rapid-fire client retrying FindCoordinator can't burn through
+	// the PID space or pollute the store with entries on every
+	// broker it bounces off.
+	if req.TransactionalID != "" && h.ownership != nil && !h.ownership.OwnsTxn(req.TransactionalID) {
+		resp := &api.InitProducerIdResponse{
+			ErrorCode:     int16(codec.ErrNotCoordinator),
+			ProducerID:    -1,
+			ProducerEpoch: -1,
+		}
+		w := codec.NewWriter()
+		api.EncodeInitProducerIdResponse(w, resp, version)
+		return w.Bytes(), nil
 	}
 
 	pid, epoch := h.allocate(req.TransactionalID)
