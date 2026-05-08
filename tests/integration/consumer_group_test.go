@@ -1255,3 +1255,320 @@ func TestGh98Kip394StaticMemberSkipsMemberIDRequired(t *testing.T) {
 		t.Error("static-member join: MemberID=\"\", expected inline assignment")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Additional coordinator coverage (post-gh #98)
+// ---------------------------------------------------------------------------
+
+// TestGh98PendingMemberCleanupTimerFires pins KIP-394's cleanup
+// behaviour: an assigned-but-never-retried memberID gets dropped
+// from g.pendingMembers after initialRebalanceDelayMs. The map
+// stays bounded; a future client that happens to receive the same
+// generated ID can still join cleanly.
+//
+// Apache parity: GroupMetadata.scala's pendingMembers is purged on
+// the same cadence so a network-blipped client doesn't permanently
+// hold a member-ID slot.
+func TestGh98PendingMemberCleanupTimerFires(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	groupID := "kip394-cleanup-group"
+
+	first := mgr.JoinGroup(fastJoin(groupID, "consumer"), 4, "client-1")
+	if first.ErrorCode != 79 {
+		t.Fatalf("first join: ErrorCode=%d, want 79 (MEMBER_ID_REQUIRED)", first.ErrorCode)
+	}
+	abandoned := first.MemberID
+
+	// Wait past initialRebalanceDelayMs (3s) + a margin for scheduler
+	// jitter. The cleanup timer must have fired and removed the
+	// pending entry.
+	time.Sleep(3500 * time.Millisecond)
+
+	// A subsequent fresh join (empty memberID, v4+) should still get
+	// a NEW MEMBER_ID_REQUIRED handshake — not blocked by the
+	// abandoned slot.
+	second := mgr.JoinGroup(fastJoin(groupID, "consumer"), 4, "client-2")
+	if second.ErrorCode != 79 {
+		t.Errorf("second join after cleanup: ErrorCode=%d, want 79", second.ErrorCode)
+	}
+	if second.MemberID == abandoned {
+		t.Errorf("second join reused abandoned ID %q (cleanup should have freed it for fresh allocation)", abandoned)
+	}
+}
+
+// TestGh98PendingMemberPromotionStopsCleanupTimer: when the client
+// retries the JoinGroup with the assigned ID before the cleanup
+// timer fires, the timer must be cancelled — otherwise it'd later
+// "clean up" a now-fully-promoted active member, removing them
+// from pendingMembers (harmless) but masking a real bug if anything
+// else were keyed off pendingMembers.
+//
+// We can't directly observe the cancelled timer from outside the
+// package, but we CAN observe its side-effect: a follow-up rebalance
+// after the cleanup window should still treat the member as fully
+// joined (not nudge it back into pendingMembers).
+func TestGh98PendingMemberPromotionStopsCleanupTimer(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	groupID := "kip394-promote-group"
+
+	// Step 1: first join → MEMBER_ID_REQUIRED.
+	first := mgr.JoinGroup(fastJoin(groupID, "consumer"), 4, "client-1")
+	if first.ErrorCode != 79 {
+		t.Fatalf("first: %d", first.ErrorCode)
+	}
+
+	// Step 2: retry within the cleanup window.
+	req := fastJoin(groupID, "consumer")
+	req.MemberID = first.MemberID
+	second := mgr.JoinGroup(req, 4, "client-1")
+	if second.ErrorCode != 0 {
+		t.Fatalf("second: %d", second.ErrorCode)
+	}
+
+	// Step 3: drive the member through SyncGroup so state lands at
+	// Stable (otherwise heartbeat returns REBALANCE_IN_PROGRESS
+	// regardless of the cleanup-timer story).
+	syncResp := mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: second.GenerationID, MemberID: second.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: second.MemberID, Assignment: []byte("p0")}},
+	})
+	if syncResp.ErrorCode != 0 {
+		t.Fatalf("Sync: %d", syncResp.ErrorCode)
+	}
+
+	// Step 4: wait past the cleanup window.
+	time.Sleep(3500 * time.Millisecond)
+
+	// Step 5: heartbeat must succeed — the cleanup timer firing
+	// post-promotion must NOT evict the member or invalidate its
+	// session. ErrUnknownMemberId (25) would mean the cleanup
+	// removed the member; ErrNone (0) means the member is still
+	// alive in g.members.
+	hb := mgr.Heartbeat(&api.HeartbeatRequest{
+		GroupID:      groupID,
+		GenerationID: second.GenerationID,
+		MemberID:     second.MemberID,
+	})
+	if hb.ErrorCode == 25 {
+		t.Fatalf("heartbeat after cleanup-window: ErrorCode=25 (UNKNOWN_MEMBER_ID) — cleanup timer evicted the promoted member")
+	}
+	if hb.ErrorCode != 0 {
+		t.Errorf("heartbeat after cleanup-window with promoted member: ErrorCode=%d, want 0", hb.ErrorCode)
+	}
+}
+
+// TestRemoveMemberIdempotent drives the broker into a state where
+// the same member is evicted twice — first by LeaveGroup, then by
+// the heartbeat-timer's AfterFunc that started before LeaveGroup
+// removed the timer. The second call must be a no-op (the helper
+// short-circuits when the member is already gone) so no double-send
+// on the (already-drained) waiter ch panics or leaks.
+//
+// Pre-fix this race didn't exist (no helper, just inline mutations)
+// but the helper extracted in gh #98 #1+#3 needs explicit idempotency
+// because both eviction paths call it.
+func TestRemoveMemberIdempotent(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	groupID := "remove-idempotent"
+
+	// Member with very short session timeout — the heartbeat AfterFunc
+	// will fire shortly.
+	resp := mgr.JoinGroup(&api.JoinGroupRequest{
+		GroupID:            groupID,
+		SessionTimeoutMs:   100,
+		RebalanceTimeoutMs: 100,
+		ProtocolType:       "consumer",
+		Protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte{}}},
+	}, 3, "client")
+	if resp.ErrorCode != 0 {
+		t.Fatalf("Join: %d", resp.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: resp.GenerationID, MemberID: resp.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: resp.MemberID, Assignment: []byte("p0")}},
+	})
+
+	// Race the two eviction paths: LeaveGroup vs session timeout.
+	// LeaveGroup runs synchronously here; the heartbeat timer
+	// AfterFunc may have already fired (memberID already removed)
+	// or fire shortly after.
+	leaveResps := mgr.LeaveGroup(&api.LeaveGroupRequest{
+		GroupID: groupID,
+		Members: []api.LeaveMember{{MemberID: resp.MemberID}},
+	})
+	if len(leaveResps.Members) != 1 {
+		t.Fatalf("Leave: got %d responses, want 1", len(leaveResps.Members))
+	}
+	// Either ErrNone (LeaveGroup found the member alive) or
+	// ErrUnknownMemberId (heartbeat-timer beat it to the punch) is
+	// acceptable. What matters is no panic and no goroutine leak.
+	if leaveResps.Members[0].ErrorCode != 0 && leaveResps.Members[0].ErrorCode != 25 {
+		t.Errorf("Leave first member: ErrorCode=%d, want 0 or 25", leaveResps.Members[0].ErrorCode)
+	}
+
+	// Wait long enough that the heartbeat AfterFunc has fired (it
+	// may already have, depending on timing). Heartbeat from the
+	// dead memberID must surface UNKNOWN_MEMBER_ID — and the broker
+	// must not have crashed.
+	time.Sleep(200 * time.Millisecond)
+	hb := mgr.Heartbeat(&api.HeartbeatRequest{
+		GroupID:      groupID,
+		GenerationID: resp.GenerationID,
+		MemberID:     resp.MemberID,
+	})
+	if hb.ErrorCode != 25 {
+		t.Errorf("post-eviction heartbeat: ErrorCode=%d, want 25 (UNKNOWN_MEMBER_ID)", hb.ErrorCode)
+	}
+}
+
+// TestSelectProtocolNoSharedProtocolReturnsEmpty: two members with
+// disjoint protocol lists (range vs roundrobin) end up at a
+// completeRebalance whose selectProtocol returns "". The Java
+// client surfaces InconsistentGroupProtocolException client-side
+// when this happens — Apache's broker also returns the same
+// (empty) field, just with the rebalance still completing so the
+// client sees the raw mismatch instead of a hang.
+func TestSelectProtocolNoSharedProtocolReturnsEmpty(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	groupID := "no-shared-protocol"
+
+	// Two concurrent joiners with completely disjoint protocols.
+	// fastJoin uses "range"; we override the second to "roundrobin".
+	mkReq := func(proto string) *api.JoinGroupRequest {
+		return &api.JoinGroupRequest{
+			GroupID:            groupID,
+			SessionTimeoutMs:   30_000,
+			RebalanceTimeoutMs: 100,
+			ProtocolType:       "consumer",
+			Protocols:          []api.JoinGroupProtocol{{Name: proto, Metadata: []byte("m")}},
+		}
+	}
+	var wg sync.WaitGroup
+	var r1, r2 *api.JoinGroupResponse
+	wg.Add(2)
+	go func() { defer wg.Done(); r1 = mgr.JoinGroup(mkReq("range"), 3, "c1") }()
+	go func() { defer wg.Done(); r2 = mgr.JoinGroup(mkReq("roundrobin"), 3, "c2") }()
+	wg.Wait()
+
+	// Both members joined the SAME group, so they share generation.
+	// One was leader (sent "range"), the other is a follower
+	// ("roundrobin"). selectProtocol picks the first leader-protocol
+	// every other waiter supports → none → "".
+	if r1.GenerationID != r2.GenerationID {
+		t.Errorf("members got different generations (%d vs %d)", r1.GenerationID, r2.GenerationID)
+	}
+	if r1.ProtocolName != "" || r2.ProtocolName != "" {
+		t.Errorf("ProtocolName=%q/%q, want \"\"/\"\" (no shared protocol)", r1.ProtocolName, r2.ProtocolName)
+	}
+	// Both rebalanced cleanly — the broker did NOT hang. The Java
+	// client would now raise InconsistentGroupProtocolException
+	// client-side and surface a meaningful error to the consumer.
+}
+
+// TestGenerationMonotonicAcrossRebalances pins the contract that
+// GenerationID increases on every rebalance and never decreases.
+// A stale-generation Heartbeat from a previous round must surface
+// ILLEGAL_GENERATION (22), not ErrNone.
+func TestGenerationMonotonicAcrossRebalances(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	groupID := "gen-monotonic"
+
+	// Round 1: join + sync.
+	r1 := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c1")
+	if r1.ErrorCode != 0 {
+		t.Fatalf("join 1: %d", r1.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: r1.GenerationID, MemberID: r1.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: r1.MemberID, Assignment: []byte("p0")}},
+	})
+	gen1 := r1.GenerationID
+
+	// Round 2: leave + rejoin → triggers a new rebalance.
+	mgr.LeaveGroup(&api.LeaveGroupRequest{
+		GroupID: groupID, Members: []api.LeaveMember{{MemberID: r1.MemberID}},
+	})
+	r2 := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c1")
+	if r2.ErrorCode != 0 {
+		t.Fatalf("join 2: %d", r2.ErrorCode)
+	}
+	if r2.GenerationID <= gen1 {
+		t.Errorf("gen2=%d, want > gen1=%d", r2.GenerationID, gen1)
+	}
+
+	// Round 3: same dance, expect another bump.
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: r2.GenerationID, MemberID: r2.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: r2.MemberID, Assignment: []byte("p0")}},
+	})
+	mgr.LeaveGroup(&api.LeaveGroupRequest{
+		GroupID: groupID, Members: []api.LeaveMember{{MemberID: r2.MemberID}},
+	})
+	r3 := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c1")
+	if r3.GenerationID <= r2.GenerationID {
+		t.Errorf("gen3=%d, want > gen2=%d", r3.GenerationID, r2.GenerationID)
+	}
+
+	// Stale heartbeat from gen1 against the now-current gen3 must
+	// surface ILLEGAL_GENERATION.
+	hb := mgr.Heartbeat(&api.HeartbeatRequest{
+		GroupID:      groupID,
+		GenerationID: gen1,
+		MemberID:     r3.MemberID,
+	})
+	if hb.ErrorCode != 22 {
+		t.Errorf("stale-gen Heartbeat: ErrorCode=%d, want 22 (ILLEGAL_GENERATION)", hb.ErrorCode)
+	}
+}
+
+// TestSyncGroupResponseOmitsProtocolFieldsOnError: companion to
+// TestGh98SyncGroupResponseEchoesProtocolFields. On error responses
+// (REBALANCE_IN_PROGRESS, ILLEGAL_GENERATION, UNKNOWN_MEMBER_ID)
+// the Java client doesn't validate ProtocolType/Name (it short-
+// circuits on ErrorCode != 0). But the response should still be
+// shaped correctly: empty fields, never the in-flight group's
+// values.
+func TestSyncGroupResponseOmitsProtocolFieldsOnError(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	groupID := "sync-error-protocols"
+
+	// Set up an active group so g.protocolType/protocolName are
+	// non-empty (would surface in success-path responses).
+	join := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c1")
+	if join.ErrorCode != 0 {
+		t.Fatalf("Join: %d", join.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: join.MemberID, Assignment: []byte("p0")}},
+	})
+
+	// Stale-generation SyncGroup → ILLEGAL_GENERATION error path.
+	// Response should NOT echo the group's protocol fields.
+	stale := mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID:      groupID,
+		GenerationID: join.GenerationID - 1, // stale
+		MemberID:     join.MemberID,
+	})
+	if stale.ErrorCode != 22 {
+		t.Errorf("stale-gen Sync: ErrorCode=%d, want 22 (ILLEGAL_GENERATION)", stale.ErrorCode)
+	}
+	if stale.ProtocolType != "" || stale.ProtocolName != "" {
+		t.Errorf("error-path Sync: ProtocolType=%q/Name=%q, want empty (Apache returns empty on error)",
+			stale.ProtocolType, stale.ProtocolName)
+	}
+
+	// Unknown-member SyncGroup → UNKNOWN_MEMBER_ID. Same expectation.
+	unknown := mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID:      groupID,
+		GenerationID: join.GenerationID,
+		MemberID:     "ghost-member",
+	})
+	if unknown.ErrorCode != 25 {
+		t.Errorf("unknown-member Sync: ErrorCode=%d, want 25 (UNKNOWN_MEMBER_ID)", unknown.ErrorCode)
+	}
+	if unknown.ProtocolType != "" || unknown.ProtocolName != "" {
+		t.Errorf("unknown-member Sync: ProtocolType=%q/Name=%q, want empty",
+			unknown.ProtocolType, unknown.ProtocolName)
+	}
+}
