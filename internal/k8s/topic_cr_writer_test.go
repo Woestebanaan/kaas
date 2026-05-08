@@ -278,6 +278,7 @@ func TestTopicCRWriter_ArgoCDIntegrationStampsBoth(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
 	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		Enabled:         true,
 		ApplicationName: "skafka",
 		CompareOptions:  "IgnoreExtraneous",
 	})
@@ -309,6 +310,7 @@ func TestTopicCRWriter_ArgoCDCustomCompareOptions(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
 	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		Enabled:         true,
 		ApplicationName: "skafka",
 		CompareOptions:  "IgnoreExtraneous,IgnoreResourceUpdates",
 	})
@@ -338,6 +340,7 @@ func TestTopicCRWriter_ArgoCDTrackingIDOnly(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
 	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		Enabled:         true,
 		ApplicationName: "skafka",
 		CompareOptions:  "", // explicit no compare-options
 	})
@@ -360,6 +363,38 @@ func TestTopicCRWriter_ArgoCDTrackingIDOnly(t *testing.T) {
 	}
 }
 
+// TestTopicCRWriter_ArgoCDDisabledIgnoresOtherFields is the
+// defensive gate: when Enabled=false, NO argocd.argoproj.io/*
+// annotations are stamped, regardless of what other fields are
+// set. Catches a class of bugs where ApplicationName is somehow
+// populated (e.g., a leftover env var from a previous deployment,
+// a programmatic caller passing the wrong config) but the operator
+// has explicitly opted out via `admin.argocd.enabled: false`.
+func TestTopicCRWriter_ArgoCDDisabledIgnoresOtherFields(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		Enabled:         false, // explicit disabled
+		ApplicationName: "skafka",
+		CompareOptions:  "IgnoreExtraneous",
+		SyncOptions:     "Prune=false,Delete=false",
+	})
+
+	if err := w.CreateTopic(ctx, "must-have-no-annotations", 1, nil); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "must-have-no-annotations"}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for k, v := range got.Annotations {
+		if strings.HasPrefix(k, "argocd.argoproj.io/") {
+			t.Errorf("Enabled=false produced ArgoCD annotation %q=%q (defensive gate must override every other field)",
+				k, v)
+		}
+	}
+}
+
 // TestTopicCRWriter_ArgoCDSyncOptionsDefaultEmpty pins that the
 // sync-options annotation is NOT stamped when SyncOptions is empty
 // (the default). Most operators want the IgnoreExtraneous compare-
@@ -369,6 +404,7 @@ func TestTopicCRWriter_ArgoCDSyncOptionsDefaultEmpty(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
 	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		Enabled:         true,
 		ApplicationName: "skafka",
 		CompareOptions:  "IgnoreExtraneous",
 		// SyncOptions intentionally empty
@@ -403,6 +439,7 @@ func TestTopicCRWriter_ArgoCDSyncOptionsPassthrough(t *testing.T) {
 			ctx := context.Background()
 			cli := newFakeClient(t)
 			w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+				Enabled:         true,
 				ApplicationName: "skafka",
 				SyncOptions:     want,
 			})
@@ -432,7 +469,7 @@ func TestTopicCRWriter_ArgoCDSyncOptionsPassthrough(t *testing.T) {
 func TestTopicCRWriter_ArgoCDTrackingIDUsesSyntheticMeta(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
-	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{ApplicationName: "skafka"})
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{Enabled: true, ApplicationName: "skafka"})
 
 	const streamsName = "KSTREAM-AGGREGATE-STATE-STORE-0000000003-repartition"
 	if err := w.CreateTopic(ctx, streamsName, 1, nil); err != nil {

@@ -113,6 +113,14 @@ spec:
               value: "{{ .Values.observability.otlp.traces.samplerRatio }}"
             {{- end }}
             {{- if .Values.admin.argocd.enabled }}
+            - name: SKAFKA_ARGOCD_ENABLED
+              # Explicit enable flag — the broker checks this first
+              # and ignores every other ArgoCD field when not "true".
+              # Belt-and-braces with the chart-side gate above: if
+              # something out-of-band sets the other env vars without
+              # going through the chart, this gate keeps the broker
+              # honest.
+              value: "true"
             - name: SKAFKA_ARGOCD_APPLICATION_NAME
               # applicationName falls back to the Helm release name —
               # typical install just sets `admin.argocd.enabled: true`

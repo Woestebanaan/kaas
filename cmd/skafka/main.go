@@ -368,6 +368,7 @@ func runBroker(ctx context.Context) {
 				// outside the helm template) — explicit
 				// fallback handled below.
 				argoCfg := k8spkg.ArgoCDConfig{
+					Enabled:         os.Getenv("SKAFKA_ARGOCD_ENABLED") == "true",
 					ApplicationName: os.Getenv("SKAFKA_ARGOCD_APPLICATION_NAME"),
 					CompareOptions:  os.Getenv("SKAFKA_ARGOCD_COMPARE_OPTIONS"),
 					SyncOptions:     os.Getenv("SKAFKA_ARGOCD_SYNC_OPTIONS"),
@@ -380,7 +381,7 @@ func runBroker(ctx context.Context) {
 				// defaults to empty (no annotation) — opt-in only,
 				// since the common case is already covered by
 				// IgnoreExtraneous.
-				if argoCfg.ApplicationName != "" {
+				if argoCfg.Enabled {
 					if _, set := os.LookupEnv("SKAFKA_ARGOCD_COMPARE_OPTIONS"); !set {
 						argoCfg.CompareOptions = "IgnoreExtraneous"
 					}

@@ -30,10 +30,21 @@ import "fmt"
 // protocol — KafkaACL on CreateAcls/DeleteAcls, KafkaUser on
 // AlterClientQuotas / AlterUserScramCredentials, etc.
 type ArgoCDConfig struct {
+	// Enabled is the explicit primary gate. When false (the
+	// default), Annotations() returns nil regardless of any other
+	// field — every other knob (ApplicationName, CompareOptions,
+	// SyncOptions) is ignored. This is defensive: an operator who
+	// flips `admin.argocd.enabled: false` on the chart must NEVER
+	// see argocd.argoproj.io/* annotations on runtime-created CRs,
+	// even if some other env var (or programmatic caller) has set
+	// ApplicationName.
+	Enabled bool
+
 	// ApplicationName is the ArgoCD Application name (typically the
 	// chart's release name, e.g. "skafka"). Empty disables all
 	// ArgoCD-specific annotations — the writer produces plain CRs
-	// with no argocd.argoproj.io/* metadata.
+	// with no argocd.argoproj.io/* metadata. (Enabled is checked
+	// first; both must be set for any annotation to be emitted.)
 	ApplicationName string
 
 	// CompareOptions is the value for `argocd.argoproj.io/compare-options`.
@@ -86,7 +97,12 @@ type ArgoCDConfig struct {
 // so the tracking-id must reference the synthesised name, not the
 // human-friendly Kafka resource name.
 func (c ArgoCDConfig) Annotations(group, kind, namespace, metaName string) map[string]string {
-	if c.ApplicationName == "" {
+	// Two gates both must pass: the explicit Enabled flag (operator
+	// flipped admin.argocd.enabled: true on the chart) AND a non-
+	// empty ApplicationName (something to put in the tracking-id).
+	// Either alone is insufficient — disabled means disabled, no
+	// matter what other fields say.
+	if !c.Enabled || c.ApplicationName == "" {
 		return nil
 	}
 	out := map[string]string{
