@@ -1194,6 +1194,50 @@ func TestGh98Kip394V3ClientUsesLegacyPath(t *testing.T) {
 	}
 }
 
+// TestGh98SyncGroupResponseEchoesProtocolFields pins a contract
+// the gh #98 #6 wire-encoder change surfaced as a real bug:
+// skafka's (g *group).sync() never populated ProtocolType /
+// ProtocolName in the SyncGroupResponse. Pre-#98-#6 the nullable
+// encoder wrote those empty strings as null on the wire and the
+// Java client treated null as "absent — trust my own state".
+// Post-#98-#6 the non-nullable encoder writes them as empty
+// strings, which the Java client validates and rejects with
+// InconsistentGroupProtocolException ("received  but expected
+// consumer").
+//
+// The fix is to actually echo the group's selected protocol back
+// to the client — what Apache always did. This test asserts the
+// SyncGroup response on the success path carries the
+// ProtocolType/ProtocolName the JoinGroup that triggered the
+// rebalance settled on.
+func TestGh98SyncGroupResponseEchoesProtocolFields(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "sync-protocol-echo"
+
+	join := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "client-1")
+	if join.ErrorCode != 0 {
+		t.Fatalf("Join: %d", join.ErrorCode)
+	}
+
+	syncResp := mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID:      groupID,
+		GenerationID: join.GenerationID,
+		MemberID:     join.MemberID,
+		Assignments: []api.SyncAssignment{
+			{MemberID: join.MemberID, Assignment: []byte("p0")},
+		},
+	})
+	if syncResp.ErrorCode != 0 {
+		t.Fatalf("Sync: %d", syncResp.ErrorCode)
+	}
+	if syncResp.ProtocolType != "consumer" {
+		t.Errorf("Sync ProtocolType=%q, want \"consumer\" (Java client validates this against its expected protocol)", syncResp.ProtocolType)
+	}
+	if syncResp.ProtocolName != "range" {
+		t.Errorf("Sync ProtocolName=%q, want \"range\" (selected by completeRebalance)", syncResp.ProtocolName)
+	}
+}
+
 // TestGh98Kip394StaticMemberSkipsMemberIDRequired: a member with
 // GroupInstanceID set is "static" — it identifies itself by the
 // instance ID across reconnects, so MEMBER_ID_REQUIRED would be

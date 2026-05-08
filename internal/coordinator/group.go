@@ -295,6 +295,18 @@ func (g *group) sync(req *api.SyncGroupRequest) *api.SyncGroupResponse {
 
 	ss := g.currentSync
 	isLeader := req.MemberID == g.leaderID
+	// Snapshot the group's selected protocol so the response can echo
+	// it back to the client. Apache populates these on success-path
+	// SyncGroupResponses and the Java client validates the response's
+	// ProtocolType against what it sent in JoinGroup — an empty
+	// ProtocolType raises InconsistentGroupProtocolException. Pre-fix
+	// skafka always returned "" here, but the gh #96 / gh #98 #6
+	// nullable→non-nullable encoder change forced the field to land on
+	// the wire as an empty string instead of null, which the Java
+	// client surfaces as a real validation error. Echoing the actual
+	// values is what the protocol always asked us to do.
+	protocolType := g.protocolType
+	protocolName := g.protocolName
 
 	if isLeader {
 		ss.mu.Lock()
@@ -316,7 +328,11 @@ func (g *group) sync(req *api.SyncGroupRequest) *api.SyncGroupResponse {
 	assignment := ss.assignments[memberID]
 	ss.mu.Unlock()
 
-	return &api.SyncGroupResponse{Assignment: assignment}
+	return &api.SyncGroupResponse{
+		Assignment:   assignment,
+		ProtocolType: protocolType,
+		ProtocolName: protocolName,
+	}
 }
 
 // heartbeat handles a Heartbeat request.
