@@ -112,9 +112,18 @@ spec:
             - name: OTEL_TRACES_SAMPLER_ARG
               value: "{{ .Values.observability.otlp.traces.samplerRatio }}"
             {{- end }}
-            {{- if .Values.admin.argocd.applicationName }}
+            {{- if .Values.admin.argocd.enabled }}
             - name: SKAFKA_ARGOCD_APPLICATION_NAME
-              value: {{ .Values.admin.argocd.applicationName | quote }}
+              # applicationName falls back to the Helm release name —
+              # typical install just sets `admin.argocd.enabled: true`
+              # and the broker infers everything else.
+              value: {{ default .Release.Name .Values.admin.argocd.applicationName | quote }}
+            - name: SKAFKA_ARGOCD_COMPARE_OPTIONS
+              # Empty string (operator wants tracking-id without
+              # compare-options) is preserved by quoting; the broker
+              # checks LookupEnv to distinguish "set to empty" from
+              # "not set".
+              value: {{ .Values.admin.argocd.compareOptions | quote }}
             {{- end }}
             {{- if .Values.listeners.external.enabled }}
             # TLS listener for external clients. Hostname pattern is fmt-style

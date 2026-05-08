@@ -32,8 +32,25 @@ import "fmt"
 type ArgoCDConfig struct {
 	// ApplicationName is the ArgoCD Application name (typically the
 	// chart's release name, e.g. "skafka"). Empty disables all
-	// ArgoCD-specific annotations.
+	// ArgoCD-specific annotations — the writer produces plain CRs
+	// with no argocd.argoproj.io/* metadata.
 	ApplicationName string
+
+	// CompareOptions is the value for `argocd.argoproj.io/compare-options`.
+	// Default "IgnoreExtraneous" tells ArgoCD's selfHeal sync to skip
+	// the resource (no drift, no prune). Empty string skips the
+	// compare-options annotation entirely — useful when the operator
+	// wants the runtime-created CR to be considered drift-on-purpose
+	// (e.g., to surface "this topic isn't in git" as a deliberate
+	// alert in ArgoCD's UI). Other valid values include
+	// "IgnoreResourceUpdates" + comma-combinations; see
+	// https://argo-cd.readthedocs.io/en/stable/user-guide/compare-options/.
+	//
+	// Only consulted when ApplicationName is non-empty (otherwise no
+	// annotations at all). Operators set this via the
+	// SKAFKA_ARGOCD_COMPARE_OPTIONS env var, exposed in the chart as
+	// admin.argocd.compareOptions.
+	CompareOptions string
 }
 
 // Annotations returns the argocd.argoproj.io/* annotations a CR
@@ -53,10 +70,13 @@ func (c ArgoCDConfig) Annotations(group, kind, namespace, metaName string) map[s
 	if c.ApplicationName == "" {
 		return nil
 	}
-	return map[string]string{
-		argoCompareOptionsAnnotation: "IgnoreExtraneous",
-		argoTrackingIDAnnotation:     argoTrackingID(c.ApplicationName, group, kind, namespace, metaName),
+	out := map[string]string{
+		argoTrackingIDAnnotation: argoTrackingID(c.ApplicationName, group, kind, namespace, metaName),
 	}
+	if c.CompareOptions != "" {
+		out[argoCompareOptionsAnnotation] = c.CompareOptions
+	}
+	return out
 }
 
 // argoTrackingID builds the value of argocd.argoproj.io/tracking-id.

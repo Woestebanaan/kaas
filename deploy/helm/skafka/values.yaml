@@ -101,25 +101,37 @@ auth:
     certManagerIssuer: ""
 
 admin:
-  # Optional ArgoCD integration for admin-protocol-created KafkaTopic
-  # CRs (gh #84 + gh #106). When AdminClient.createTopics / kafka-
+  # Optional ArgoCD integration for admin-protocol-created CRs
+  # (gh #84 + gh #106). When AdminClient.createTopics / kafka-
   # topics.sh / Kafbat-UI creates a topic, skafka writes a KafkaTopic
   # CR via TopicCRWriter — but those CRs aren't in git, so a vanilla
   # ArgoCD Application either deletes them on the next selfHeal sync
   # or sits OutOfSync forever.
   #
-  # When applicationName is non-empty, runtime-created CRs are
-  # stamped with two annotations:
-  #   - argocd.argoproj.io/compare-options: IgnoreExtraneous
-  #     (no drift, no prune)
-  #   - argocd.argoproj.io/tracking-id: <app>:skafka.io/KafkaTopic:<ns>/<name>
-  #     (visible in the named Application's UI tree)
+  # When `enabled: true`, runtime-created CRs are stamped with:
+  #   - argocd.argoproj.io/tracking-id: <app>:skafka.io/<kind>:<ns>/<name>
+  #     (claims the CR as part of the named Application — visible
+  #     in the UI tree alongside the git-managed CRs)
+  #   - argocd.argoproj.io/compare-options: <compareOptions>
+  #     (default IgnoreExtraneous — no drift, no prune)
   #
-  # When empty (the default), no argocd.argoproj.io/* annotations
-  # are added — non-ArgoCD installs get plain CRs with no
-  # ArgoCD-specific metadata.
+  # `applicationName` defaults to the Helm release name (typically
+  # "skafka"), so the typical setup is just `enabled: true`. Override
+  # only if your ArgoCD Application name differs from the release.
+  #
+  # `compareOptions` accepts ArgoCD's compare-options string (see
+  # https://argo-cd.readthedocs.io/en/stable/user-guide/compare-options/);
+  # set to "" to skip that annotation entirely while keeping
+  # tracking-id (use case: surface runtime-created topics as
+  # deliberate drift in ArgoCD's UI as an alert).
+  #
+  # `enabled: false` (the default) produces plain CRs with no
+  # argocd.argoproj.io/* annotations — non-ArgoCD installs get
+  # nothing extra in the CR metadata.
   argocd:
+    enabled: false
     applicationName: ""
+    compareOptions: "IgnoreExtraneous"
 
 podDisruptionBudget:
   enabled: true

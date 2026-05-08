@@ -357,13 +357,29 @@ func runBroker(ctx context.Context) {
 				// gh #106: optional ArgoCD integration. When
 				// SKAFKA_ARGOCD_APPLICATION_NAME is set, admin-
 				// protocol-created CRs get tracking-id +
-				// IgnoreExtraneous annotations so they coexist
-				// cleanly with git-managed CRs in the same
-				// ArgoCD Application's resource tree. Empty (the
-				// default) produces plain CRs with no
-				// argocd.argoproj.io/* annotations.
+				// (optionally) compare-options annotations so
+				// they coexist cleanly with git-managed CRs in
+				// the same ArgoCD Application's resource tree.
+				// Empty applicationName (the default) produces
+				// plain CRs with no argocd.argoproj.io/* annotations.
+				// SKAFKA_ARGOCD_COMPARE_OPTIONS defaults to
+				// "IgnoreExtraneous" via the chart, but is empty
+				// when the chart isn't injecting it (running
+				// outside the helm template) — explicit
+				// fallback handled below.
 				argoCfg := k8spkg.ArgoCDConfig{
 					ApplicationName: os.Getenv("SKAFKA_ARGOCD_APPLICATION_NAME"),
+					CompareOptions:  os.Getenv("SKAFKA_ARGOCD_COMPARE_OPTIONS"),
+				}
+				// Default compare-options to IgnoreExtraneous when
+				// ArgoCD integration is on but the env var was not
+				// explicitly set. Empty stays empty when the env
+				// var was set to "" deliberately (operators wanting
+				// tracking-id without drift suppression).
+				if argoCfg.ApplicationName != "" {
+					if _, set := os.LookupEnv("SKAFKA_ARGOCD_COMPARE_OPTIONS"); !set {
+						argoCfg.CompareOptions = "IgnoreExtraneous"
+					}
 				}
 				b.UseTopicCRWriter(k8spkg.NewTopicCRWriter(cl, namespace, argoCfg))
 			} else {

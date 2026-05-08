@@ -277,7 +277,10 @@ func TestTopicCRWriter_NoArgoCDOmitsAnnotations(t *testing.T) {
 func TestTopicCRWriter_ArgoCDIntegrationStampsBoth(t *testing.T) {
 	ctx := context.Background()
 	cli := newFakeClient(t)
-	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{ApplicationName: "skafka"})
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		ApplicationName: "skafka",
+		CompareOptions:  "IgnoreExtraneous",
+	})
 
 	if err := w.CreateTopic(ctx, "admin-created", 1, nil); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
@@ -293,6 +296,66 @@ func TestTopicCRWriter_ArgoCDIntegrationStampsBoth(t *testing.T) {
 	wantTracking := "skafka:skafka.io/KafkaTopic:skafka/admin-created"
 	if got.Annotations[argoTrackingIDAnnotation] != wantTracking {
 		t.Errorf("tracking-id=%q, want %q",
+			got.Annotations[argoTrackingIDAnnotation], wantTracking)
+	}
+}
+
+// TestTopicCRWriter_ArgoCDCustomCompareOptions covers the
+// "operator chose a non-default compare-options value" path. ArgoCD
+// accepts comma-separated combos like "IgnoreExtraneous,IgnoreResourceUpdates"
+// and we should pass them through verbatim — skafka shouldn't
+// interpret or validate the string.
+func TestTopicCRWriter_ArgoCDCustomCompareOptions(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		ApplicationName: "skafka",
+		CompareOptions:  "IgnoreExtraneous,IgnoreResourceUpdates",
+	})
+
+	if err := w.CreateTopic(ctx, "custom-opts", 1, nil); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "custom-opts"}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := "IgnoreExtraneous,IgnoreResourceUpdates"
+	if got.Annotations[argoCompareOptionsAnnotation] != want {
+		t.Errorf("compare-options=%q, want %q",
+			got.Annotations[argoCompareOptionsAnnotation], want)
+	}
+}
+
+// TestTopicCRWriter_ArgoCDTrackingIDOnly covers the path where the
+// operator wants the CR to appear in the ArgoCD UI tree (so
+// tracking-id is set) but DOESN'T want compare-options
+// suppression — i.e., they want ArgoCD to surface the CR as
+// "extra resource" / drift, deliberately, as an alert that
+// runtime-created topics exist. CompareOptions=="" skips that
+// annotation but keeps tracking-id.
+func TestTopicCRWriter_ArgoCDTrackingIDOnly(t *testing.T) {
+	ctx := context.Background()
+	cli := newFakeClient(t)
+	w := NewTopicCRWriter(cli, "skafka", ArgoCDConfig{
+		ApplicationName: "skafka",
+		CompareOptions:  "", // explicit no compare-options
+	})
+
+	if err := w.CreateTopic(ctx, "tracking-only", 1, nil); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	var got v1alpha1.KafkaTopic
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: "skafka", Name: "tracking-only"}, &got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, has := got.Annotations[argoCompareOptionsAnnotation]; has {
+		t.Errorf("CompareOptions=\"\" should skip the compare-options annotation; got=%q",
+			got.Annotations[argoCompareOptionsAnnotation])
+	}
+	wantTracking := "skafka:skafka.io/KafkaTopic:skafka/tracking-only"
+	if got.Annotations[argoTrackingIDAnnotation] != wantTracking {
+		t.Errorf("tracking-id=%q, want %q (must still be set even when compare-options is skipped)",
 			got.Annotations[argoTrackingIDAnnotation], wantTracking)
 	}
 }
