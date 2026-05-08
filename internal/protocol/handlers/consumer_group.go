@@ -66,7 +66,7 @@ func (h *JoinGroupHandler) Handle(conn *connstate.ConnState, version int16, body
 		if conn != nil {
 			clientID = conn.ClientID
 		}
-		resp = h.coord.JoinGroup(req, clientID)
+		resp = h.coord.JoinGroup(req, version, clientID)
 	} else {
 		resp = &api.JoinGroupResponse{ErrorCode: int16(codec.ErrCoordinatorNotAvailable), GenerationID: -1}
 	}

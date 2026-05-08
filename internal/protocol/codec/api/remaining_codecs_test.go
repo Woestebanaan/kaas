@@ -359,6 +359,53 @@ func TestSyncGroupResponseAssignmentNonNullableV4Flexible(t *testing.T) {
 	}
 }
 
+// TestSyncGroupResponseProtocolFieldsNonNullableV5 pins the gh #98 #6
+// fix: SyncGroupResponse v5+ added ProtocolType + ProtocolName.
+// Pre-fix skafka encoded them via WriteCompactNullableString(s, s=="")
+// which collapsed empty-string into the wire null sentinel
+// (varint 0). For wire-format clarity (and to finish the gh #96
+// cleanup of conflating empty with null), encode non-nullable so
+// "" produces varint(1) + 0 bytes — empty string, not null.
+//
+// Apache's Java client decodes either form, but a strict-schema
+// client (e.g., librdkafka with paranoid validation) now sees what
+// skafka actually means.
+func TestSyncGroupResponseProtocolFieldsNonNullableV5(t *testing.T) {
+	resp := &SyncGroupResponse{
+		ErrorCode:    0,
+		ProtocolType: "",
+		ProtocolName: "",
+		Assignment:   []byte{},
+	}
+	w := codec.NewWriter()
+	EncodeSyncGroupResponse(w, resp, 5)
+
+	got := w.Bytes()
+	// v5 wire (flexible since v4+):
+	//   ThrottleTimeMs(int32) = 00 00 00 00
+	//   ErrorCode(int16)      = 00 00
+	//   ProtocolType(varint)  = 01 (compact len=0)
+	//   ProtocolName(varint)  = 01
+	//   Assignment(varint)    = 01
+	//   tagged fields(varint) = 00
+	// → 4 + 2 + 1 + 1 + 1 + 1 = 10 bytes.
+	if len(got) != 10 {
+		t.Fatalf("len(got)=%d, want 10. raw=%x", len(got), got)
+	}
+	// Bytes at offsets 6 and 7 are the ProtocolType / ProtocolName
+	// varints. Both must be 0x01 (length 0 = empty), NOT 0x00 (null).
+	if got[6] == 0x00 {
+		t.Fatalf("ProtocolType varint is 0 — null marker, the gh #98 #6 bug. raw=%x", got)
+	}
+	if got[7] == 0x00 {
+		t.Fatalf("ProtocolName varint is 0 — null marker, the gh #98 #6 bug. raw=%x", got)
+	}
+	if got[6] != 0x01 || got[7] != 0x01 {
+		t.Errorf("ProtocolType/Name varints=%x %x, want 0x01 0x01 (compact len 0). raw=%x",
+			got[6], got[7], got)
+	}
+}
+
 // ---- OffsetCommit ----
 
 func TestOffsetCommitRoundTripV2(t *testing.T) {

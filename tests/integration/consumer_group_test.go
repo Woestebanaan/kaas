@@ -72,7 +72,7 @@ func syncBoth(t *testing.T, mgr *coordinator.Manager, groupID string, r1, r2 *ap
 func TestJoinGroupSingleMember(t *testing.T) {
 	mgr := newTestCoordinator(t, "broker-0")
 
-	resp := mgr.JoinGroup(fastJoin("test-group", "consumer"), "test-client")
+	resp := mgr.JoinGroup(fastJoin("test-group", "consumer"), 3, "test-client")
 	if resp.ErrorCode != 0 {
 		t.Fatalf("JoinGroup errCode=%d", resp.ErrorCode)
 	}
@@ -104,7 +104,7 @@ func TestJoinGroupNewGroupCapsInitialDelay(t *testing.T) {
 		Protocols:          []api.JoinGroupProtocol{{Name: "range"}},
 	}
 	start := time.Now()
-	resp := mgr.JoinGroup(req, "client-1")
+	resp := mgr.JoinGroup(req, 3, "client-1")
 	elapsed := time.Since(start)
 
 	if resp.ErrorCode != 0 {
@@ -123,8 +123,8 @@ func TestJoinGroupTwoMembersConcurrent(t *testing.T) {
 	var r1, r2 *api.JoinGroupResponse
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); r1 = mgr.JoinGroup(fastJoin(groupID, "consumer"), "client-1") }()
-	go func() { defer wg.Done(); r2 = mgr.JoinGroup(fastJoin(groupID, "consumer"), "client-2") }()
+	go func() { defer wg.Done(); r1 = mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "client-1") }()
+	go func() { defer wg.Done(); r2 = mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "client-2") }()
 	wg.Wait()
 
 	if r1.ErrorCode != 0 {
@@ -156,7 +156,7 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	mgr := newTestCoordinator(t, "broker-0")
 	const groupID = "sync-group"
 
-	joinResp := mgr.JoinGroup(fastJoin(groupID, "consumer"), "client-1")
+	joinResp := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "client-1")
 	if joinResp.ErrorCode != 0 {
 		t.Fatalf("JoinGroup errCode=%d", joinResp.ErrorCode)
 	}
@@ -193,7 +193,7 @@ func TestHeartbeatKeepsMemberAlivePastTimeout(t *testing.T) {
 		RebalanceTimeoutMs: 100,
 		ProtocolType:       "consumer",
 		Protocols:          []api.JoinGroupProtocol{{Name: "range"}},
-	}, "alive-client")
+	}, 3, "alive-client")
 	if join.ErrorCode != 0 {
 		t.Fatalf("Join: %d", join.ErrorCode)
 	}
@@ -235,14 +235,14 @@ func TestSessionTimeoutEvictsSilentMemberOnly(t *testing.T) {
 		r1 = mgr.JoinGroup(&api.JoinGroupRequest{
 			GroupID: groupID, SessionTimeoutMs: 200, RebalanceTimeoutMs: 100,
 			ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
-		}, "alive")
+		}, 3, "alive")
 	}()
 	go func() {
 		defer wg.Done()
 		r2 = mgr.JoinGroup(&api.JoinGroupRequest{
 			GroupID: groupID, SessionTimeoutMs: 200, RebalanceTimeoutMs: 100,
 			ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
-		}, "silent")
+		}, 3, "silent")
 	}()
 	wg.Wait()
 	if r1.ErrorCode != 0 || r2.ErrorCode != 0 {
@@ -297,7 +297,7 @@ func TestSessionTimeoutLastMemberTransitionsToEmpty(t *testing.T) {
 	join := mgr.JoinGroup(&api.JoinGroupRequest{
 		GroupID: groupID, SessionTimeoutMs: 150, RebalanceTimeoutMs: 100,
 		ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
-	}, "alone")
+	}, 3, "alone")
 	if join.ErrorCode != 0 {
 		t.Fatalf("Join: %d", join.ErrorCode)
 	}
@@ -325,7 +325,7 @@ func TestSessionTimeoutLastMemberTransitionsToEmpty(t *testing.T) {
 	rejoin := mgr.JoinGroup(&api.JoinGroupRequest{
 		GroupID: groupID, SessionTimeoutMs: 150, RebalanceTimeoutMs: 100,
 		ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
-	}, "rejoiner")
+	}, 3, "rejoiner")
 	if rejoin.ErrorCode != 0 {
 		t.Errorf("rejoin after sole-member eviction: errCode=%d, want 0 (group should be Empty + acceptable)", rejoin.ErrorCode)
 	}
@@ -347,7 +347,7 @@ func TestSessionTimeoutTimerResetsOnEveryHeartbeat(t *testing.T) {
 	join := mgr.JoinGroup(&api.JoinGroupRequest{
 		GroupID: groupID, SessionTimeoutMs: 150, RebalanceTimeoutMs: 100,
 		ProtocolType: "consumer", Protocols: []api.JoinGroupProtocol{{Name: "range"}},
-	}, "ticker")
+	}, 3, "ticker")
 	if join.ErrorCode != 0 {
 		t.Fatalf("Join: %d", join.ErrorCode)
 	}
@@ -382,7 +382,7 @@ func TestHeartbeatAndSessionTimeout(t *testing.T) {
 		ProtocolType:       "consumer",
 		Protocols:          []api.JoinGroupProtocol{{Name: "range"}},
 	}
-	joinResp := mgr.JoinGroup(req, "client-1")
+	joinResp := mgr.JoinGroup(req, 3, "client-1")
 	if joinResp.ErrorCode != 0 {
 		t.Fatalf("JoinGroup errCode=%d", joinResp.ErrorCode)
 	}
@@ -487,7 +487,7 @@ func TestManagerSetGroupAssignmentSourceHotSwap(t *testing.T) {
 		coordinator.NewOffsetStore(t.TempDir()))
 
 	// alwaysGroupSource: every group is owned by this broker.
-	r := mgr.JoinGroup(fastJoin("hotswap", "consumer"), "c")
+	r := mgr.JoinGroup(fastJoin("hotswap", "consumer"), 3, "c")
 	if r.ErrorCode != 0 {
 		t.Fatalf("first Join (alwaysGroupSource): errCode=%d", r.ErrorCode)
 	}
@@ -497,7 +497,7 @@ func TestManagerSetGroupAssignmentSourceHotSwap(t *testing.T) {
 
 	// Subsequent JoinGroup must be rejected with NOT_COORDINATOR
 	// — proves the swap took effect on the live hot path.
-	r2 := mgr.JoinGroup(fastJoin("post-swap", "consumer"), "c2")
+	r2 := mgr.JoinGroup(fastJoin("post-swap", "consumer"), 3, "c2")
 	if r2.ErrorCode != 16 {
 		t.Errorf("post-swap Join errCode=%d, want 16 (NOT_COORDINATOR) — swap did not take effect on JoinGroup", r2.ErrorCode)
 	}
@@ -574,7 +574,7 @@ func TestJoinGroupHashRoutingExactlyOneOwner(t *testing.T) {
 	owners := 0
 	var ownerID string
 	for id, mgr := range managers {
-		r := mgr.JoinGroup(fastJoin(groupID, "consumer"), "c")
+		r := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c")
 		if r.ErrorCode == 0 {
 			owners++
 			ownerID = id
@@ -645,7 +645,7 @@ func TestListGroupsHidesNonCoordinatorEntries(t *testing.T) {
 	mgr := newTestCoordinator(t, "broker-A")
 
 	// Bring the group to Empty by joining + leaving.
-	r := mgr.JoinGroup(fastJoin("vis-test", "consumer"), "c1")
+	r := mgr.JoinGroup(fastJoin("vis-test", "consumer"), 3, "c1")
 	if r.ErrorCode != 0 {
 		t.Fatalf("Join: %d", r.ErrorCode)
 	}
@@ -681,7 +681,7 @@ func TestListGroupsHidesNonCoordinatorEntries(t *testing.T) {
 	// the cluster reassigning the group elsewhere. Use the
 	// recordingMgr-style pattern.
 	flip.SetOwns(true)
-	r2 := mgr2.JoinGroup(fastJoin("flipped", "consumer"), "c2")
+	r2 := mgr2.JoinGroup(fastJoin("flipped", "consumer"), 3, "c2")
 	if r2.ErrorCode != 0 {
 		t.Fatalf("setup Join: %d", r2.ErrorCode)
 	}
@@ -705,7 +705,7 @@ func TestDescribeGroupsReportsDeadForNonOwnedGroup(t *testing.T) {
 		func(_ string) (int32, string, int32, bool) { return 0, "localhost", 9092, true },
 		coordinator.NewOffsetStore(t.TempDir()))
 
-	r := mgr.JoinGroup(fastJoin("desc-test", "consumer"), "c1")
+	r := mgr.JoinGroup(fastJoin("desc-test", "consumer"), 3, "c1")
 	if r.ErrorCode != 0 {
 		t.Fatalf("Join: %d", r.ErrorCode)
 	}
@@ -763,7 +763,7 @@ func TestDeleteGroupsEmptySucceeds(t *testing.T) {
 	const groupID = "del-empty"
 
 	// Bring the group to Empty by joining + leaving cleanly.
-	r := mgr.JoinGroup(fastJoin(groupID, "consumer"), "c1")
+	r := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c1")
 	if r.ErrorCode != 0 {
 		t.Fatalf("Join: %d", r.ErrorCode)
 	}
@@ -805,7 +805,7 @@ func TestDeleteGroupsRejectsNonEmpty(t *testing.T) {
 	mgr := newTestCoordinator(t, "broker-0")
 	const groupID = "del-busy"
 
-	r := mgr.JoinGroup(fastJoin(groupID, "consumer"), "c1")
+	r := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c1")
 	if r.ErrorCode != 0 {
 		t.Fatalf("Join: %d", r.ErrorCode)
 	}
@@ -848,7 +848,7 @@ func TestDeleteGroupsBatchHandlesPerGroup(t *testing.T) {
 		offsets)
 
 	// Empty group "a" — we just commit an offset and leave.
-	r := mgr.JoinGroup(fastJoin("a", "consumer"), "c1")
+	r := mgr.JoinGroup(fastJoin("a", "consumer"), 3, "c1")
 	mgr.SyncGroup(&api.SyncGroupRequest{
 		GroupID: "a", GenerationID: r.GenerationID, MemberID: r.MemberID,
 		Assignments: []api.SyncAssignment{{MemberID: r.MemberID, Assignment: []byte("p0")}},
@@ -856,7 +856,7 @@ func TestDeleteGroupsBatchHandlesPerGroup(t *testing.T) {
 	mgr.LeaveGroup(&api.LeaveGroupRequest{GroupID: "a", MemberID: r.MemberID})
 
 	// Stable group "b" with an active member.
-	r2 := mgr.JoinGroup(fastJoin("b", "consumer"), "c2")
+	r2 := mgr.JoinGroup(fastJoin("b", "consumer"), 3, "c2")
 	mgr.SyncGroup(&api.SyncGroupRequest{
 		GroupID: "b", GenerationID: r2.GenerationID, MemberID: r2.MemberID,
 		Assignments: []api.SyncAssignment{{MemberID: r2.MemberID, Assignment: []byte("p0")}},
@@ -921,7 +921,7 @@ func TestConsumerCleanShutdownPersistsOffsets(t *testing.T) {
 		offsets)
 	const groupID = "verifiable-cg"
 
-	join := mgr.JoinGroup(fastJoin(groupID, "consumer"), "verif-1")
+	join := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "verif-1")
 	if join.ErrorCode != 0 {
 		t.Fatalf("JoinGroup errCode=%d", join.ErrorCode)
 	}
@@ -982,8 +982,8 @@ func TestLeaveGroupTriggersRebalance(t *testing.T) {
 	var r1, r2 *api.JoinGroupResponse
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); r1 = mgr.JoinGroup(fastJoin(groupID, "consumer"), "c1") }()
-	go func() { defer wg.Done(); r2 = mgr.JoinGroup(fastJoin(groupID, "consumer"), "c2") }()
+	go func() { defer wg.Done(); r1 = mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c1") }()
+	go func() { defer wg.Done(); r2 = mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "c2") }()
 	wg.Wait()
 
 	if r1.ErrorCode != 0 || r2.ErrorCode != 0 {
@@ -1007,5 +1007,207 @@ func TestLeaveGroupTriggersRebalance(t *testing.T) {
 	})
 	if hbResp.ErrorCode == 0 {
 		t.Error("expected REBALANCE_IN_PROGRESS after member left, got 0")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// gh #98 regression tests
+// ---------------------------------------------------------------------------
+
+// TestGh98LeaderSessionExpiryDoesNotDeadlock pins divergence #1 +
+// #3: when the pending leader (joinWaiters[0]) gets evicted by
+// session timeout mid-rebalance, the next member's join goroutine
+// must still receive a real response — not deadlock on <-ch.
+//
+// Pre-fix the heartbeat AfterFunc deleted from g.members but left
+// g.joinWaiters intact, so:
+//   - the dead leader's join() goroutine sat on <-ch forever (leak)
+//   - selectProtocol's `members[waiters[0].memberID]` was nil so the
+//     next completeRebalance returned protocolName=""
+//
+// This test:
+//   1. Starts member A with a tiny session.timeout.ms (50ms) + slow
+//      rebalance timeout (1s) so A registers, becomes leader, then
+//      times out before completion.
+//   2. Starts member B 200ms later (after A's session timer has
+//      fired).
+//   3. Asserts B gets a non-error JoinGroup response with itself as
+//      leader and a non-empty protocolName.
+func TestGh98LeaderSessionExpiryDoesNotDeadlock(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "expiry-leader-group"
+
+	// Member A: short session timer; if it doesn't heartbeat, the
+	// AfterFunc will fire and remove from members + waiters.
+	aDone := make(chan *api.JoinGroupResponse, 1)
+	go func() {
+		aDone <- mgr.JoinGroup(&api.JoinGroupRequest{
+			GroupID:            groupID,
+			SessionTimeoutMs:   50,
+			RebalanceTimeoutMs: 1000,
+			ProtocolType:       "consumer",
+			Protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("a")}},
+		}, 3, "client-a")
+	}()
+
+	// Wait long enough for A's heartbeat AfterFunc to fire (50ms +
+	// scheduling slack). At this point removeMember has drained the
+	// waiter slot and aDone has the synthetic UNKNOWN_MEMBER_ID resp.
+	time.Sleep(150 * time.Millisecond)
+
+	// A must have received its synthetic UNKNOWN_MEMBER_ID (NOT
+	// blocked — that was the bug).
+	select {
+	case respA := <-aDone:
+		if respA.ErrorCode != 25 { // UNKNOWN_MEMBER_ID
+			t.Errorf("evicted member A: ErrorCode=%d, want 25 (UNKNOWN_MEMBER_ID)", respA.ErrorCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("evicted member A's join() goroutine deadlocked on <-ch")
+	}
+
+	// Member B: starts AFTER A has been evicted. B should successfully
+	// rebalance with itself as leader.
+	respB := mgr.JoinGroup(&api.JoinGroupRequest{
+		GroupID:            groupID,
+		SessionTimeoutMs:   30_000,
+		RebalanceTimeoutMs: 200,
+		ProtocolType:       "consumer",
+		Protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("b")}},
+	}, 3, "client-b")
+	if respB.ErrorCode != 0 {
+		t.Fatalf("member B Join: ErrorCode=%d, want 0", respB.ErrorCode)
+	}
+	if respB.ProtocolName != "range" {
+		t.Errorf("member B ProtocolName=%q, want \"range\" (selectProtocol must not return empty after leader eviction)", respB.ProtocolName)
+	}
+	if respB.Leader != respB.MemberID {
+		t.Errorf("member B Leader=%q, MemberID=%q (B should be the new leader)", respB.Leader, respB.MemberID)
+	}
+}
+
+// TestGh98HeartbeatEmptyGroupReturnsUnknownMemberID pins divergence
+// #7: a Heartbeat against a group with no members must return
+// UNKNOWN_MEMBER_ID (25), not ErrNone (0). Pre-fix skafka's switch
+// had no Empty case so the function fell through to ErrNone, letting
+// disconnected clients silently keep heartbeating to a vanished group.
+func TestGh98HeartbeatEmptyGroupReturnsUnknownMemberID(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	const groupID = "empty-group"
+
+	// Drive the group to state Empty: join + leave a single member.
+	join := mgr.JoinGroup(fastJoin(groupID, "consumer"), 3, "tmp")
+	if join.ErrorCode != 0 {
+		t.Fatalf("setup join: %d", join.ErrorCode)
+	}
+	mgr.SyncGroup(&api.SyncGroupRequest{
+		GroupID: groupID, GenerationID: join.GenerationID, MemberID: join.MemberID,
+		Assignments: []api.SyncAssignment{{MemberID: join.MemberID, Assignment: []byte("p0")}},
+	})
+	mgr.LeaveGroup(&api.LeaveGroupRequest{GroupID: groupID, Members: []api.LeaveMember{{MemberID: join.MemberID}}})
+
+	// Heartbeat from any memberID into the now-Empty group.
+	hb := mgr.Heartbeat(&api.HeartbeatRequest{
+		GroupID:      groupID,
+		GenerationID: join.GenerationID,
+		MemberID:     join.MemberID,
+	})
+	if hb.ErrorCode != 25 {
+		t.Errorf("Heartbeat against Empty group: ErrorCode=%d, want 25 (UNKNOWN_MEMBER_ID)", hb.ErrorCode)
+	}
+}
+
+// TestGh98Kip394FirstJoinReturnsMemberIDRequired pins divergence #2:
+// at JoinGroup v4+, a dynamic member (no GroupInstanceID) joining
+// with empty memberID gets a freshly-assigned ID back with
+// ErrMemberIDRequired (79) and the broker does NOT trigger a
+// rebalance. The client retries with the assigned ID; only the
+// retry counts toward the rebalance.
+//
+// Without this, a network-blipped client that retries JoinGroup
+// with empty memberID ends up registered TWICE in g.members on
+// consecutive attempts — duplicate-member problem that amplifies
+// gh #98 #1's leader-session-expiry race.
+func TestGh98Kip394FirstJoinReturnsMemberIDRequired(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+
+	resp := mgr.JoinGroup(fastJoin("kip394-group", "consumer"), 4, "client-1")
+	if resp.ErrorCode != 79 {
+		t.Errorf("first join: ErrorCode=%d, want 79 (MEMBER_ID_REQUIRED)", resp.ErrorCode)
+	}
+	if resp.MemberID == "" {
+		t.Error("first join: MemberID=\"\", expected an assigned ID for retry")
+	}
+	if resp.GenerationID != 0 {
+		t.Errorf("first join: GenerationID=%d, want 0 (no rebalance triggered yet)", resp.GenerationID)
+	}
+}
+
+// TestGh98Kip394SecondJoinTriggersRebalance covers the retry path:
+// the client takes the assigned memberID from MEMBER_ID_REQUIRED
+// and re-joins. That re-join goes through the normal rebalance
+// path and returns a real generation + protocol.
+func TestGh98Kip394SecondJoinTriggersRebalance(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+	groupID := "kip394-retry-group"
+
+	// First join: MEMBER_ID_REQUIRED.
+	first := mgr.JoinGroup(fastJoin(groupID, "consumer"), 4, "client-1")
+	if first.ErrorCode != 79 {
+		t.Fatalf("first join: ErrorCode=%d, want 79", first.ErrorCode)
+	}
+	assigned := first.MemberID
+
+	// Second join with the assigned ID: should rebalance + succeed.
+	req := fastJoin(groupID, "consumer")
+	req.MemberID = assigned
+	second := mgr.JoinGroup(req, 4, "client-1")
+	if second.ErrorCode != 0 {
+		t.Fatalf("second join: ErrorCode=%d, want 0", second.ErrorCode)
+	}
+	if second.MemberID != assigned {
+		t.Errorf("second join: MemberID=%q, want assigned %q", second.MemberID, assigned)
+	}
+	if second.GenerationID < 1 {
+		t.Errorf("second join: GenerationID=%d, want >=1 (rebalance must have completed)", second.GenerationID)
+	}
+	if second.ProtocolName != "range" {
+		t.Errorf("second join: ProtocolName=%q, want \"range\"", second.ProtocolName)
+	}
+}
+
+// TestGh98Kip394V3ClientUsesLegacyPath: a JoinGroup v3 (or any
+// version below 4) keeps the pre-KIP-394 inline-memberID-assignment
+// flow even when memberID is empty. Without this branch, every
+// existing v0-v3 client (including older test fixtures) would
+// suddenly start receiving MEMBER_ID_REQUIRED instead of completing
+// the join.
+func TestGh98Kip394V3ClientUsesLegacyPath(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+
+	resp := mgr.JoinGroup(fastJoin("kip394-legacy", "consumer"), 3, "client-old")
+	if resp.ErrorCode != 0 {
+		t.Errorf("v3 first join: ErrorCode=%d, want 0 (legacy inline-memberID path)", resp.ErrorCode)
+	}
+	if resp.MemberID == "" {
+		t.Error("v3 first join: MemberID=\"\", expected inline assignment")
+	}
+}
+
+// TestGh98Kip394StaticMemberSkipsMemberIDRequired: a member with
+// GroupInstanceID set is "static" — it identifies itself by the
+// instance ID across reconnects, so MEMBER_ID_REQUIRED would be
+// pointless. Apache only requires-known-member-id for dynamic members.
+func TestGh98Kip394StaticMemberSkipsMemberIDRequired(t *testing.T) {
+	mgr := newTestCoordinator(t, "broker-0")
+
+	req := fastJoin("kip394-static", "consumer")
+	req.GroupInstanceID = "static-inst-1"
+	resp := mgr.JoinGroup(req, 5, "client-static")
+	if resp.ErrorCode != 0 {
+		t.Errorf("static-member v5 join: ErrorCode=%d, want 0 (MEMBER_ID_REQUIRED is dynamic-only)", resp.ErrorCode)
+	}
+	if resp.MemberID == "" {
+		t.Error("static-member join: MemberID=\"\", expected inline assignment")
 	}
 }

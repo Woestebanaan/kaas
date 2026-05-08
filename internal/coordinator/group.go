@@ -83,23 +83,67 @@ type group struct {
 	joinWaiters    []joinWaiter
 	currentSync    *syncState
 	rebalanceTimer *time.Timer
+
+	// pendingMembers holds memberIDs assigned in response to a first
+	// JoinGroup with empty memberID under KIP-394 (gh #98 #2). Each
+	// pending entry has a short cleanup timer; if the client doesn't
+	// follow up with a JoinGroup using the assigned ID within
+	// initialRebalanceDelayMs the entry is dropped. Lets the
+	// coordinator fence "zombie" reconnects from clients that lost
+	// their memberID across a network blip without polluting the
+	// rebalance — Apache's `pendingMembers` set in GroupMetadata.scala.
+	pendingMembers map[string]*time.Timer
 }
 
 func newGroup(id string) *group {
 	return &group{
-		id:      id,
-		members: make(map[string]*groupMember),
+		id:             id,
+		members:        make(map[string]*groupMember),
+		pendingMembers: make(map[string]*time.Timer),
 	}
 }
 
 // join handles a JoinGroup request. Blocks until the rebalance completes.
 // clientID comes from the connection state (not the request body).
-func (g *group) join(req *api.JoinGroupRequest, clientID string) *api.JoinGroupResponse {
+// version is the JoinGroupRequest API version, used to gate KIP-394
+// (MEMBER_ID_REQUIRED) on v4+.
+func (g *group) join(req *api.JoinGroupRequest, version int16, clientID string) *api.JoinGroupResponse {
 	g.mu.Lock()
 
 	memberID := req.MemberID
+
+	// KIP-394 (gh #98 #2): a dynamic member (no GroupInstanceID)
+	// joining with empty memberID at v4+ gets a freshly-assigned ID
+	// back with ErrMemberIDRequired. The client must retry with the
+	// assigned ID; only THEN does the join trigger a rebalance.
+	// Without this, a network-blipped client that retries a
+	// JoinGroup with empty memberID ends up registered TWICE in
+	// g.members on consecutive attempts — duplicate-member problem
+	// that amplifies the gh #98 #1 leader-session-expiry race.
+	dynamic := req.GroupInstanceID == ""
+	if memberID == "" && version >= 4 && dynamic {
+		assigned := generateMemberID(clientID)
+		g.registerPendingMember(assigned)
+		g.mu.Unlock()
+		return &api.JoinGroupResponse{
+			ErrorCode: int16(codec.ErrMemberIDRequired),
+			MemberID:  assigned,
+		}
+	}
+
+	// Static member or v0-v3 client: legacy "assign memberID inline"
+	// path. Static members re-identify themselves via GroupInstanceID
+	// across reconnects, so we don't need the KIP-394 fence here.
 	if memberID == "" {
 		memberID = generateMemberID(clientID)
+	}
+
+	// Promote from pendingMembers if this is the follow-up to a
+	// MEMBER_ID_REQUIRED response: stop the cleanup timer so the
+	// member doesn't get culled mid-rebalance.
+	if t, ok := g.pendingMembers[memberID]; ok {
+		t.Stop()
+		delete(g.pendingMembers, memberID)
 	}
 
 	// Upsert member.
@@ -280,6 +324,18 @@ func (g *group) heartbeat(req *api.HeartbeatRequest) int16 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// Apache GroupMetadata.scala docs the Empty-state contract: any
+	// Heartbeat against a group with no members must surface
+	// UNKNOWN_MEMBER_ID so disconnected clients re-bootstrap rather
+	// than silently keep heartbeating to a vanished group (gh #98 #7).
+	// In skafka, stateEmpty is reached when the last member leaves
+	// (LeaveGroup) or is evicted (session timeout); a stray heartbeat
+	// from a client whose memberID was just dropped should not see
+	// ErrNone just because g.members is empty.
+	if g.state == stateEmpty {
+		return int16(codec.ErrUnknownMemberId)
+	}
+
 	m, ok := g.members[req.MemberID]
 	if !ok {
 		return int16(codec.ErrUnknownMemberId)
@@ -306,16 +362,11 @@ func (g *group) leave(memberIDs []string) []api.LeaveMemberResponse {
 
 	var responses []api.LeaveMemberResponse
 	for _, mid := range memberIDs {
-		m, ok := g.members[mid]
-		if !ok {
+		if _, ok := g.members[mid]; !ok {
 			responses = append(responses, api.LeaveMemberResponse{MemberID: mid, ErrorCode: int16(codec.ErrUnknownMemberId)})
 			continue
 		}
-		if m.heartbeatTimer != nil {
-			m.heartbeatTimer.Stop()
-			m.heartbeatTimer = nil
-		}
-		delete(g.members, mid)
+		g.removeMember(mid)
 		responses = append(responses, api.LeaveMemberResponse{MemberID: mid})
 	}
 
@@ -331,6 +382,76 @@ func (g *group) leave(memberIDs []string) []api.LeaveMemberResponse {
 	}
 
 	return responses
+}
+
+// registerPendingMember adds memberID to g.pendingMembers and starts
+// a short cleanup timer. The timer fires if the client never follows
+// up with the second JoinGroup, dropping the assigned memberID so it
+// can be reused. Caller must hold g.mu.
+//
+// Cleanup-timer duration mirrors initialRebalanceDelayMs (3s) — the
+// client is expected to retry immediately, so anything longer is
+// just leaked memberID space.
+func (g *group) registerPendingMember(memberID string) {
+	if old, ok := g.pendingMembers[memberID]; ok {
+		old.Stop()
+	}
+	g.pendingMembers[memberID] = time.AfterFunc(
+		time.Duration(initialRebalanceDelayMs)*time.Millisecond,
+		func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			delete(g.pendingMembers, memberID)
+		},
+	)
+}
+
+// removeMember evicts a member from the group state: stops its
+// heartbeat timer, deletes from g.members, and drains the matching
+// join-waiter (notifying the blocked join() goroutine with
+// UNKNOWN_MEMBER_ID so it doesn't deadlock). Does NOT touch group
+// state — caller decides whether to transition to Empty or restart
+// a rebalance timer based on what's left. Idempotent: calling
+// twice is a no-op the second time. Caller must hold g.mu.
+//
+// Pre-gh #98 #1 the heartbeat-timer AfterFunc deleted from
+// g.members but did NOT drain g.joinWaiters; if the evicted member
+// was joinWaiters[0] (the pending leader), the next
+// completeRebalance returned protocolName="" because
+// selectProtocol's `members[waiters[0].memberID]` was nil. The
+// blocked join() goroutine for that waiter sat on <-ch forever —
+// memory leak + potential deadlock at scale.
+//
+// With the waiter drained here, completeRebalance sees a
+// joinWaiters slice containing only live members; the next live
+// waiter becomes leader on the next completeRebalance. That's
+// Apache's `maybeElectNewJoinedLeader` parity (#98 divergence #3).
+func (g *group) removeMember(mid string) {
+	m, ok := g.members[mid]
+	if !ok {
+		return
+	}
+	if m.heartbeatTimer != nil {
+		m.heartbeatTimer.Stop()
+		m.heartbeatTimer = nil
+	}
+	delete(g.members, mid)
+
+	for i, w := range g.joinWaiters {
+		if w.memberID == mid {
+			g.joinWaiters = append(g.joinWaiters[:i], g.joinWaiters[i+1:]...)
+			// ch is buffered (cap 1) and only ever populated by
+			// completeRebalance, which removes the waiter from the
+			// slice in the same critical section. So if we're here
+			// and the waiter is still in the slice, ch is empty and
+			// the send is non-blocking.
+			w.ch <- joinResult{resp: &api.JoinGroupResponse{
+				ErrorCode: int16(codec.ErrUnknownMemberId),
+				MemberID:  mid,
+			}}
+			break
+		}
+	}
 }
 
 // describe returns a snapshot of the group for DescribeGroups.
@@ -377,11 +498,17 @@ type memberSnapshot struct {
 func (g *group) shutdown() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, m := range g.members {
-		if m.heartbeatTimer != nil {
-			m.heartbeatTimer.Stop()
-			m.heartbeatTimer = nil
-		}
+	// Snapshot member IDs so removeMember can mutate g.members under
+	// us without invalidating the iteration. removeMember drains
+	// each member's joinWaiter and notifies the blocked goroutine —
+	// without this the waiter would be parked on <-ch indefinitely
+	// after the manager dropped the group.
+	mids := make([]string, 0, len(g.members))
+	for mid := range g.members {
+		mids = append(mids, mid)
+	}
+	for _, mid := range mids {
+		g.removeMember(mid)
 	}
 	if g.rebalanceTimer != nil {
 		g.rebalanceTimer.Stop()
@@ -395,6 +522,7 @@ func (g *group) shutdown() {
 		}
 		g.currentSync = nil
 	}
+	g.state = stateDead
 	g.members = nil
 }
 
@@ -415,7 +543,11 @@ func (g *group) resetHeartbeatTimer(m *groupMember) {
 		if _, ok := g.members[mid]; !ok {
 			return
 		}
-		delete(g.members, mid)
+		// removeMember handles the waiter-drain (gh #98 #1+#3) so a
+		// session-timed-out leader doesn't strand its join()
+		// goroutine on <-ch and doesn't leave selectProtocol with a
+		// nil leader on the next rebalance.
+		g.removeMember(mid)
 		if len(g.members) == 0 {
 			g.state = stateEmpty
 			if g.rebalanceTimer != nil {
@@ -463,8 +595,19 @@ func (g *group) startRebalanceTimer(initial bool) {
 	})
 }
 
-// selectProtocol finds the first protocol in the leader's preference list that all
-// joining members support.
+// selectProtocol finds the first protocol in the leader's preference
+// list that ALL other waiters declare support for. Mirrors Apache
+// Kafka's "leader-first-mutual" algorithm at the homogeneous-Java-
+// consumer case.
+//
+// Pre-gh #98 #5 a non-leader waiter whose member entry was nil
+// (e.g., the member had been evicted between joinWaiters being
+// populated and selectProtocol being called) was treated as
+// "supports every protocol" — silently voted yes. With the gh #98
+// #1 fix, removeMember drains joinWaiters in lock-step with
+// g.members so this case shouldn't fire in practice; this function
+// now treats a nil member as "does not support" (defensive — fail
+// closed if the invariant slips).
 func selectProtocol(members map[string]*groupMember, waiters []joinWaiter) string {
 	if len(waiters) == 0 {
 		return ""
@@ -478,7 +621,13 @@ func selectProtocol(members map[string]*groupMember, waiters []joinWaiter) strin
 		for _, w := range waiters[1:] {
 			m := members[w.memberID]
 			if m == nil {
-				continue
+				// gh #98 #5: nil member can't support anything.
+				// Treat as a NO vote so an inconsistent
+				// (waiters, members) pair fails closed instead of
+				// silently selecting a protocol non-aligned waiters
+				// won't honour.
+				allSupport = false
+				break
 			}
 			found := false
 			for _, mp := range m.protocols {

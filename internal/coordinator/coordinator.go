@@ -200,11 +200,16 @@ func (m *Manager) FindCoordinator(req *api.FindCoordinatorRequest) *api.FindCoor
 	return resp
 }
 
-func (m *Manager) JoinGroup(req *api.JoinGroupRequest, clientID string) *api.JoinGroupResponse {
+// JoinGroup dispatches a JoinGroupRequest to the per-group state
+// machine. version is the wire protocol version (passed through from
+// the handler) so the group can gate KIP-394 MEMBER_ID_REQUIRED on
+// v4+. v0-v3 clients keep the pre-KIP-394 inline-memberID-assignment
+// flow.
+func (m *Manager) JoinGroup(req *api.JoinGroupRequest, version int16, clientID string) *api.JoinGroupResponse {
 	if !m.isCoordinator(req.GroupID) {
 		return &api.JoinGroupResponse{ErrorCode: int16(codec.ErrNotCoordinator), GenerationID: -1}
 	}
-	return m.getOrCreate(req.GroupID).join(req, clientID)
+	return m.getOrCreate(req.GroupID).join(req, version, clientID)
 }
 
 func (m *Manager) SyncGroup(req *api.SyncGroupRequest) *api.SyncGroupResponse {

@@ -99,12 +99,21 @@ func EncodeSyncGroupResponse(w *codec.Writer, resp *SyncGroupResponse, version i
 	}
 	w.WriteInt16(resp.ErrorCode)
 	if version >= 5 {
+		// Apache's schema marks ProtocolType/ProtocolName nullable at
+		// v5+, but skafka's old encoder collapsed empty-string into
+		// the null sentinel via WriteCompactNullableString(s, s=="").
+		// That conflates "field is empty" with "field is absent" and
+		// is the same bug class gh #96 fixed for Assignment. Encode
+		// non-nullable: empty string → varint(1) + 0 bytes, never
+		// null. Apache's Java client decodes either form as
+		// equivalent, but a non-Java client doing strict schema
+		// validation now sees what skafka actually means.
 		if flexible {
-			w.WriteCompactNullableString(resp.ProtocolType, resp.ProtocolType == "")
-			w.WriteCompactNullableString(resp.ProtocolName, resp.ProtocolName == "")
+			w.WriteCompactString(resp.ProtocolType)
+			w.WriteCompactString(resp.ProtocolName)
 		} else {
-			w.WriteNullableString(resp.ProtocolType, resp.ProtocolType == "")
-			w.WriteNullableString(resp.ProtocolName, resp.ProtocolName == "")
+			w.WriteString(resp.ProtocolType)
+			w.WriteString(resp.ProtocolName)
 		}
 	}
 	// Assignment is NON-nullable in Apache Kafka's schema for every

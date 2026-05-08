@@ -43,5 +43,15 @@ const (
 	ErrNonEmptyGroup               ErrorCode = 67
 	ErrGroupIDNotFound             ErrorCode = 69
 	ErrCoordinatorLoadInProgress   ErrorCode = 14
+
+	// ErrMemberIDRequired pairs with KIP-394 (Apache Kafka 2.3+).
+	// The coordinator returns this on the FIRST JoinGroup from a
+	// dynamic member (no GroupInstanceID, empty member.id, request
+	// version >= 4): the response carries an assigned member.id and
+	// this error code, telling the client to retry the JoinGroup
+	// using the new ID. The retry counts toward the rebalance — the
+	// initial request does not. Used to fence "zombie" members that
+	// reconnected with no memberID after a network blip.
+	ErrMemberIDRequired ErrorCode = 79
 )
 
