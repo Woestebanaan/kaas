@@ -372,5 +372,68 @@ func TestCoordinatorOwnsGroupNoAliveBrokers(t *testing.T) {
 	}
 }
 
+// TestCoordinatorOwnsTxnHashFallthrough is the gh #91 sibling of
+// TestCoordinatorOwnsGroupHashFallthrough. With no explicit
+// txn-coordinator entry in the assignment (there is no such field
+// today — the hash is the only path), exactly ONE broker out of
+// three returns true for OwnsTxn(txnID), and that broker matches
+// PickTxnCoordinator's prediction. Without this, gating
+// InitProducerId / AddPartitionsToTxn / EndTxn on OwnsTxn would
+// reject every transactional producer's first request.
+func TestCoordinatorOwnsTxnHashFallthrough(t *testing.T) {
+	a := hashFallthroughAssignment()
+	const txnID = "my-test-txn"
+
+	coords := make(map[string]*Coordinator, 3)
+	for _, brokerID := range []string{"skafka-0", "skafka-1", "skafka-2"} {
+		c := NewCoordinator(brokerID, nil, nil, nil)
+		c.mu.Lock()
+		c.current = a
+		c.mu.Unlock()
+		coords[brokerID] = c
+	}
+
+	owners := 0
+	var ownerID string
+	for id, c := range coords {
+		if c.OwnsTxn(txnID) {
+			owners++
+			ownerID = id
+		}
+	}
+	if owners != 1 {
+		t.Errorf("OwnsTxn(%q) returned true on %d brokers, want 1", txnID, owners)
+	}
+
+	wantOwner := PickTxnCoordinator(txnID,
+		[]string{"skafka-0", "skafka-1", "skafka-2"},
+		map[string]bool{"skafka-0": true, "skafka-1": true, "skafka-2": true})
+	if ownerID != wantOwner {
+		t.Errorf("OwnsTxn picked %q, but PickTxnCoordinator says %q (broker disagrees with helper)", ownerID, wantOwner)
+	}
+}
+
+// TestCoordinatorTxnCoordinatorHashFallthrough: TxnCoordinator
+// returns the hashed broker for any txnID instead of (-, false).
+// The forthcoming FindCoordinator(KeyType=transaction) handler
+// (gh #91 PR 3) delegates to this — without the fallback, every
+// transactional producer's discovery call would surface
+// CoordinatorNotAvailable.
+func TestCoordinatorTxnCoordinatorHashFallthrough(t *testing.T) {
+	a := hashFallthroughAssignment()
+	c := NewCoordinator("skafka-0", nil, nil, nil)
+	c.mu.Lock()
+	c.current = a
+	c.mu.Unlock()
+
+	pick, ok := c.TxnCoordinator("fresh-txn")
+	if !ok {
+		t.Fatal("TxnCoordinator returned not-found for an unknown txnID; hash fallback never fired")
+	}
+	if pick != "skafka-0" && pick != "skafka-1" && pick != "skafka-2" {
+		t.Errorf("TxnCoordinator returned %q, want one of skafka-{0,1,2}", pick)
+	}
+}
+
 // Sanity: ensure fakeLeases compiles even though we ended up not using it.
 var _ = (&fakeLeases{}).CurrentEpoch

@@ -155,6 +155,132 @@ func TestPickGroupCoordinatorStableAcrossSnapshotCopies(t *testing.T) {
 	}
 }
 
+// TestTxnCoordinatorSlotDeterministic: gh #91 sibling of the group
+// determinism test. Same transactional.id → same slot every time.
+// A wire-protocol contract: every broker must agree on which one
+// hosts a given txnID's state, otherwise FindCoordinator(type=txn)
+// answers diverge and producers ping-pong.
+func TestTxnCoordinatorSlotDeterministic(t *testing.T) {
+	const numBrokers = 3
+	for _, txnID := range []string{"orders-1", "audit-stream", "skafka-test-txn-99", ""} {
+		first := TxnCoordinatorSlot(txnID, numBrokers)
+		for i := 0; i < 100; i++ {
+			if got := TxnCoordinatorSlot(txnID, numBrokers); got != first {
+				t.Errorf("txnID=%q slot drifted: %d vs %d on iteration %d", txnID, first, got, i)
+			}
+		}
+	}
+}
+
+// TestTxnCoordinatorSlotEvenDistribution: 1000 random transactional
+// IDs land in roughly equal proportions. Same shape as the group
+// distribution test — txn coordinator routing reuses the same hash,
+// so this also catches a regression where someone introduces a
+// txn-specific hash that collapses to a single slot.
+func TestTxnCoordinatorSlotEvenDistribution(t *testing.T) {
+	const numBrokers = 3
+	const samples = 1000
+	counts := make([]int, numBrokers)
+	for i := 0; i < samples; i++ {
+		s := TxnCoordinatorSlot(fmt.Sprintf("txn-%d", i), numBrokers)
+		counts[s]++
+	}
+	expected := samples / numBrokers
+	tolerance := expected / 5 // 20% slack
+	for slot, c := range counts {
+		if c < expected-tolerance || c > expected+tolerance {
+			t.Errorf("slot %d got %d samples, want ~%d (±%d)", slot, c, expected, tolerance)
+		}
+	}
+}
+
+// TestPickTxnCoordinatorPrefersPreferred: when the hashed slot's
+// broker is alive, that broker is the answer. Mirrors the group
+// equivalent — the stable-preferred case is dominant because
+// transactional IDs typically outlive any single broker outage.
+func TestPickTxnCoordinatorPrefersPreferred(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	alive := map[string]bool{"skafka-0": true, "skafka-1": true, "skafka-2": true}
+	for i := 0; i < 100; i++ {
+		txnID := fmt.Sprintf("txn-%d", i)
+		slot := TxnCoordinatorSlot(txnID, len(brokers))
+		want := brokers[slot]
+		got := PickTxnCoordinator(txnID, brokers, alive)
+		if got != want {
+			t.Errorf("txnID=%q got %q, want preferred %q", txnID, got, want)
+		}
+	}
+}
+
+// TestPickTxnCoordinatorFallsBackOnDownSlot: preferred broker is
+// down → fallback picks deterministically from the alive subset.
+// Stable across re-invocations so a producer retrying
+// FindCoordinator during a transient outage doesn't get bounced
+// between alternates.
+func TestPickTxnCoordinatorFallsBackOnDownSlot(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	alive := map[string]bool{"skafka-0": true, "skafka-1": false, "skafka-2": true}
+
+	// Pick a txnID that hashes to slot 1 (the down broker).
+	var targetTxn string
+	for i := 0; i < 1000; i++ {
+		txnID := fmt.Sprintf("txn-%d", i)
+		if TxnCoordinatorSlot(txnID, 3) == 1 {
+			targetTxn = txnID
+			break
+		}
+	}
+	if targetTxn == "" {
+		t.Fatal("could not find a txnID that hashes to slot 1; distribution test was a lie")
+	}
+
+	first := PickTxnCoordinator(targetTxn, brokers, alive)
+	if first == "skafka-1" {
+		t.Errorf("fallback returned the down broker %q", first)
+	}
+	if first != "skafka-0" && first != "skafka-2" {
+		t.Errorf("fallback returned %q, want one of skafka-0 or skafka-2", first)
+	}
+	for i := 0; i < 100; i++ {
+		if got := PickTxnCoordinator(targetTxn, brokers, alive); got != first {
+			t.Errorf("fallback drifted: %q vs %q on iteration %d", got, first, i)
+		}
+	}
+}
+
+// TestPickTxnCoordinatorStabilityWhenOneBrokerLeaves: a single
+// broker going down does NOT migrate ~all txnIDs — only the ~1/3
+// whose preferred slot was that broker. Same headline win as the
+// group test; this is what the "numBrokers fixed, NOT len(alive)"
+// invariant buys us. Sibling of TestPickGroupCoordinatorStability-
+// WhenOneBrokerLeaves; if either drifts, the two routing siblings
+// have diverged.
+func TestPickTxnCoordinatorStabilityWhenOneBrokerLeaves(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	allAlive := map[string]bool{"skafka-0": true, "skafka-1": true, "skafka-2": true}
+	oneDown := map[string]bool{"skafka-0": true, "skafka-1": false, "skafka-2": true}
+
+	const samples = 300
+	migrated := 0
+	for i := 0; i < samples; i++ {
+		txnID := fmt.Sprintf("txn-%d", i)
+		before := PickTxnCoordinator(txnID, brokers, allAlive)
+		after := PickTxnCoordinator(txnID, brokers, oneDown)
+		if before != after {
+			migrated++
+			if before != "skafka-1" {
+				t.Errorf("txnID=%q migrated %q→%q, but its preferred wasn't skafka-1", txnID, before, after)
+			}
+		}
+	}
+	expected := samples / 3
+	tolerance := expected / 4 // 25% slack
+	if migrated < expected-tolerance || migrated > expected+tolerance {
+		t.Errorf("one-broker-down migration count = %d, want ~%d (±%d) — naive len(alive) modulo would have migrated ~%d",
+			migrated, expected, tolerance, samples*2/3)
+	}
+}
+
 // TestPickGroupCoordinatorStabilityWhenOneBrokerLeaves: a rolling
 // restart that brings broker-1 down for ~30s should NOT migrate
 // every group — only groups whose preferred slot is broker-1.

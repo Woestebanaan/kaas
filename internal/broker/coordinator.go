@@ -285,6 +285,45 @@ func (c *Coordinator) GroupCoordinator(groupID string) (string, bool) {
 	return pick, true
 }
 
+// OwnsTxn reports whether this broker is the assigned coordinator for
+// transactionalID (gh #91). Hash-only today — there is no
+// `assignment.json.TxnGroups` field analogous to ConsumerGroups; every
+// broker computes the answer locally from the full broker list. The
+// explicit-override tier from OwnsGroup can be added later if a
+// sticky-coordinator use case appears, but isn't needed for correctness
+// (the hash divisor is the StatefulSet replica count, stable across
+// rolling restarts).
+//
+// Returns false when no assignment has been loaded yet — same
+// CoordinatorNotAvailable bootstrap path as OwnsGroup.
+func (c *Coordinator) OwnsTxn(transactionalID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.current == nil {
+		return false
+	}
+	brokers, alive := assignmentBrokerSets(c.current)
+	return PickTxnCoordinator(transactionalID, brokers, alive) == c.brokerID
+}
+
+// TxnCoordinator returns the broker ID assigned to coordinate
+// transactionalID. Sibling of GroupCoordinator. Second return is
+// false only when no assignment has been loaded yet OR no broker is
+// alive in the current assignment.
+func (c *Coordinator) TxnCoordinator(transactionalID string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.current == nil {
+		return "", false
+	}
+	brokers, alive := assignmentBrokerSets(c.current)
+	pick := PickTxnCoordinator(transactionalID, brokers, alive)
+	if pick == "" {
+		return "", false
+	}
+	return pick, true
+}
+
 // assignmentBrokerSets builds (brokers, alive) views from an
 // assignment. brokers is the FULL list (every broker the controller
 // knows about, including draining/dead) so the hash divisor is
