@@ -9,6 +9,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
@@ -161,6 +162,22 @@ func (g *group) maybeCompleteRebalance() {
 }
 
 func (g *group) completeRebalance() {
+	// completeRebalance fires from two paths: the rebalance timer's
+	// time.AfterFunc (no inbound ctx) and maybeCompleteRebalance from
+	// inside join() (where the request ctx exists but isn't threaded
+	// through). Start a fresh root span — operators look these up by
+	// group_id + generation, not by parent trace.
+	_, span := observability.Tracer().Start(context.Background(),
+		"coordinator.complete_rebalance",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("group.id", g.id),
+			attribute.Int("members", len(g.members)),
+			attribute.Int("waiters", len(g.joinWaiters)),
+		),
+	)
+	defer span.End()
+
 	if g.rebalanceTimer != nil {
 		g.rebalanceTimer.Stop()
 		g.rebalanceTimer = nil
@@ -168,6 +185,11 @@ func (g *group) completeRebalance() {
 	g.state = stateCompletingRebalance
 	g.generationID++
 	g.protocolName = selectProtocol(g.members, g.joinWaiters)
+	span.SetAttributes(
+		attribute.Int("generation", int(g.generationID)),
+		attribute.String("protocol.name", g.protocolName),
+		attribute.String("protocol.type", g.protocolType),
+	)
 
 	observability.Global().GroupRebalances.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("consumer_group", g.id)))

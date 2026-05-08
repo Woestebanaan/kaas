@@ -5,6 +5,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
@@ -215,7 +219,17 @@ func (l *AssignmentLoop) UpdateAssignment(_ context.Context, change kafkaapi.Ass
 
 // recomputeAndWrite is the core: snapshot inputs, run the balancer, write
 // through the AssignmentStore, push notification, mirror to CR.
-func (l *AssignmentLoop) recomputeAndWrite(ctx context.Context, _ kafkaapi.AssignmentChange) error {
+func (l *AssignmentLoop) recomputeAndWrite(ctx context.Context, change kafkaapi.AssignmentChange) error {
+	ctx, span := observability.Tracer().Start(ctx, "controller.recompute",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("change.reason", string(change.Reason)),
+			attribute.String("change.topic", change.Topic),
+			attribute.String("change.broker", change.BrokerID),
+		),
+	)
+	defer span.End()
+
 	brokers := l.brokers.AliveBrokers()
 	topics := l.topics.Topics()
 
@@ -250,8 +264,18 @@ func (l *AssignmentLoop) recomputeAndWrite(ctx context.Context, _ kafkaapi.Assig
 	l.mu.Unlock()
 
 	observability.Global().AssignmentChanges.Add(ctx, 1)
+	span.SetAttributes(
+		attribute.Int64("assignment.version", version),
+		attribute.Int64("assignment.epoch", l.controllerEpoch),
+		attribute.Int("brokers.alive", len(brokers)),
+		attribute.Int("topics.total", len(topics)),
+		attribute.Int("partitions.total", len(parts)),
+		attribute.Int("groups.total", len(groups)),
+	)
 
 	if err := l.store.Write(ctx, a); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "store.write")
 		return err
 	}
 

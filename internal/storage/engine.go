@@ -14,6 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/observability"
 )
@@ -650,7 +654,7 @@ func (e *DiskStorageEngine) DeletePartition(topic string, partition int32) error
 // assignment_watch.go's file-validation half. epoch==0 is the v2.6
 // compatibility sentinel ("no fence configured"), as is ps.epoch==0 (no
 // TakeOver has run since the partition was opened).
-func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition int32, epoch uint32, rawBatch []byte) (int64, error) {
+func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition int32, epoch uint32, rawBatch []byte) (int64, error) {
 	if len(rawBatch) == 0 {
 		hwm, _ := e.HighWatermark(topic, partition)
 		return hwm, nil
@@ -723,7 +727,7 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 	ps.pendingFlushRecords += int64(lastOffsetDelta) + 1
 
 	if ps.active.logSize >= e.cfg.SegmentBytes {
-		if err := e.rollSegment(ps); err != nil {
+		if err := e.rollSegment(ctx, ps); err != nil {
 			return -1, err
 		}
 		// rollSegment fsyncs the previous segment via roll() and persists
@@ -794,7 +798,17 @@ func (e *DiskStorageEngine) Append(_ context.Context, topic string, partition in
 //
 // On NFS the previous synchronous version held ps.mu for 5-30s during
 // segment roll; this brings it down to ~one fsync + two file CREATEs.
-func (e *DiskStorageEngine) rollSegment(ps *partitionState) error {
+func (e *DiskStorageEngine) rollSegment(ctx context.Context, ps *partitionState) error {
+	ctx, span := observability.Tracer().Start(ctx, "storage.segment_roll",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("partition_dir", ps.dir),
+			attribute.Int64("epoch", ps.epoch),
+			attribute.Int64("highwater", ps.highWater),
+		),
+	)
+	defer span.End()
+
 	closed := segmentMeta{
 		baseOffset: ps.active.baseOffset,
 		logPath:    ps.active.logPath,
@@ -808,22 +822,40 @@ func (e *DiskStorageEngine) rollSegment(ps *partitionState) error {
 	oldActive := ps.active
 	newSeg, err := oldActive.rollFast(ps.dir, ps.highWater, ps.epoch)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "rollFast")
 		return err
 	}
 	ps.segments = append(ps.segments, closed)
 	ps.active = newSeg
+	span.SetAttributes(
+		attribute.Int64("closed.base_offset", closed.baseOffset),
+		attribute.Int64("active.base_offset", newSeg.baseOffset),
+	)
 
 	// Async finalize: index fsync, close old, manifest checkpoint.
-	// Capture ps + oldActive by value/pointer; the goroutine takes the
-	// lock briefly only for the manifest write at the end. A failure
-	// here is logged but non-fatal — the next TakeOver / open rebuilds
-	// from a segment scan.
-	go func(seg *activeSegment) {
-		_ = seg.finalizeAfterRoll()
+	// Detached goroutine outlives the parent ctx, so finalize starts
+	// its own root span (linked to the parent so traces correlate)
+	// rather than chaining a child off a span that's about to End().
+	parentLink := trace.LinkFromContext(ctx)
+	go func(seg *activeSegment, dir string, link trace.Link) {
+		_, fSpan := observability.Tracer().Start(context.Background(),
+			"storage.segment_finalize",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithLinks(link),
+			trace.WithAttributes(
+				attribute.String("partition_dir", dir),
+			),
+		)
+		defer fSpan.End()
+		if err := seg.finalizeAfterRoll(); err != nil {
+			fSpan.RecordError(err)
+			fSpan.SetStatus(codes.Error, "finalizeAfterRoll")
+		}
 		ps.mu.Lock()
 		_ = ps.persistManifestLocked()
 		ps.mu.Unlock()
-	}(oldActive)
+	}(oldActive, ps.dir, parentLink)
 
 	return nil
 }
@@ -1039,16 +1071,30 @@ func (e *DiskStorageEngine) RelinquishPartition(_ string, _ int32) {}
 // New code should prefer TakeOver, which returns the recovered high watermark
 // for reporting back to the v3 controller.
 func (e *DiskStorageEngine) TakeoverPartition(topic string, partition int32, newEpoch int64) error {
-	_, err := e.takeoverInternal(topic, partition, newEpoch)
+	_, err := e.takeoverInternal(context.Background(), topic, partition, newEpoch)
 	return err
 }
 
 // takeoverInternal is the shared implementation behind TakeoverPartition (v2.6
 // callers) and TakeOver (v3 callers). Returns the recovered high watermark.
-func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newEpoch int64) (int64, error) {
+func (e *DiskStorageEngine) takeoverInternal(ctx context.Context, topic string, partition int32, newEpoch int64) (int64, error) {
+	ctx, span := observability.Tracer().Start(ctx, "storage.takeover",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.Int("partition", int(partition)),
+			attribute.Int64("epoch.new", newEpoch),
+		),
+	)
+	defer span.End()
+	_ = ctx
+
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
-		return 0, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+		err := fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "unknown partition")
+		return 0, err
 	}
 
 	ps.mu.Lock()
@@ -1060,6 +1106,8 @@ func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newE
 	// os.Remove on NFS (gh #76 follow-up). Idempotent if already open.
 	if ps.active != nil {
 		if err := ps.active.openHandles(); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "openHandles")
 			return 0, fmt.Errorf("storage: open handles: %w", err)
 		}
 	}
@@ -1068,32 +1116,43 @@ func (e *DiskStorageEngine) takeoverInternal(topic string, partition int32, newE
 	if m, err := readManifest(ps.dir); err == nil {
 		diskEpoch = m.Epoch
 	} else if !errors.Is(err, fs.ErrNotExist) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "readManifest")
 		return 0, fmt.Errorf("storage: read manifest: %w", err)
 	}
+	span.SetAttributes(attribute.Int64("epoch.disk", diskEpoch))
 
 	if diskEpoch < newEpoch {
 		hwm, err := recoverSegment(ps.active)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "recoverSegment")
 			return 0, fmt.Errorf("storage: recover segment: %w", err)
 		}
 		if err := rebuildIndex(ps.active, e.cfg.IndexIntervalBytes); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "rebuildIndex")
 			return 0, fmt.Errorf("storage: rebuild index: %w", err)
 		}
 		ps.highWater = hwm
+		span.SetAttributes(attribute.Bool("recovered", true))
 	}
 
 	ps.epoch = newEpoch
 	if err := ps.persistManifestLocked(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "persistManifest")
 		return 0, fmt.Errorf("storage: write manifest: %w", err)
 	}
+	span.SetAttributes(attribute.Int64("highwater", ps.highWater))
 	return ps.highWater, nil
 }
 
 // TakeOver implements the v3 StorageEngine contract. It claims write ownership
 // of the partition under the given epoch, recovers any partial writes, and
 // returns the recovered high watermark.
-func (e *DiskStorageEngine) TakeOver(_ context.Context, topic string, partition int32, epoch uint32) (int64, error) {
-	return e.takeoverInternal(topic, partition, int64(epoch))
+func (e *DiskStorageEngine) TakeOver(ctx context.Context, topic string, partition int32, epoch uint32) (int64, error) {
+	return e.takeoverInternal(ctx, topic, partition, int64(epoch))
 }
 
 // Relinquish implements the v3 StorageEngine contract. The partition

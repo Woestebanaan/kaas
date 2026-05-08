@@ -10,11 +10,14 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
@@ -144,10 +147,24 @@ func (e *Election) runOnce(ctx context.Context) error {
 					// re-acquisition will pick up the correct value.
 					epoch = 0
 				}
+				// Trace the controller's tenure as a single span — its
+				// duration tells operators how long this broker held the
+				// Lease, and any child span emitted from a downstream
+				// recompute / write picks up this span's parent context
+				// so traces chain naturally.
+				spanCtx, span := observability.Tracer().Start(leaderCtx,
+					"controller.elected",
+					trace.WithSpanKind(trace.SpanKindInternal),
+					trace.WithAttributes(
+						attribute.String("controller.identity", e.identity),
+						attribute.Int64("controller.epoch", epoch),
+					),
+				)
 				if e.onAcquired != nil {
-					e.onAcquired(leaderCtx, epoch)
+					e.onAcquired(spanCtx, epoch)
 				}
 				<-leaderCtx.Done()
+				span.End()
 			},
 			OnStoppedLeading: func() {
 				if e.onLost != nil {

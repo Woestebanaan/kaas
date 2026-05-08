@@ -131,9 +131,13 @@ observability:
     traces:
       enabled: false
       # host:port (gRPC); a scheme prefix is stripped automatically.
-      endpoint: "otel-collector.observability.svc.cluster.local:4317"
+      # Default targets a Tempo deployment at observability/tempo:4317.
+      # Switch to "otel-collector.observability.svc.cluster.local:4317"
+      # if you front Tempo with the OTel Collector.
+      endpoint: "tempo.observability.svc.cluster.local:4317"
       insecure: true
-      # 0.0 = off; 1.0 = every trace. Production default 0.1.
+      # 0.0 = off; 1.0 = every trace. Production default 0.1; bump to
+      # 1.0 in dev / when actively debugging.
       samplerRatio: 0.1
 
   logs:
