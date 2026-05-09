@@ -396,6 +396,10 @@ func runBroker(ctx context.Context) {
 	d := protocol.NewDispatcher()
 	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
 	b.RegisterHandlers(d)
+	// gh #108 phase 2: cross-broker producer-fence broadcast. Started
+	// after handlers register so the watcher's storage engine and
+	// outbound fence log are wired. No-op in dev-mode (memory storage).
+	b.StartFenceWatcher(ctx)
 
 	srvCfg := protocol.Config{ListenAddr: host + ":" + port}
 	if certFile := os.Getenv("SKAFKA_TLS_CERT_FILE"); certFile != "" {

@@ -5,6 +5,7 @@
 package broker
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,6 +27,41 @@ func sprintfOrdinal(pattern string, ordinal int32) string {
 	return fmt.Sprintf(pattern, ordinal)
 }
 
+// broadcastingFencer wraps a local ProducerEpochFencer with a
+// FenceLog so every fence call (a) advances the local engine's
+// per-partition producer-state cache and (b) writes to this
+// broker's outbound fence log on the shared PVC. Peer brokers'
+// FenceWatcher polls the directory and applies the entries to
+// their local engines (gh #108 phase 2).
+//
+// Errors writing to the log are logged and swallowed — local
+// fencing already happened, so the in-flight zombie is fenced on
+// partitions led by this broker; the broadcast is a best-effort
+// extension to peers.
+type broadcastingFencer struct {
+	local handlers.ProducerEpochFencer
+	log   *coordinator.FenceLog
+}
+
+func (b *broadcastingFencer) FenceProducerEpoch(pid int64, epoch int16) {
+	b.local.FenceProducerEpoch(pid, epoch)
+	if err := b.log.Append(pid, epoch); err != nil {
+		slog.Warn("fence log append failed; peer brokers won't see this fence until next bump",
+			"pid", pid, "epoch", epoch, "err", err)
+	}
+}
+
+// StartFenceWatcher starts the gh #108 phase 2 fence-watcher
+// goroutine. Caller (cmd/skafka) supplies a context tied to the
+// broker lifecycle. No-op if the watcher wasn't wired (dev-mode
+// memory storage).
+func (b *Broker) StartFenceWatcher(ctx context.Context) {
+	if b.fenceWatcher == nil {
+		return
+	}
+	go b.fenceWatcher.Run(ctx)
+}
+
 // Config holds broker identity and static configuration.
 type Config struct {
 	BrokerID  int32
@@ -43,6 +79,13 @@ type Broker struct {
 	topics  *TopicRegistry
 	brokers handlers.BrokerSource
 	coord   *coordinator.Manager // nil in local-dev mode (consumer-group manager)
+
+	// fenceWatcher applies peer brokers' FenceLog entries to this
+	// broker's storage engine. Set in RegisterHandlers when the
+	// engine implements ProducerEpochFencer; nil in dev-mode
+	// (memory storage) where there's no per-partition state to
+	// fence. Started by StartFenceWatcher (gh #108 phase 2).
+	fenceWatcher *FenceWatcher
 	// brokerCoord is the v3 BrokerCoordinator that produces partition
 	// ownership decisions on the produce hot path. UseCoordinator wires
 	// it; RegisterHandlers picks it up via WithCoordinator on the
@@ -265,8 +308,31 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// DiskStorageEngine implements the fence interface; MemoryStorage
 	// has no per-partition producerStates to walk, so the cast just
 	// fails and the fence stays a no-op.
+	//
+	// gh #108 phase 2: wrap the local fencer with a broadcasting
+	// fencer that also writes to this broker's outbound fence log
+	// under <dataDir>/__cluster/producer_fences/from-skafka-N.json.
+	// Peer brokers' FenceWatcher (started in StartFenceWatcher)
+	// poll the directory and apply each entry locally — closing
+	// the cross-broker zombie window without a new gRPC RPC.
 	if fencer, ok := b.store.(handlers.ProducerEpochFencer); ok {
-		initPIDHandler = initPIDHandler.WithFencer(fencer)
+		fencer := fencer // shadow for closure capture below
+		if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
+			clusterDir := filepath.Join(dataDir, "__cluster")
+			fenceDir := coordinator.FenceLogDir(clusterDir)
+			brokerIDStr := fmt.Sprintf("skafka-%d", b.cfg.BrokerID)
+			if log, err := coordinator.NewFenceLog(fenceDir, brokerIDStr); err == nil {
+				initPIDHandler = initPIDHandler.WithFencer(&broadcastingFencer{local: fencer, log: log})
+				selfFile := fmt.Sprintf("from-%s.json", brokerIDStr)
+				b.fenceWatcher = NewFenceWatcher(fenceDir, selfFile, fencer)
+			} else {
+				slog.Warn("InitProducerId: fence broadcast disabled (gh #108 phase 2 inactive)",
+					"fenceDir", fenceDir, "err", err)
+				initPIDHandler = initPIDHandler.WithFencer(fencer)
+			}
+		} else {
+			initPIDHandler = initPIDHandler.WithFencer(fencer)
+		}
 	}
 	// gh #91: route InitProducerId for non-empty transactional.id to
 	// the txn-coordinator broker (hash of txnID into the StatefulSet
