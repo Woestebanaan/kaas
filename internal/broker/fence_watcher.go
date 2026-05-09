@@ -71,19 +71,22 @@ func (w *FenceWatcher) Run(ctx context.Context) {
 	defer t.Stop()
 	// Tick once on entry so a peer's pre-existing file (e.g. after
 	// our own restart) is applied without waiting a full interval.
-	w.tick()
+	w.Tick()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			w.tick()
+			w.Tick()
 		}
 	}
 }
 
-// tick is the single-pass scan; exposed for tests.
-func (w *FenceWatcher) tick() {
+// Tick is a single-pass scan of the fence directory. Exported so
+// integration tests can drive the watcher synchronously instead
+// of waiting for the 2s poll interval. Run() also calls this on
+// entry and on every ticker fire.
+func (w *FenceWatcher) Tick() {
 	entries, err := os.ReadDir(w.dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

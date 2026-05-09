@@ -47,7 +47,7 @@ func TestFenceWatcherAppliesPeerFences(t *testing.T) {
 	// Broker B watches and applies.
 	rec := &recordingFencer{}
 	wB := NewFenceWatcher(dir, "from-skafka-1.json", rec)
-	wB.tick()
+	wB.Tick()
 
 	calls := rec.snapshot()
 	if len(calls) != 1 {
@@ -72,7 +72,7 @@ func TestFenceWatcherSkipsSelf(t *testing.T) {
 	}
 	rec := &recordingFencer{}
 	w := NewFenceWatcher(dir, "from-skafka-1.json", rec)
-	w.tick()
+	w.Tick()
 
 	if calls := rec.snapshot(); len(calls) != 0 {
 		t.Errorf("watcher applied self fence: %v", calls)
@@ -92,9 +92,9 @@ func TestFenceWatcherDedupesAcrossTicks(t *testing.T) {
 	rec := &recordingFencer{}
 	w := NewFenceWatcher(dir, "from-skafka-1.json", rec)
 
-	w.tick()
-	w.tick()
-	w.tick()
+	w.Tick()
+	w.Tick()
+	w.Tick()
 
 	if calls := rec.snapshot(); len(calls) != 1 {
 		t.Errorf("expected 1 fence call across 3 ticks (dedupe), got %d (%v)", len(calls), calls)
@@ -112,10 +112,10 @@ func TestFenceWatcherRecognisesEpochBump(t *testing.T) {
 
 	rec := &recordingFencer{}
 	w := NewFenceWatcher(dir, "from-skafka-1.json", rec)
-	w.tick()
+	w.Tick()
 
 	logA.Append(1, 7)
-	w.tick()
+	w.Tick()
 
 	calls := rec.snapshot()
 	if len(calls) != 2 {
@@ -141,7 +141,7 @@ func TestFenceWatcherMultiPeer(t *testing.T) {
 
 	rec := &recordingFencer{}
 	w := NewFenceWatcher(dir, "from-skafka-2.json", rec)
-	w.tick()
+	w.Tick()
 
 	calls := rec.snapshot()
 	// 4 total entries across A and B; watcher applies them all
@@ -160,7 +160,7 @@ func TestFenceWatcherMissingDirIsNoop(t *testing.T) {
 	rec := &recordingFencer{}
 	w := NewFenceWatcher("/nonexistent/path", "from-skafka-0.json", rec)
 	// Should not panic / error.
-	w.tick()
+	w.Tick()
 	if calls := rec.snapshot(); len(calls) != 0 {
 		t.Errorf("watcher applied %d calls against missing dir: %v", len(calls), calls)
 	}
