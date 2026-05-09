@@ -115,6 +115,16 @@ spec:
             # tracked separately.
             - name: SKAFKA_NUM_BROKERS
               value: "{{ .Values.broker.replicaCount }}"
+            # gh #109: auto.create.topics.enable (default true, matches
+            # Apache 3.7). When the broker receives MetadataRequest for
+            # an unknown topic with AllowAutoTopicCreation=true, it
+            # writes a KafkaTopic CR via TopicCRWriter and returns
+            # LEADER_NOT_AVAILABLE so the client retries. Internal
+            # topics (`__` prefix) are reserved.
+            - name: SKAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "{{ .Values.broker.autoCreateTopics.enabled }}"
+            - name: SKAFKA_NUM_PARTITIONS
+              value: "{{ .Values.broker.autoCreateTopics.numPartitions }}"
             {{- if .Values.auth.requireSasl }}
             - name: SKAFKA_REQUIRE_SASL
               value: "true"

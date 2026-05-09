@@ -246,10 +246,35 @@ func (h *DeleteAclsHandler) Handle(_ *connstate.ConnState, version int16, body [
 type DescribeConfigsHandler struct {
 	topics  TopicSource
 	brokers BrokerSource
+
+	// gh #109: live broker config the response advertises. Defaults
+	// match Apache 3.7's ServerLogConfigs / KafkaConfig.Defaults so
+	// admin clients see the same values whether or not WithBrokerConfig
+	// was called.
+	autoCreateTopics bool
+	numPartitions    int32
 }
 
 func NewDescribeConfigsHandler(topics TopicSource, brokers BrokerSource) *DescribeConfigsHandler {
-	return &DescribeConfigsHandler{topics: topics, brokers: brokers}
+	return &DescribeConfigsHandler{
+		topics:           topics,
+		brokers:          brokers,
+		autoCreateTopics: true, // matches Apache 3.7 default + skafka's gh #109 default
+		numPartitions:    1,
+	}
+}
+
+// WithBrokerConfig wires the live broker config values DescribeConfigs
+// advertises. Both keys are surfaced as ConfigSource=DEFAULT_CONFIG
+// (read-only; skafka doesn't yet support runtime broker-config
+// mutation via AlterConfigs).
+func (h *DescribeConfigsHandler) WithBrokerConfig(autoCreateTopics bool, numPartitions int32) *DescribeConfigsHandler {
+	h.autoCreateTopics = autoCreateTopics
+	if numPartitions < 1 {
+		numPartitions = 1
+	}
+	h.numPartitions = numPartitions
+	return h
 }
 
 func (h *DescribeConfigsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -274,7 +299,7 @@ func (h *DescribeConfigsHandler) Handle(_ *connstate.ConnState, version int16, b
 				out.Configs = filterConfigs(topicConfigsFor(h.topics, res.ResourceName), res.ConfigNames, res.ConfigNull)
 			}
 		case api.ConfigResourceBroker:
-			out.Configs = filterConfigs(brokerConfigs(h.brokers), res.ConfigNames, res.ConfigNull)
+			out.Configs = filterConfigs(brokerConfigs(h.brokers, h.autoCreateTopics, h.numPartitions), res.ConfigNames, res.ConfigNull)
 		default:
 			out.ErrorCode = int16(codec.ErrInvalidRequest)
 			out.ErrorMessage = "unsupported resource type"
@@ -358,13 +383,13 @@ func topicConfigsFor(topics TopicSource, name string) []api.DescribeConfigsEntry
 	return defaults
 }
 
-func brokerConfigs(brokers BrokerSource) []api.DescribeConfigsEntry {
+func brokerConfigs(brokers BrokerSource, autoCreateTopics bool, numPartitions int32) []api.DescribeConfigsEntry {
 	self := brokers.Self()
 	return []api.DescribeConfigsEntry{
 		readOnlyEntry("broker.id", fmt.Sprintf("%d", self.NodeID)),
 		readOnlyEntry("listeners", fmt.Sprintf("PLAINTEXT://%s:%d", self.Host, self.Port)),
-		readOnlyEntry("auto.create.topics.enable", "false"),
-		readOnlyEntry("num.partitions", "1"),
+		readOnlyEntry("auto.create.topics.enable", strconv.FormatBool(autoCreateTopics)),
+		readOnlyEntry("num.partitions", strconv.Itoa(int(numPartitions))),
 		// Always 1: skafka delegates durability to the CSI layer (CephFS/RBD),
 		// not to Kafka-level replication. This is an architectural invariant.
 		readOnlyEntry("default.replication.factor", "1"),

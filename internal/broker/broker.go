@@ -27,6 +27,41 @@ func sprintfOrdinal(pattern string, ordinal int32) string {
 	return fmt.Sprintf(pattern, ordinal)
 }
 
+// envBool reads an env var and returns the boolean value, defaulting
+// to def when unset or unparseable. "true"/"1" → true; "false"/"0" →
+// false; everything else → def with a warn log.
+func envBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	switch strings.ToLower(v) {
+	case "":
+		return def
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	default:
+		slog.Warn("ignoring unparseable bool env var", "key", key, "value", v, "default", def)
+		return def
+	}
+}
+
+// envOrIntBroker is the broker-package mirror of cmd/skafka.envOrInt
+// (kept private here to avoid importing the cmd package). Reads an
+// env var and returns its int value, defaulting to def when unset or
+// unparseable.
+func envOrIntBroker(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("ignoring unparseable int env var", "key", key, "value", v, "default", def, "err", err)
+		return def
+	}
+	return n
+}
+
 // broadcastingFencer wraps a local ProducerEpochFencer with a
 // FenceLog so every fence call (a) advances the local engine's
 // per-partition producer-state cache and (b) writes to this
@@ -225,7 +260,19 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	if b.brokerCoord != nil {
 		leaderSrc = b.brokerCoord
 	}
-	d.Register(3, 1, 10, handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, leaderSrc))
+	// gh #109: read auto.create.topics.enable + num.partitions from
+	// env. Defaults match Apache 3.7 (true / 1). Only the CR-writer
+	// path drives auto-create — without TopicCRWriter wired (dev mode
+	// memory-only) the branch stays disabled even with env=true.
+	autoCreate := handlers.AutoCreateTopicsConfig{
+		Enabled:       envBool("SKAFKA_AUTO_CREATE_TOPICS_ENABLE", true),
+		NumPartitions: int32(envOrIntBroker("SKAFKA_NUM_PARTITIONS", 1)),
+	}
+	metadataHandler := handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, leaderSrc)
+	if b.topicCRWriter != nil {
+		metadataHandler = metadataHandler.WithAutoCreate(autoCreate, b.topicCRWriter)
+	}
+	d.Register(3, 1, 10, metadataHandler)
 	d.Register(8, 2, 8, handlers.NewOffsetCommitHandler(b.coord))
 	d.Register(9, 1, 8, handlers.NewOffsetFetchHandler(b.coord))
 	d.Register(10, 0, 4, handlers.NewFindCoordinatorHandler(b.coord))
@@ -347,7 +394,10 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())
-	d.Register(32, 0, 3, handlers.NewDescribeConfigsHandler(b.topics, b.brokers))
+	// gh #109: advertise the live broker config so kafka-configs.sh /
+	// kafbat-ui render the actual auto-create + num-partitions values.
+	d.Register(32, 0, 3, handlers.NewDescribeConfigsHandler(b.topics, b.brokers).
+		WithBrokerConfig(autoCreate.Enabled, autoCreate.NumPartitions))
 	d.Register(35, 0, 1, handlers.NewDescribeLogDirsHandler(b.store, b.topics))
 	d.Register(36, 0, 2, handlers.NewSaslAuthenticateHandler(b.auth))
 

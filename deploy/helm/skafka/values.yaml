@@ -111,6 +111,21 @@ broker:
   #               at segment roll. Maximum throughput, weakest durability.
   flushIntervalMessages: 1
 
+  # gh #109: auto.create.topics.enable.
+  #   enabled — default true, matches Apache 3.7. When a producer sends
+  #     MetadataRequest with AllowAutoTopicCreation=true for an unknown
+  #     topic, the broker writes a KafkaTopic CR (operator reconciles
+  #     into partition dirs) and returns LEADER_NOT_AVAILABLE so the
+  #     client retries. Required for Kafka Streams' DSL `.to(<sink>)`
+  #     to work without explicit AdminClient.createTopics. Disable to
+  #     force every topic to be pre-created via KafkaTopic CR.
+  #   numPartitions — default 1; partition count for auto-created
+  #     topics. Topics created via explicit AdminClient.createTopics
+  #     (or KafkaTopic CR with spec.partitions) ignore this.
+  autoCreateTopics:
+    enabled: true
+    numPartitions: 1
+
 storage:
   className: ceph-filesystem    # or nfs-csi
   size: 500Gi

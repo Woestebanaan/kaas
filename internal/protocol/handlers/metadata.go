@@ -1,7 +1,12 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 
 	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
@@ -107,11 +112,39 @@ func (b BrokerInfo) Self() BrokerEndpoint {
 }
 func (b BrokerInfo) All() []BrokerEndpoint { return []BrokerEndpoint{b.Self()} }
 
+// AutoCreateTopicsConfig is the gh #109 auto.create.topics.enable
+// surface the metadata handler consults. When Enabled is true and the
+// caller supplies a Creator, MetadataRequest(AllowAutoTopicCreation=
+// true) for an unknown non-internal topic triggers a CreateTopic via
+// the production CR writer. Mirrors Apache Kafka's
+// `auto.create.topics.enable` + `num.partitions` broker configs.
+type AutoCreateTopicsConfig struct {
+	Enabled       bool
+	NumPartitions int32 // default for client-driven auto-create; >0 required when Enabled
+}
+
+// AutoTopicCreator is the slim contract MetadataHandler needs to
+// implement gh #109. Production wires the same TopicCRWriter the
+// CreateTopicsHandler uses (writes a KafkaTopic CR; operator
+// reconciles into partition dirs). Tests can substitute a fake.
+//
+// Returning ErrTopicAlreadyExists is treated as "someone created it
+// concurrently" — the metadata handler still returns
+// LEADER_NOT_AVAILABLE so the client retries and the next refresh
+// finds the leader.
+type AutoTopicCreator interface {
+	CreateTopic(ctx context.Context, name string, partitions int32, configs map[string]string) error
+}
+
 type MetadataHandler struct {
 	brokers   BrokerSource
 	clusterID string
 	topics    TopicSource
 	leaders   PartitionLeaderSource
+
+	autoCreate AutoCreateTopicsConfig
+	creator    AutoTopicCreator
+	inflight   sync.Map // string → struct{}: topics currently being created
 }
 
 func NewMetadataHandler(self BrokerInfo, topics TopicSource, leaders PartitionLeaderSource) *MetadataHandler {
@@ -136,6 +169,74 @@ func NewMetadataHandlerWithSource(brokers BrokerSource, clusterID string, topics
 func (h *MetadataHandler) WithLeaderSource(s PartitionLeaderSource) *MetadataHandler {
 	h.leaders = s
 	return h
+}
+
+// WithAutoCreate enables the gh #109 auto-topic-creation branch.
+// Both cfg.Enabled and a non-nil creator are required for the branch
+// to fire; without WithAutoCreate the handler keeps the legacy
+// "unknown topic → UNKNOWN_TOPIC_OR_PARTITION" behaviour.
+func (h *MetadataHandler) WithAutoCreate(cfg AutoCreateTopicsConfig, creator AutoTopicCreator) *MetadataHandler {
+	if cfg.NumPartitions < 1 {
+		cfg.NumPartitions = 1
+	}
+	h.autoCreate = cfg
+	h.creator = creator
+	return h
+}
+
+// autoCreateTopic is the gh #109 unknown-topic branch: writes a
+// KafkaTopic CR via the configured creator and returns a
+// LEADER_NOT_AVAILABLE response so the client's metadata-retry
+// loop refetches and finds the topic with leader info on the next
+// round. Mirrors Apache's AutoTopicCreationManager which remaps
+// TOPIC_ALREADY_EXISTS / REQUEST_TIMED_OUT to LEADER_NOT_AVAILABLE
+// for the same reason — the topic now exists; client retries.
+//
+// Per-handler in-flight dedup via sync.Map: many producers
+// concurrently sending Metadata for the same unknown topic submit
+// the create exactly once; subsequent callers see the in-flight
+// marker and return LEADER_NOT_AVAILABLE without re-entering the
+// creator.
+func (h *MetadataHandler) autoCreateTopic(_ *connstate.ConnState, name string) api.MetadataTopic {
+	leaderNotAvail := api.MetadataTopic{
+		ErrorCode: int16(codec.ErrLeaderNotAvailable),
+		Name:      name,
+	}
+	if _, loaded := h.inflight.LoadOrStore(name, struct{}{}); loaded {
+		return leaderNotAvail
+	}
+	defer h.inflight.Delete(name)
+
+	err := h.creator.CreateTopic(context.Background(), name, h.autoCreate.NumPartitions, nil)
+	switch {
+	case err == nil, errors.Is(err, ErrTopicAlreadyExists):
+		// Either path: the topic now exists. Return retriable.
+		return leaderNotAvail
+	default:
+		// Real failure (e.g. K8s API down, RBAC denied). Surface
+		// UNKNOWN_TOPIC_OR_PARTITION so the client doesn't tight-
+		// loop on a broker that can't satisfy the create — matches
+		// the pre-#109 behaviour for every operationally-broken
+		// state.
+		slog.Warn("auto-create topic failed; falling back to UNKNOWN_TOPIC_OR_PARTITION",
+			"topic", name, "err", err)
+		return api.MetadataTopic{
+			ErrorCode: int16(codec.ErrUnknownTopicOrPartition),
+			Name:      name,
+		}
+	}
+}
+
+// isInternalTopic mirrors Apache's `Topic.isInternal`:
+// `__consumer_offsets` and `__transaction_state` are the canonical
+// internal topics in 3.7. The `__` prefix rule is defensive — skafka
+// has no internal topics today (consumer-group state lives in
+// per-group files; txn state in /data/__cluster/txn_state slot
+// files), but reserving the prefix matches Apache convention and
+// keeps clients from auto-creating something that conflicts with a
+// future internal topic.
+func isInternalTopic(name string) bool {
+	return strings.HasPrefix(name, "__")
 }
 
 func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -167,18 +268,29 @@ func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body 
 	}
 
 	var entries []TopicEntry
-	if len(req.Topics) == 0 {
+	isAllTopics := len(req.Topics) == 0
+	if isAllTopics {
 		entries = h.topics.All()
 	} else {
 		for _, name := range req.Topics {
 			if partitions, ok := h.topics.Get(name); ok {
 				entries = append(entries, TopicEntry{Name: name, Partitions: partitions})
-			} else {
-				resp.Topics = append(resp.Topics, api.MetadataTopic{
-					ErrorCode: int16(codec.ErrUnknownTopicOrPartition),
-					Name:      name,
-				})
+				continue
 			}
+			// gh #109: auto.create.topics.enable. Apache requires
+			// BOTH the request flag AND the broker config to be on,
+			// AND the request not to be the "list everything" form
+			// (Streams' periodic full refresh would otherwise spam-
+			// create). Internal-topic names are reserved.
+			if h.autoCreate.Enabled && req.AllowAutoTopicCreation && h.creator != nil &&
+				!isAllTopics && !isInternalTopic(name) {
+				resp.Topics = append(resp.Topics, h.autoCreateTopic(conn, name))
+				continue
+			}
+			resp.Topics = append(resp.Topics, api.MetadataTopic{
+				ErrorCode: int16(codec.ErrUnknownTopicOrPartition),
+				Name:      name,
+			})
 		}
 	}
 
