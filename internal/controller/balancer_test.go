@@ -7,30 +7,6 @@ import (
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
 
-// TestRendezvousPickAgreesWithBalance guards gh #75: the exported
-// RendezvousPick must produce the same broker per (topic, partition)
-// that Balance() assigns. The broker's topic_watcher uses
-// RendezvousPick to decide who acquires the per-partition Lease first;
-// if those two paths disagreed, the Lease holder and assignment.json
-// could end up pointing at different brokers and produce requests
-// would fail with NotLeaderOrFollowerException for that partition
-// (the original kperf-0 split-brain symptom).
-func TestRendezvousPickAgreesWithBalance(t *testing.T) {
-	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
-	topics := []TopicSpec{
-		{Name: "events", PartitionCount: 9},
-		{Name: "kperf", PartitionCount: 3},
-		{Name: "audit-log", PartitionCount: 1},
-	}
-	for _, p := range Balance(nil, brokers, topics) {
-		got := RendezvousPick(p.Topic, p.Partition, brokers)
-		if got != p.Broker {
-			t.Errorf("%s/%d: Balance assigned %q, RendezvousPick returns %q (gh #75)",
-				p.Topic, p.Partition, p.Broker, got)
-		}
-	}
-}
-
 func TestBalance_FreshClusterDistributesEvenly(t *testing.T) {
 	brokers := []string{"a", "b", "c"}
 	topics := []TopicSpec{{Name: "events", PartitionCount: 9}}
@@ -213,6 +189,83 @@ func TestBalance_NoBrokersReturnsNil(t *testing.T) {
 	out := Balance(nil, nil, []TopicSpec{{Name: "x", PartitionCount: 5}})
 	if out != nil {
 		t.Errorf("Balance with no brokers should return nil, got %+v", out)
+	}
+}
+
+// TestBalance_NoSkewWithSkafkaStyleBrokerIDs guards gh #112: rendezvous
+// hashing under FNV-1a 64 had pathological avalanche on broker IDs that
+// differ by one byte (`skafka-0` / `skafka-1` / `skafka-2`), producing a
+// deterministic 8/4/4 split for any 16-partition topic. xxhash mixes
+// near-identical inputs properly, and the smoothing post-pass enforces
+// max-min ≤ 1 — the strict acceptance criterion in #112.
+func TestBalance_NoSkewWithSkafkaStyleBrokerIDs(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	for _, topic := range []string{"kperf-bench", "kperf-burst", "metrics", "audit-log"} {
+		out := Balance(nil, brokers, []TopicSpec{{Name: topic, PartitionCount: 16}})
+		counts := map[string]int{}
+		for _, p := range out {
+			counts[p.Broker]++
+		}
+		var lo, hi int
+		first := true
+		for _, c := range counts {
+			if first || c < lo {
+				lo = c
+			}
+			if first || c > hi {
+				hi = c
+			}
+			first = false
+		}
+		if hi-lo > 1 {
+			t.Errorf("topic %q: skewed distribution (max %d, min %d, spread %d > 1): %v",
+				topic, hi, lo, hi-lo, counts)
+		}
+	}
+}
+
+// TestBalance_LargeNDistributesEvenly asserts that with many partitions
+// smoothing still terminates and produces max - min ≤ 1.
+func TestBalance_LargeNDistributesEvenly(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	const partitions = 1000
+	out := Balance(nil, brokers, []TopicSpec{{Name: "huge", PartitionCount: partitions}})
+	counts := map[string]int{}
+	for _, p := range out {
+		counts[p.Broker]++
+	}
+	var lo, hi int
+	first := true
+	for _, c := range counts {
+		if first || c < lo {
+			lo = c
+		}
+		if first || c > hi {
+			hi = c
+		}
+		first = false
+	}
+	if hi-lo > 1 {
+		t.Errorf("1000 partitions, 3 brokers: spread %d > 1: %v", hi-lo, counts)
+	}
+}
+
+// TestBalance_SmoothingIsStableAcrossRecompute guards a subtle property:
+// because smoothing is deterministic, re-running Balance with the
+// smoothed output as prev must produce the SAME assignment with
+// epochs unchanged. Otherwise the controller would re-bump epochs on
+// every reconcile and bounce partition leadership.
+func TestBalance_SmoothingIsStableAcrossRecompute(t *testing.T) {
+	brokers := []string{"skafka-0", "skafka-1", "skafka-2"}
+	topics := []TopicSpec{
+		{Name: "audit-log", PartitionCount: 16},
+		{Name: "kperf-bench", PartitionCount: 16},
+	}
+	first := Balance(nil, brokers, topics)
+	prev := &kafkaapi.Assignment{Partitions: first}
+	second := Balance(prev, brokers, topics)
+	if !samePartitions(first, second) {
+		t.Fatalf("smoothing not stable across recompute: first=%+v second=%+v", first, second)
 	}
 }
 

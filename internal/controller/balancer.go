@@ -1,8 +1,9 @@
 package controller
 
 import (
-	"hash/fnv"
 	"sort"
+
+	"github.com/cespare/xxhash/v2"
 
 	"github.com/woestebanaan/skafka/pkg/kafkaapi"
 )
@@ -68,46 +69,128 @@ func Balance(
 		}
 	}
 
-	out := make([]kafkaapi.PartitionAssignment, 0, totalPartitions(topics))
+	// Phase 1: raw rendezvous pick per partition — feeds the smoother.
+	slots := make([]partitionSlot, 0, totalPartitions(topics))
 	for _, ts := range topics {
 		for partition := int32(0); partition < ts.PartitionCount; partition++ {
-			key := partitionKey(ts.Name, partition)
-			pa, hadPrev := prevMap[key]
-			broker := rendezvousPick(ts.Name, partition, alive)
-			if hadPrev {
-				if _, ok := aliveSet[pa.Broker]; ok && pa.Broker == broker {
-					// Stable: prior owner is still alive AND rendezvous
-					// would re-pick the same broker. Keep epoch unchanged.
-					// Without the rendezvous-equality guard we'd freeze
-					// a transient single-broker assignment forever once
-					// the cluster grew (gh #78).
-					out = append(out, pa)
-					continue
-				}
-			}
-			epoch := uint32(1)
-			if hadPrev {
-				epoch = pa.Epoch + 1 // bump on reassignment
-			}
-			out = append(out, kafkaapi.PartitionAssignment{
-				Topic:     ts.Name,
-				Partition: partition,
-				Broker:    broker,
-				Epoch:     epoch,
-				Role:      kafkaapi.PartitionRoleLeader,
+			slots = append(slots, partitionSlot{
+				topic:     ts.Name,
+				partition: partition,
+				broker:    rendezvousPick(ts.Name, partition, alive),
 			})
 		}
+	}
+
+	// Phase 2: deterministic smoothing pass. Rendezvous variance is
+	// Binomial(P, 1/B) — for P=16, B=3 that's σ ≈ 1.89, so ±2 skews
+	// happen naturally even with a perfect hash. We smooth to within
+	// one of optimal (skafka#112 acceptance criterion: max - min ≤ 1).
+	smoothPartitions(slots, alive)
+
+	// Phase 3: reconcile with prev for stable epochs. A partition keeps
+	// its prior epoch iff prev.Broker is still alive AND the smoothed
+	// pick agrees — same logic as before, just gated on the post-smooth
+	// target. Stability still works because smoothing is deterministic
+	// from (alive, topics): re-running with the smoothed state as prev
+	// yields the same target, so prev == smoothed and epochs don't
+	// bounce. The gh #78 single-broker-freeze guard remains intact:
+	// rendezvous on a fresh multi-broker cluster won't re-pick the dead
+	// broker, smoothing won't move it back, and the prev != smoothed
+	// branch reassigns to the live broker with epoch++.
+	out := make([]kafkaapi.PartitionAssignment, 0, len(slots))
+	for _, s := range slots {
+		key := partitionKey(s.topic, s.partition)
+		pa, hadPrev := prevMap[key]
+		if hadPrev {
+			if _, ok := aliveSet[pa.Broker]; ok && pa.Broker == s.broker {
+				out = append(out, pa)
+				continue
+			}
+		}
+		epoch := uint32(1)
+		if hadPrev {
+			epoch = pa.Epoch + 1
+		}
+		out = append(out, kafkaapi.PartitionAssignment{
+			Topic:     s.topic,
+			Partition: s.partition,
+			Broker:    s.broker,
+			Epoch:     epoch,
+			Role:      kafkaapi.PartitionRoleLeader,
+		})
 	}
 	return out
 }
 
-// RendezvousPick is the public form of rendezvousPick. Exposed so the
-// broker-side topic-watcher (cmd/skafka/main.go) can pre-compute the
-// same preferred Lease holder the controller's balancer would assign —
-// the two paths must agree, otherwise per-partition Lease holder and
-// assignment.json disagree (gh #75 split-brain).
-func RendezvousPick(topic string, partition int32, brokers []string) string {
-	return rendezvousPick(topic, partition, brokers)
+// partitionSlot is the working tuple smoothPartitions mutates in place.
+type partitionSlot struct {
+	topic     string
+	partition int32
+	broker    string
+}
+
+// smoothPartitions enforces max(per-broker count) - min ≤ 1 by moving
+// partitions from the most-loaded broker to the least-loaded one until
+// the load is balanced. Deterministic: ties broken lexicographically on
+// broker ID, victim picked by highest rendezvous hash for the recipient
+// (= least-churn move from the rendezvous perspective).
+//
+// In-place mutates slots[i].broker. alive must be sorted (caller does it).
+func smoothPartitions(slots []partitionSlot, alive []string) {
+	if len(alive) < 2 || len(slots) == 0 {
+		return
+	}
+	counts := make(map[string]int, len(alive))
+	for _, b := range alive {
+		counts[b] = 0
+	}
+	for _, s := range slots {
+		counts[s.broker]++
+	}
+	for {
+		hi, lo := alive[0], alive[0]
+		hiCount, loCount := counts[hi], counts[lo]
+		for _, b := range alive[1:] {
+			c := counts[b]
+			if c > hiCount {
+				hi, hiCount = b, c
+			}
+			if c < loCount {
+				lo, loCount = b, c
+			}
+		}
+		if hiCount-loCount <= 1 {
+			return
+		}
+		// Pick victim: partition currently on hi with the highest
+		// rendezvous score for lo (= the move closest to a no-op
+		// from rendezvous's point of view). Tiebreak by (topic,
+		// partition) for determinism.
+		victimIdx := -1
+		var victimScore uint64
+		for i, s := range slots {
+			if s.broker != hi {
+				continue
+			}
+			score := rendezvousHash(s.topic, s.partition, lo)
+			if victimIdx < 0 || score > victimScore {
+				victimIdx, victimScore = i, score
+				continue
+			}
+			if score == victimScore {
+				vt, vp := slots[victimIdx].topic, slots[victimIdx].partition
+				if s.topic < vt || (s.topic == vt && s.partition < vp) {
+					victimIdx = i
+				}
+			}
+		}
+		if victimIdx < 0 {
+			return // no movable partition; should not happen given hi has > 0
+		}
+		slots[victimIdx].broker = lo
+		counts[hi]--
+		counts[lo]++
+	}
 }
 
 // rendezvousPick is highest-random-weight hashing: hash(topic, partition,
@@ -134,12 +217,16 @@ func rendezvousPick(topic string, partition int32, brokers []string) string {
 }
 
 // rendezvousHash combines (topic, partition, broker) into a single uint64.
-// FNV-1a is fine here — we don't need cryptographic strength, just a
-// uniform distribution and sub-microsecond evaluation. The hash is part
-// of placement logic, not stored on disk, so the algorithm can change
-// across versions without a migration.
+// xxhash/v2 — well-mixed for short inputs, ~10× faster than crypto hashes,
+// no external dep cost (already pulled in transitively). The previous
+// FNV-1a 64 had pathological avalanche on broker IDs that differ by one
+// byte (`skafka-0` / `skafka-1` / `skafka-2`), driving a deterministic
+// 50/25/25 partition skew across a 3-broker cluster (skafka#112).
+//
+// The hash is part of placement logic, not stored on disk, so the
+// algorithm can change across versions without a migration.
 func rendezvousHash(topic string, partition int32, broker string) uint64 {
-	h := fnv.New64a()
+	h := xxhash.New()
 	h.Write([]byte(topic))
 	h.Write([]byte{0})
 	// 4-byte big-endian partition.
@@ -273,8 +360,10 @@ func rendezvousPickGroup(groupID string, brokers []string) string {
 	return best
 }
 
+// groupHash mirrors rendezvousHash for groups (no partition dimension).
+// xxhash for the same skew-avoidance reason — see rendezvousHash.
 func groupHash(groupID, broker string) uint64 {
-	h := fnv.New64a()
+	h := xxhash.New()
 	h.Write([]byte(groupID))
 	h.Write([]byte{0})
 	h.Write([]byte(broker))
