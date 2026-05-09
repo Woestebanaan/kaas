@@ -108,6 +108,13 @@ spec:
               value: "{{ .Values.broker.controllerLease.retryPeriodSeconds }}"
             - name: SKAFKA_FLUSH_INTERVAL_MESSAGES
               value: "{{ .Values.broker.flushIntervalMessages | default 1 }}"
+            # gh #108: numSlots for the sharded TxnStateStore. Must match
+            # the StatefulSet replica count so hash(txnID) % numSlots
+            # picks the same slot file on every broker. Cluster-wide
+            # constant; scaling out N→N' would re-shard, which is
+            # tracked separately.
+            - name: SKAFKA_NUM_BROKERS
+              value: "{{ .Values.broker.replicaCount }}"
             {{- if .Values.auth.requireSasl }}
             - name: SKAFKA_REQUIRE_SASL
               value: "true"

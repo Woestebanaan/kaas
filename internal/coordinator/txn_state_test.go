@@ -1,7 +1,11 @@
 package coordinator
 
 import (
+	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,7 +26,7 @@ func allocCounter() (alloc func() int64, peek func() int64) {
 // before gets a fresh PID and epoch=0.
 func TestTxnStateFirstAllocReturnsEpochZero(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewTxnStateStore(dir)
+	s, err := NewTxnStateStore(dir, 3)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -46,7 +50,7 @@ func TestTxnStateFirstAllocReturnsEpochZero(t *testing.T) {
 // write under (PID, epoch=0).
 func TestTxnStateRejoinBumpsEpoch(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := NewTxnStateStore(dir)
+	s, _ := NewTxnStateStore(dir, 3)
 	alloc, _ := allocCounter()
 
 	pid1, ep1, _ := s.GetOrAllocate("foo", alloc)
@@ -66,7 +70,7 @@ func TestTxnStateRejoinBumpsEpoch(t *testing.T) {
 // each other out.
 func TestTxnStateDistinctIDsGetDistinctPIDs(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := NewTxnStateStore(dir)
+	s, _ := NewTxnStateStore(dir, 3)
 	alloc, _ := allocCounter()
 
 	pidA, _, _ := s.GetOrAllocate("foo", alloc)
@@ -85,12 +89,12 @@ func TestTxnStatePersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	alloc1, _ := allocCounter()
 
-	s1, _ := NewTxnStateStore(dir)
+	s1, _ := NewTxnStateStore(dir, 3)
 	pid1, _, _ := s1.GetOrAllocate("foo", alloc1)
 
 	// Fresh store on the same dir simulates a broker pod replacement.
 	alloc2, _ := allocCounter()
-	s2, err := NewTxnStateStore(dir)
+	s2, err := NewTxnStateStore(dir, 3)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -112,16 +116,16 @@ func TestTxnStatePersistsAcrossRestart(t *testing.T) {
 // old session was using.
 func TestTxnStateEpochOverflowRotatesPID(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := NewTxnStateStore(dir)
+	// numSlots=1 so "foo" is guaranteed to land in slot 0.
+	s, _ := NewTxnStateStore(dir, 1)
 	alloc, _ := allocCounter()
 
 	// Hand-craft a state at the boundary so we don't have to call
 	// GetOrAllocate 32k times in test.
 	preExisting := TxnEntry{PID: 9999, Epoch: math.MaxInt16}
-	s.mu.Lock()
-	s.state["foo"] = preExisting
-	_ = s.persistLocked()
-	s.mu.Unlock()
+	if err := s.persistSlot(0, map[string]TxnEntry{"foo": preExisting}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 
 	pid, ep, err := s.GetOrAllocate("foo", alloc)
 	if err != nil {
@@ -142,7 +146,7 @@ func TestTxnStateEpochOverflowRotatesPID(t *testing.T) {
 // txnID must serialise so we never hand out the same epoch twice.
 func TestTxnStateConcurrentRejoinsSerialised(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := NewTxnStateStore(dir)
+	s, _ := NewTxnStateStore(dir, 3)
 	alloc, _ := allocCounter()
 
 	const concurrency = 32
@@ -182,9 +186,132 @@ func TestTxnStateConcurrentRejoinsSerialised(t *testing.T) {
 // fresh-PID path before reaching the store. Defense in depth.
 func TestTxnStateEmptyTxnIDRejected(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := NewTxnStateStore(dir)
+	s, _ := NewTxnStateStore(dir, 3)
 	alloc, _ := allocCounter()
 	if _, _, err := s.GetOrAllocate("", alloc); err == nil {
 		t.Error("empty txn.id should return an error")
+	}
+}
+
+// TestTxnStateCrossBrokerRejoinSurvivesFailover is the gh #108 headline
+// test: a producer's txnID is first seen on broker A, A dies, the alive-
+// set fallback routes the rejoin to broker B, and B must return the
+// SAME PID with epoch+1 — not a fresh PID. This is the contract the
+// per-broker single-file layout silently broke; the sharded slot files
+// on the shared RWX PVC let B read what A wrote.
+//
+// Simulated: two TxnStateStore instances pointing at the same dir
+// (same shared PVC view). brokerA writes; brokerB reads + bumps.
+func TestTxnStateCrossBrokerRejoinSurvivesFailover(t *testing.T) {
+	dir := t.TempDir()
+	const numSlots = 3
+	allocA, _ := allocCounter()
+	allocB, _ := allocCounter()
+
+	// Broker A: producer's first InitProducerId.
+	brokerA, err := NewTxnStateStore(dir, numSlots)
+	if err != nil {
+		t.Fatalf("brokerA: %v", err)
+	}
+	pidA, epochA, err := brokerA.GetOrAllocate("payment-tx", allocA)
+	if err != nil {
+		t.Fatalf("brokerA alloc: %v", err)
+	}
+	if epochA != 0 {
+		t.Fatalf("first alloc epoch=%d, want 0", epochA)
+	}
+
+	// Broker A goes down. Broker B (different process, same shared PVC)
+	// boots and the alive-set fallback routes "payment-tx" to it.
+	brokerB, err := NewTxnStateStore(dir, numSlots)
+	if err != nil {
+		t.Fatalf("brokerB: %v", err)
+	}
+	pidB, epochB, err := brokerB.GetOrAllocate("payment-tx", allocB)
+	if err != nil {
+		t.Fatalf("brokerB alloc: %v", err)
+	}
+
+	if pidB != pidA {
+		t.Errorf("cross-broker rejoin allocated fresh PID=%d (want %d) — gh #108 contract broken", pidB, pidA)
+	}
+	if epochB != 1 {
+		t.Errorf("cross-broker rejoin epoch=%d, want 1 (must continue from disk state)", epochB)
+	}
+}
+
+// TestTxnStateMigrateLegacySingleFile pins the upgrade path: warm
+// clusters running pre-#108 versions have a single transactional_state.json
+// in <dataDir>/__cluster. On first open of the new sharded store, every
+// entry must end up in the right slot file and the legacy file must be
+// removed. Without this, a v0.1.81 broker would lose all prior txn state
+// and every transactional producer's next rejoin gets a fresh PID.
+func TestTxnStateMigrateLegacySingleFile(t *testing.T) {
+	parent := t.TempDir()
+	legacyPath := filepath.Join(parent, "transactional_state.json")
+	legacy := map[string]TxnEntry{
+		"txn-a": {PID: 1001, Epoch: 5},
+		"txn-b": {PID: 1002, Epoch: 0},
+		"txn-c": {PID: 1003, Epoch: 99},
+	}
+	data, _ := json.Marshal(legacy)
+	if err := os.WriteFile(legacyPath, data, 0o644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	const numSlots = 3
+	s, err := NewTxnStateStore(parent, numSlots)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	// Legacy file must be gone.
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("legacy file still present after migration: %v", err)
+	}
+
+	// Every legacy entry must be readable through the new store.
+	snap := s.Snapshot()
+	for txnID, want := range legacy {
+		got, ok := snap[txnID]
+		if !ok {
+			t.Errorf("legacy entry %q lost during migration", txnID)
+			continue
+		}
+		if got.PID != want.PID || got.Epoch != want.Epoch {
+			t.Errorf("legacy entry %q migrated incorrectly: got %+v, want %+v", txnID, got, want)
+		}
+	}
+}
+
+// TestTxnStateSlotFileLayout asserts the on-disk shape: per-slot JSON
+// files under <dataDir>/__cluster/txn_state/. Catches a refactor that
+// accidentally puts every entry in slot-0 (defeats failover) or
+// elsewhere on disk.
+func TestTxnStateSlotFileLayout(t *testing.T) {
+	dir := t.TempDir()
+	const numSlots = 4
+	s, _ := NewTxnStateStore(dir, numSlots)
+	alloc, _ := allocCounter()
+
+	// Spread enough txnIDs that we get hits in multiple slots.
+	for i := 0; i < 32; i++ {
+		txnID := "txn-" + strconv.Itoa(i)
+		if _, _, err := s.GetOrAllocate(txnID, alloc); err != nil {
+			t.Fatalf("alloc %s: %v", txnID, err)
+		}
+	}
+
+	slots, err := s.activeSlots()
+	if err != nil {
+		t.Fatalf("activeSlots: %v", err)
+	}
+	if len(slots) < 2 {
+		t.Errorf("expected ≥2 slot files for 32 txnIDs across 4 slots, got %d", len(slots))
+	}
+	for _, n := range slots {
+		if n < 0 || n >= numSlots {
+			t.Errorf("slot index %d out of range [0,%d)", n, numSlots)
+		}
 	}
 }

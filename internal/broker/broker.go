@@ -7,7 +7,9 @@ package broker
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/woestebanaan/skafka/internal/auth"
@@ -241,7 +243,18 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// skips the dev path.
 	if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
 		clusterDir := filepath.Join(dataDir, "__cluster")
-		if txnStore, err := coordinator.NewTxnStateStore(clusterDir); err == nil {
+		// numSlots = StatefulSet replica count (mirrors gh #91's
+		// PickTxnCoordinator divisor). Stable across rolling restarts;
+		// scale-out from N→N' would require re-sharding which is out
+		// of scope for #108 phase 1. Default 1 collapses every txnID
+		// to slot-0 — correct for single-broker dev clusters.
+		numSlots := 1
+		if v := os.Getenv("SKAFKA_NUM_BROKERS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				numSlots = n
+			}
+		}
+		if txnStore, err := coordinator.NewTxnStateStore(clusterDir, numSlots); err == nil {
 			initPIDHandler = initPIDHandler.WithTxnStateStore(txnStore)
 		} else {
 			slog.Warn("InitProducerId: TxnStateStore disabled (gh #22 epoch fence inactive)",
