@@ -606,6 +606,12 @@ func startTopicWatcher(
 }
 
 // runInit creates partition directories for all KafkaTopics on the PVC and exits.
+//
+// The partition-init initContainer runs as root (uid 0) so that
+// ensureDataDirPerms can chown -R the data dir to the broker's uid/gid even
+// when the PVC came back from the provisioner as root-owned and
+// fsGroupChangePolicy=OnRootMismatch silently skipped the recursive perm fix
+// (skafka#110). Mirrors the Strimzi `volume-mount-hack` pattern.
 func runInit(ctx context.Context) {
 	dataDir := os.Getenv("SKAFKA_DATA_DIR")
 	if dataDir == "" {
@@ -613,6 +619,13 @@ func runInit(ctx context.Context) {
 		os.Exit(1)
 	}
 	namespace := envOr("SKAFKA_NAMESPACE", "default")
+	brokerUID := envOrInt("SKAFKA_BROKER_UID", 65532)
+	brokerGID := envOrInt("SKAFKA_BROKER_GID", 65532)
+
+	if err := os.MkdirAll(dataDir, 0o775); err != nil {
+		slog.Error("init: mkdir data dir", "dir", dataDir, "err", err)
+		os.Exit(1)
+	}
 
 	scheme := runtime.NewScheme()
 	_ = operatorv1.AddToScheme(scheme)
@@ -631,13 +644,43 @@ func runInit(ctx context.Context) {
 	for _, topic := range topicList.Items {
 		for p := int32(0); p < topic.Spec.Partitions; p++ {
 			dir := filepath.Join(dataDir, topic.Name, strconv.Itoa(int(p)))
-			if err := os.MkdirAll(dir, 0755); err != nil {
+			if err := os.MkdirAll(dir, 0o775); err != nil {
 				slog.Error("init: mkdir", "dir", dir, "err", err)
 				os.Exit(1)
 			}
 		}
 	}
+
+	if err := ensureDataDirPerms(dataDir, brokerUID, brokerGID); err != nil {
+		slog.Error("init: ensure data dir perms", "err", err)
+		os.Exit(1)
+	}
 	slog.Info("init complete", "topics", len(topicList.Items))
+}
+
+// ensureDataDirPerms makes dataDir writable by the broker process (uid:gid).
+// Always sets dataDir's mode to 0775 so the broker can mkdir new topic dirs at
+// runtime; if running as root, also recursively chowns the entire tree to
+// uid:gid so anything we just created (or that pre-existed under a different
+// owner) ends up owned by the broker.
+//
+// Designed to be called from the partition-init initContainer where the chart
+// runs us as root. In dev mode (running as a normal user) the chown is skipped
+// — dataDir is then already owned by us, and chmod is a no-op or returns EPERM
+// which we tolerate.
+func ensureDataDirPerms(dataDir string, uid, gid int) error {
+	if err := os.Chmod(dataDir, 0o775); err != nil && !os.IsPermission(err) {
+		return fmt.Errorf("chmod %s: %w", dataDir, err)
+	}
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	return filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chown(path, uid, gid)
+	})
 }
 
 func buildK8sClient() (kubernetes.Interface, error) {
@@ -706,6 +749,15 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envOrInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }

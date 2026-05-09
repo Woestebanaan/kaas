@@ -29,6 +29,18 @@ spec:
           image: {{ include "skafka.brokerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["--init"]
+          # Run as root so we can chown the data dir to the broker uid/gid
+          # before exiting (skafka#110). When the PVC comes back as
+          # root-owned and fsGroupChangePolicy=OnRootMismatch silently skips
+          # the recursive perm fix, the broker container (uid 65532) can't
+          # mkdir new topic dirs at runtime. The init container's chown is
+          # idempotent on warm restarts and mirrors Strimzi's volume-mount-
+          # hack pattern. The broker container itself still runs as 65532
+          # under the pod-level securityContext.
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
           env:
             - name: SKAFKA_DATA_DIR
               value: {{ .Values.storage.mountPath }}
@@ -36,6 +48,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: SKAFKA_BROKER_UID
+              value: "{{ .Values.broker.podSecurityContext.runAsUser | default 65532 }}"
+            - name: SKAFKA_BROKER_GID
+              value: "{{ .Values.broker.podSecurityContext.runAsGroup | default 65532 }}"
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}
