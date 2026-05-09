@@ -48,10 +48,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Templated from podSecurityContext directly. Don't add `| default`
+            # here — sprig's `default` treats 0 as empty, which would silently
+            # rewrite runAsGroup=0 (Strimzi-modern primary-GID-0 convention)
+            # back to 65532 and break the kubelet-fsGroup path.
             - name: SKAFKA_BROKER_UID
-              value: "{{ .Values.broker.podSecurityContext.runAsUser | default 65532 }}"
+              value: "{{ .Values.broker.podSecurityContext.runAsUser }}"
             - name: SKAFKA_BROKER_GID
-              value: "{{ .Values.broker.podSecurityContext.runAsGroup | default 65532 }}"
+              value: "{{ .Values.broker.podSecurityContext.runAsGroup }}"
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}

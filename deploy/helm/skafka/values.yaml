@@ -35,21 +35,34 @@ broker:
     limits:
       cpu: 2
       memory: 4Gi
-  # Pod-level securityContext. The broker image runs USER nonroot:nonroot
-  # (distroless's UID/GID 65532). The partition-init initContainer
-  # overrides this to run as root (uid 0) so it can chown the data dir
-  # to 65532:65532 before exiting — see broker-statefulset.yaml and
-  # skafka#110. fsGroup is still set as a defence-in-depth signal for
-  # the kubelet, but the chart no longer relies on it: some PVC
-  # provisioners (k3s local-path, NFS exports) hand back root-owned
-  # dirs that confuse fsGroupChangePolicy=OnRootMismatch into a no-op,
-  # leaving /data at 0755 with no group-write. The init-container
-  # chown bypasses that entirely.
+  # Pod-level securityContext. Defence-in-depth permission handling for
+  # the shared data PVC (skafka#110): two independent mechanisms both
+  # land /data writable for the broker process.
+  #
+  #   1. Strimzi-modern path (works on cooperating CSI drivers).
+  #      runAsGroup=0 + fsGroup=0 + image-default UID 65532. Mirrors
+  #      Strimzi's "primary GID 0" Dockerfile convention. On any CSI
+  #      driver that honours fsGroup (block-mode CSI, EBS, local-path),
+  #      kubelet recursively chowns the volume to root group 0 with
+  #      mode 02775, and the broker — running as 65532:0 — has
+  #      group-write without further help.
+  #
+  #   2. Init-container floor (works regardless of CSI cooperation).
+  #      partition-init runs as uid 0 (see broker-statefulset.yaml) and
+  #      chowns -R /data to 65532:0 + chmods /data to 0775 before
+  #      exiting. This is the path that matters on shared NFS RWX
+  #      where most CSI drivers set fsGroupPolicy=None and the kubelet
+  #      skips the chown entirely.
+  #
+  # fsGroupChangePolicy=OnRootMismatch is the perf-friendly default for
+  # the kubelet path — when it would be a no-op we don't pay the
+  # recursive-walk cost. The init container always runs and is cheap on
+  # warm restart (chown of already-correct ownership is fast).
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 65532
-    runAsGroup: 65532
-    fsGroup: 65532
+    runAsGroup: 0
+    fsGroup: 0
     fsGroupChangePolicy: OnRootMismatch
   readinessGate:
     # Adds the skafka.io/PartitionsReady readinessGate to broker pods. Required
