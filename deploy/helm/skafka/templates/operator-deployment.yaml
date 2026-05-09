@@ -13,6 +13,10 @@ spec:
       labels: {{- include "skafka.operatorSelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "skafka.operatorSAName" . }}
+      {{- with .Values.operator.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: operator
           image: {{ include "skafka.operatorImage" . }}

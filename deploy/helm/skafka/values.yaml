@@ -16,6 +16,25 @@ operator:
     limits:
       cpu: 500m
       memory: 256Mi
+  # Pod-level securityContext mirrors the broker's defence-in-depth
+  # perms (skafka#110). The operator mounts the SAME data PVC and writes
+  # /data/__cluster/{credentials,acls}.json + per-topic dirs at reconcile
+  # time, so it needs the same kubelet-fsGroup signal.
+  #
+  # No partition-init initContainer here (unlike the broker): the
+  # operator's reconcile loop auto-retries on error, so when a fresh
+  # cluster boots the operator before the broker's partition-init has
+  # fixed perms, the operator's first few writes fail and the controller
+  # backs off + retries until /data is writable. The broker's init
+  # container is the floor that eventually unblocks it on NFS / non-
+  # cooperating CSI; on cooperating CSI the kubelet-fsGroup chown
+  # happens before the operator container starts.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 0
+    fsGroup: 0
+    fsGroupChangePolicy: OnRootMismatch
 
 broker:
   replicaCount: 3
