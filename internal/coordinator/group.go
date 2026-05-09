@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -288,7 +289,15 @@ func (g *group) sync(req *api.SyncGroupRequest) *api.SyncGroupResponse {
 		g.mu.Unlock()
 		return &api.SyncGroupResponse{ErrorCode: int16(codec.ErrIllegalGeneration)}
 	}
-	if g.state != stateCompletingRebalance {
+	// Apache's GroupCoordinator (gh #111): follower SyncGroup is valid in
+	// CompletingRebalance (wait for leader) AND Stable (assignments
+	// already cached — the leader finished first). Skafka previously
+	// rejected Stable with ErrRebalanceInProgress, which made any
+	// follower whose SyncGroupRequest arrived after the leader's
+	// re-join unnecessarily; with concurrent multi-pod consumers
+	// (kafka-consumer-perf-test parallelism=4) that race fired often
+	// enough to wedge the rebalance.
+	if g.state != stateCompletingRebalance && g.state != stateStable {
 		g.mu.Unlock()
 		return &api.SyncGroupResponse{ErrorCode: int16(codec.ErrRebalanceInProgress)}
 	}
@@ -312,6 +321,23 @@ func (g *group) sync(req *api.SyncGroupRequest) *api.SyncGroupResponse {
 		ss.mu.Lock()
 		for _, a := range req.Assignments {
 			ss.assignments[a.MemberID] = a.Assignment
+		}
+		// gh #111: Apache fills any member missing from the leader's
+		// payload with explicit empty bytes + warn log
+		// (GroupCoordinator.scala:605-609). This makes the broker's
+		// view explicit instead of inferring from a nil map lookup,
+		// and any future regression that drops a member shows up in
+		// the broker logs rather than as an opaque
+		// IllegalStateException on the client.
+		for memberID := range g.members {
+			if _, ok := ss.assignments[memberID]; !ok {
+				ss.assignments[memberID] = []byte{}
+				slog.Warn("syncgroup: leader omitted member from assignment, sending empty bytes",
+					"group", g.id,
+					"member", memberID,
+					"generation", g.generationID,
+					"leader", g.leaderID)
+			}
 		}
 		ss.mu.Unlock()
 		g.state = stateStable
