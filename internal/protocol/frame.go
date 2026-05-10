@@ -158,11 +158,21 @@ func flexibleRequestHeader(apiKey, apiVersion int16) bool {
 		20: 4,  // DeleteTopics
 		21: 2,  // DeleteRecords
 		22: 2,  // InitProducerId
+		24: 3,  // AddPartitionsToTxn (gh #23, flexibleVersions=3+)
+		26: 3,  // EndTxn (gh #25/#26, flexibleVersions=3+)
 		42: 2,  // DeleteGroups
 		29: 2,  // DescribeAcls
 		30: 2,  // CreateAcls
 		31: 2,  // DeleteAcls
 		36: 2,  // SaslAuthenticate
+		// DescribeCluster (gh #102): flexibleVersions=0+ per Apache
+		// schema — EVERY version uses REQUEST_HEADER_V2 with tagged
+		// fields. Pre-fix v0.1.93/94/95 hit "describe-cluster decode:
+		// unexpected EOF" on every kafbat-ui + Kafka Streams admin
+		// client (both fan out DescribeCluster v1 periodically) because
+		// the dispatcher used the legacy header and the handler then
+		// read from the wrong offset.
+		60: 0,
 	}
 	min, ok := flexibleMin[apiKey]
 	if !ok {

@@ -34,6 +34,21 @@ func TestFlexibleRequestHeaderCoverage(t *testing.T) {
 		{"DeleteRecords v0 not flexible", 21, 0, false},
 		{"DeleteRecords v1 not flexible", 21, 1, false},
 		{"DeleteRecords v2 flexible", 21, 2, true},
+		// gh #102 / v0.1.96 regression — DescribeCluster has
+		// flexibleVersions:"0+", so EVERY version is flexible. The
+		// v0.1.93 ship missed the map entry; kafbat-ui + Kafka
+		// Streams admin clients both fanout DescribeCluster v1 and
+		// got "describe-cluster decode: unexpected EOF" until v0.1.96.
+		{"DescribeCluster v0 flexible", 60, 0, true},
+		{"DescribeCluster v1 flexible", 60, 1, true},
+		// gh #23 / v0.1.94 — AddPartitionsToTxn flexibleVersions=3+.
+		{"AddPartitionsToTxn v0 not flexible", 24, 0, false},
+		{"AddPartitionsToTxn v2 not flexible", 24, 2, false},
+		{"AddPartitionsToTxn v3 flexible", 24, 3, true},
+		// gh #25/#26 / v0.1.95 — EndTxn flexibleVersions=3+.
+		{"EndTxn v0 not flexible", 26, 0, false},
+		{"EndTxn v2 not flexible", 26, 2, false},
+		{"EndTxn v3 flexible", 26, 3, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
