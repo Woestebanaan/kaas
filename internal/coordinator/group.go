@@ -68,6 +68,17 @@ type syncState struct {
 	mu          sync.Mutex
 	assignments map[string][]byte
 	done        chan struct{}
+	// canceled is set when the rebalance round is aborted (a new
+	// joiner bumped the group back to PreparingRebalance, or the
+	// group was shut down) before the leader stored assignments.
+	// Followers parked on <-done check this on wake and return
+	// REBALANCE_IN_PROGRESS instead of an empty assignment — the
+	// gh #111 cold-start race where the leader's SyncGroup lost
+	// the lock to a concurrent JoinGroup wave, leaving ss.assignments
+	// empty. Without this flag the follower's SyncGroupResponse
+	// carries 0 bytes and Java raises IllegalStateException
+	// ("insufficient bytes available to read assignment").
+	canceled bool
 }
 
 // group holds the in-memory state for one consumer group.
@@ -94,6 +105,24 @@ type group struct {
 	// their memberID across a network blip without polluting the
 	// rebalance — Apache's `pendingMembers` set in GroupMetadata.scala.
 	pendingMembers map[string]*time.Timer
+}
+
+// cancelSync marks ss as aborted and closes ss.done so any followers
+// parked in sync() wake and return REBALANCE_IN_PROGRESS. Idempotent:
+// safe to call multiple times even after the leader already closed
+// done normally. Caller must hold g.mu.
+func cancelSync(ss *syncState) {
+	select {
+	case <-ss.done:
+		// Already closed by the leader (delivered) or a previous
+		// cancel — leave canceled flag as-is so an already-delivered
+		// round isn't retroactively flipped to canceled.
+	default:
+		ss.mu.Lock()
+		ss.canceled = true
+		ss.mu.Unlock()
+		close(ss.done)
+	}
 }
 
 func newGroup(id string) *group {
@@ -177,11 +206,7 @@ func (g *group) join(req *api.JoinGroupRequest, version int16, clientID string) 
 		g.startRebalanceTimer(false)
 		// Cancel pending sync so blocked SyncGroup calls unblock with REBALANCE_IN_PROGRESS.
 		if g.currentSync != nil {
-			select {
-			case <-g.currentSync.done:
-			default:
-				close(g.currentSync.done)
-			}
+			cancelSync(g.currentSync)
 			g.currentSync = nil
 		}
 	case statePreparingRebalance:
@@ -351,8 +376,21 @@ func (g *group) sync(req *api.SyncGroupRequest) *api.SyncGroupResponse {
 	<-ss.done
 
 	ss.mu.Lock()
+	canceled := ss.canceled
 	assignment := ss.assignments[memberID]
 	ss.mu.Unlock()
+
+	// gh #111 cold-start race: ss.done can be closed by a concurrent
+	// joiner that bumped the group back to PreparingRebalance before
+	// the leader stored assignments. Without this gate the follower
+	// returns errorCode=NONE with a 0-byte assignment, which Java's
+	// ConsumerCoordinator.onJoinComplete rejects as
+	// IllegalStateException ("insufficient bytes available to read
+	// assignment"). REBALANCE_IN_PROGRESS makes the client re-join
+	// the next generation cleanly.
+	if canceled {
+		return &api.SyncGroupResponse{ErrorCode: int16(codec.ErrRebalanceInProgress)}
+	}
 
 	return &api.SyncGroupResponse{
 		Assignment:   assignment,
@@ -557,11 +595,7 @@ func (g *group) shutdown() {
 		g.rebalanceTimer = nil
 	}
 	if g.currentSync != nil {
-		select {
-		case <-g.currentSync.done:
-		default:
-			close(g.currentSync.done)
-		}
+		cancelSync(g.currentSync)
 		g.currentSync = nil
 	}
 	g.state = stateDead

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
 
@@ -157,5 +158,95 @@ func TestSyncGroupConcurrentLeaderFirstFollowerSecond(t *testing.T) {
 	if followerResp.ErrorCode != 0 || string(followerResp.Assignment) != "F" {
 		t.Errorf("follower: errorCode=%d assignment=%q (want 0/F)",
 			followerResp.ErrorCode, followerResp.Assignment)
+	}
+}
+
+// TestSyncGroupCanceledByConcurrentJoinReturnsRebalanceInProgress
+// guards the gh #111 cold-start race surfaced by the v0.1.89
+// scripts/bench sweep on multi-cg-c. The follower is parked inside
+// sync() on <-ss.done. While it's parked, a fresh JoinGroup arrives
+// (a 5th consumer pod cold-starting), bumping the group from
+// CompletingRebalance → PreparingRebalance and cancelling the
+// in-flight syncState BEFORE the leader stored assignments. Pre-fix
+// the follower woke up, read ss.assignments[its-id]=nil, and returned
+// errorCode=NONE with a 0-byte assignment — Java raised
+// IllegalStateException. Post-fix the canceled flag forces
+// REBALANCE_IN_PROGRESS so the client cleanly re-joins the next round.
+func TestSyncGroupCanceledByConcurrentJoinReturnsRebalanceInProgress(t *testing.T) {
+	g := newGroup("test-cg")
+	g.members["leader"] = &groupMember{id: "leader", protocols: []api.JoinGroupProtocol{{Name: "range"}}}
+	g.members["follower"] = &groupMember{id: "follower", protocols: []api.JoinGroupProtocol{{Name: "range"}}}
+	g.leaderID = "leader"
+	g.generationID = 1
+	g.protocolType = "consumer"
+	g.protocolName = "range"
+	g.state = stateCompletingRebalance
+	g.currentSync = &syncState{
+		assignments: map[string][]byte{},
+		done:        make(chan struct{}),
+	}
+
+	// Park the follower inside sync(); it'll block on <-ss.done.
+	respCh := make(chan *api.SyncGroupResponse, 1)
+	go func() {
+		respCh <- g.sync(&api.SyncGroupRequest{MemberID: "follower", GenerationID: 1})
+	}()
+
+	// Let the follower actually enter the wait.
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate a fresh joiner cancelling the round before the leader
+	// stored anything. Mirrors the join() path at the
+	// stateCompletingRebalance arm: bump state and cancel the sync.
+	g.mu.Lock()
+	g.state = statePreparingRebalance
+	cancelSync(g.currentSync)
+	g.currentSync = nil
+	g.mu.Unlock()
+
+	resp := <-respCh
+	if resp.ErrorCode != int16(codec.ErrRebalanceInProgress) {
+		t.Fatalf("expected REBALANCE_IN_PROGRESS (%d), got %d (assignment=%q len=%d)",
+			codec.ErrRebalanceInProgress, resp.ErrorCode, resp.Assignment, len(resp.Assignment))
+	}
+	if len(resp.Assignment) != 0 {
+		t.Fatalf("canceled response should have empty assignment, got %d bytes", len(resp.Assignment))
+	}
+}
+
+// TestSyncGroupNotCanceledAfterLeaderStored guards the inverse: a
+// normal leader-completes-first delivery must NOT be flipped to
+// REBALANCE_IN_PROGRESS by a late cancel. cancelSync's already-closed
+// branch should leave canceled=false.
+func TestSyncGroupNotCanceledAfterLeaderStored(t *testing.T) {
+	g := newGroup("test-cg")
+	g.members["leader"] = &groupMember{id: "leader"}
+	g.members["follower"] = &groupMember{id: "follower"}
+	g.leaderID = "leader"
+	g.generationID = 1
+	g.protocolType = "consumer"
+	g.protocolName = "range"
+	g.state = stateStable
+	ss := &syncState{
+		assignments: map[string][]byte{
+			"leader":   []byte("L"),
+			"follower": []byte("F"),
+		},
+		done: make(chan struct{}),
+	}
+	close(ss.done) // simulate leader-delivered close
+	g.currentSync = ss
+
+	// Now a fresh joiner cancels — ss.done is already closed, so
+	// cancelSync should see the closed channel and skip flipping
+	// canceled. The follower's later sync() must return its assignment.
+	cancelSync(ss)
+
+	resp := g.sync(&api.SyncGroupRequest{MemberID: "follower", GenerationID: 1})
+	if resp.ErrorCode != 0 {
+		t.Fatalf("expected ErrNone, got %d", resp.ErrorCode)
+	}
+	if string(resp.Assignment) != "F" {
+		t.Fatalf("expected F, got %q", resp.Assignment)
 	}
 }
