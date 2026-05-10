@@ -86,7 +86,7 @@ func readProducerSnapshot(dir string) (map[int64]*producerEntry, error) {
 // removing the file) so a future read sees the explicit "this
 // partition had producers but the state was cleared" signal.
 func writeProducerSnapshot(dir string, states map[int64]*producerEntry) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o775); err != nil {
 		return err
 	}
 

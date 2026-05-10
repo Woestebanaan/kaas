@@ -41,7 +41,7 @@ func (s *OffsetStore) dir() string {
 // Commit atomically writes the committed offsets for a group.
 // offsets maps "topic/partition" → committed offset.
 func (s *OffsetStore) Commit(groupID string, offsets map[string]int64) error {
-	if err := os.MkdirAll(s.dir(), 0755); err != nil {
+	if err := os.MkdirAll(s.dir(), 0o775); err != nil {
 		return err
 	}
 

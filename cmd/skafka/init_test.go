@@ -3,11 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
 // TestEnsureDataDirPermsChmodsRoot verifies that ensureDataDirPerms always
-// applies 0775 to dataDir so the broker (running under fsGroup) can mkdir
+// applies 0o775 to dataDir so the broker (running under fsGroup) can mkdir
 // new topic dirs at runtime, even when the partition-init initContainer
 // somehow runs as a non-root user (dev mode).
 func TestEnsureDataDirPermsChmodsRoot(t *testing.T) {
@@ -55,5 +56,44 @@ func TestEnsureDataDirPermsMissingDir(t *testing.T) {
 	err := ensureDataDirPerms(missing, os.Geteuid(), os.Getegid())
 	if err == nil {
 		t.Fatal("expected error for missing dir, got nil")
+	}
+}
+
+// TestLayerCStorageEngineUsesGroupWriteMkdir is the gh #110 layer-C
+// invariant: every runtime MkdirAll under /data uses 0o775 so a missing
+// init container can't cause a future cross-pod-write failure. Pinned
+// here as a static check — guards against future "I'll just use 0o755"
+// PRs that would silently re-introduce the original bug. Layers A
+// (kubelet fsGroup), B (init container chown + chmod), C (every
+// MkdirAll uses group-write) form the defence-in-depth stack.
+func TestLayerCStorageEngineUsesGroupWriteMkdir(t *testing.T) {
+	files := []string{
+		"../../internal/storage/engine.go",
+		"../../internal/storage/manifest.go",
+		"../../internal/storage/producer_snapshot.go",
+		"../../internal/storage/topicconfig.go",
+		"../../internal/coordinator/txn_state.go",
+		"../../internal/coordinator/offsets.go",
+		"../../internal/coordinator/fence_log.go",
+		"../../internal/assignment/store.go",
+		"../../internal/fsutil/filewatch.go",
+		"../../operator/controllers/acls.go",
+		"../../operator/controllers/credentials.go",
+		"../../operator/controllers/kafkatopic_controller.go",
+		"main.go",
+	}
+	// Modes WITHOUT group-write that would re-introduce gh #110:
+	// 0o755 (rwxr-xr-x), 0o750 (rwxr-x---), 0o700 (rwx------).
+	// Match Go's two octal forms: `0755` (legacy) and `0o755`.
+	bad := regexp.MustCompile(`MkdirAll\([^,]+,\s*(0o?755|0o?750|0o?700)\b`)
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		if matches := bad.FindAllString(string(data), -1); len(matches) > 0 {
+			t.Errorf("%s contains %d no-group-write MkdirAll callsite(s) — would re-introduce gh #110 layer-C breakage:\n  %v",
+				f, len(matches), matches)
+		}
 	}
 }

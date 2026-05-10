@@ -47,7 +47,7 @@ func ReadTopicConfig(topicDir string) (*TopicConfigFile, error) {
 // WriteTopicConfig atomically writes the per-topic config file. Used by
 // the operator's KafkaTopic reconciler.
 func WriteTopicConfig(topicDir string, c *TopicConfigFile) error {
-	if err := os.MkdirAll(topicDir, 0o755); err != nil {
+	if err := os.MkdirAll(topicDir, 0o775); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(c, "", "  ")

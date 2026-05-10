@@ -113,7 +113,7 @@ func NewTxnStateStore(dir string, numSlots int) (*TxnStateStore, error) {
 		numSlots = DefaultNumSlots
 	}
 	slotDir := filepath.Join(dir, "txn_state")
-	if err := os.MkdirAll(slotDir, 0o755); err != nil {
+	if err := os.MkdirAll(slotDir, 0o775); err != nil {
 		return nil, err
 	}
 	s := &TxnStateStore{

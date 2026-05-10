@@ -662,16 +662,28 @@ func runInit(ctx context.Context) {
 	slog.Info("init complete", "topics", len(topicList.Items))
 }
 
-// ensureDataDirPerms makes dataDir writable by the broker process (uid:gid).
-// Always sets dataDir's mode to 0775 so the broker can mkdir new topic dirs at
-// runtime; if running as root, also recursively chowns the entire tree to
-// uid:gid so anything we just created (or that pre-existed under a different
-// owner) ends up owned by the broker.
+// ensureDataDirPerms is layer B of the gh #110 defence-in-depth
+// stack: kubelet's fsGroup (layer A) might silently fail on
+// non-cooperating CSI drivers; this initContainer runs as root and
+// makes the data dir writable by the broker process (uid:gid).
+// Layer C (the storage engine's MkdirAll modes) gives every
+// runtime-created subdirectory the same shape so even a missing
+// init container can't cause a future cross-pod-write failure.
 //
-// Designed to be called from the partition-init initContainer where the chart
-// runs us as root. In dev mode (running as a normal user) the chown is skipped
-// — dataDir is then already owned by us, and chmod is a no-op or returns EPERM
-// which we tolerate.
+// Walk semantics:
+//   - chown every entry to (uid, gid) so anything pre-existing
+//     under root or another owner ends up owned by the broker.
+//   - chmod every DIRECTORY to 0o775 (setgid + 0775). The setgid
+//     bit makes new children inherit the dir's group, so files
+//     created later by the broker (gid=0 via runAsGroup) keep
+//     that group regardless of the broker's umask. Files keep
+//     their existing modes — no need to chmod them.
+//
+// In dev mode (running as a normal user) chown is skipped — dataDir
+// is then already owned by us, and chmod returns EPERM which we
+// tolerate. Layer A + C carry the cluster on cooperating CSI;
+// layer B + C carry it on non-cooperating CSI; only the absence of
+// ALL THREE breaks topic creation.
 func ensureDataDirPerms(dataDir string, uid, gid int) error {
 	if err := os.Chmod(dataDir, 0o775); err != nil && !os.IsPermission(err) {
 		return fmt.Errorf("chmod %s: %w", dataDir, err)
@@ -683,7 +695,15 @@ func ensureDataDirPerms(dataDir string, uid, gid int) error {
 		if err != nil {
 			return err
 		}
-		return os.Chown(path, uid, gid)
+		if err := os.Chown(path, uid, gid); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if err := os.Chmod(path, 0o775); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

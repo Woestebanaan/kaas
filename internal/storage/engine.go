@@ -409,7 +409,7 @@ func (ps *partitionState) persistManifestLocked() error {
 
 // NewDiskStorageEngine opens (or creates) the data directory and loads all existing partitions.
 func NewDiskStorageEngine(dataDir string, leases lease.LeaseManager, cfg Config) (*DiskStorageEngine, error) {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o775); err != nil {
 		return nil, err
 	}
 	e := &DiskStorageEngine{
@@ -473,7 +473,7 @@ func (e *DiskStorageEngine) CreatePartition(topic string, partition int32) error
 	e.mu.Unlock()
 
 	dir := filepath.Join(e.dataDir, topic, strconv.Itoa(int(partition)))
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o775); err != nil {
 		return err
 	}
 	return e.openPartition(topic, partition)

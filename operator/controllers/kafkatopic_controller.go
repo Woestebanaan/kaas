@@ -93,7 +93,7 @@ func (r *KafkaTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Create partition directories (idempotent).
 	for p := int32(0); p < topic.Spec.Partitions; p++ {
 		dir := filepath.Join(r.DataDir, topicName, strconv.Itoa(int(p)))
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0o775); err != nil {
 			return ctrl.Result{}, fmt.Errorf("mkdir partition %d: %w", p, err)
 		}
 	}

@@ -196,7 +196,7 @@ func setupFsnotify(files []FileSpec) *fsnotify.Watcher {
 		}
 		// MkdirAll ensures fsnotify doesn't fail on a not-yet-created
 		// staging dir (e.g. /data/__cluster on a fresh broker startup).
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0o775); err != nil {
 			continue
 		}
 		if err := w.Add(dir); err != nil {

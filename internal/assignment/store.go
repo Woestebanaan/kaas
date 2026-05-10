@@ -142,7 +142,7 @@ func (s *FileStore) writeImpl(a *kafkaapi.Assignment) error {
 	if a == nil {
 		return errors.New("assignment: nil Assignment")
 	}
-	if err := os.MkdirAll(s.dir(), 0755); err != nil {
+	if err := os.MkdirAll(s.dir(), 0o775); err != nil {
 		return err
 	}
 

@@ -76,7 +76,7 @@ func readManifest(dir string) (*Manifest, error) {
 // directory (NFSv4 guarantees same-directory rename atomicity). The tmp file
 // is fsync'd before rename so a crash mid-write leaves no torn JSON.
 func writeManifest(dir string, m *Manifest) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o775); err != nil {
 		return err
 	}
 

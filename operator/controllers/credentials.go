@@ -73,7 +73,7 @@ func readCredentials(dataDir string) (*CredentialsFile, error) {
 
 // writeCredentials atomically writes the credentials file (tmp + rename).
 func writeCredentials(dataDir string, cf *CredentialsFile) error {
-	if err := os.MkdirAll(filepath.Join(dataDir, "__cluster"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dataDir, "__cluster"), 0o775); err != nil {
 		return err
 	}
 	cf.Version = 1

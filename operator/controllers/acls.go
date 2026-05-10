@@ -76,7 +76,7 @@ func reconcileACLs(ctx context.Context, c client.Client, namespace, dataDir stri
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Join(dataDir, "__cluster"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dataDir, "__cluster"), 0o775); err != nil {
 		return err
 	}
 	return writeAtomic(aclsPath(dataDir), &ACLFile{Version: 1, ACLs: entries})

@@ -45,7 +45,7 @@ func NewFenceLog(dir, brokerID string) (*FenceLog, error) {
 	if brokerID == "" {
 		return nil, errors.New("fence log: empty broker ID")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o775); err != nil {
 		return nil, err
 	}
 	return &FenceLog{
