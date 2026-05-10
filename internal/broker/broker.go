@@ -6,6 +6,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -134,6 +135,12 @@ type Broker struct {
 	// updates only the local TopicRegistry, which is invisible to
 	// peer brokers (broken in multi-broker production).
 	topicCRWriter handlers.TopicCRWriter
+
+	// txnStore is the per-broker TxnStateStore wired into both
+	// InitProducerId (gh #22 epoch fence) and AddPartitionsToTxn
+	// (gh #23 per-txn partition tracking). Nil in dev-mode or when
+	// the dataDir is in-memory.
+	txnStore *coordinator.TxnStateStore
 }
 
 func New(
@@ -346,8 +353,9 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 				numSlots = n
 			}
 		}
-		if txnStore, err := coordinator.NewTxnStateStore(clusterDir, numSlots); err == nil {
-			initPIDHandler = initPIDHandler.WithTxnStateStore(txnStore)
+		if store, err := coordinator.NewTxnStateStore(clusterDir, numSlots); err == nil {
+			initPIDHandler = initPIDHandler.WithTxnStateStore(store)
+			b.txnStore = store
 		} else {
 			slog.Warn("InitProducerId: TxnStateStore disabled (gh #22 epoch fence inactive)",
 				"clusterDir", clusterDir, "err", err)
@@ -393,6 +401,19 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 		initPIDHandler = initPIDHandler.WithTxnOwnership(ownership)
 	}
 	d.Register(22, 0, 4, initPIDHandler)
+	// gh #23: AddPartitionsToTxn (key 24) v0–v3. Wired only when the
+	// txn store is up; otherwise the registration is skipped and
+	// clients see UNSUPPORTED_VERSION (negotiated via ApiVersions),
+	// which is honest given a missing store can't track per-txn
+	// partition lists. The handler reuses the gh #91 OwnsTxn gate
+	// for routing.
+	if b.txnStore != nil {
+		addPartHandler := handlers.NewAddPartitionsToTxnHandler(&txnPartitionStoreAdapter{store: b.txnStore})
+		if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
+			addPartHandler = addPartHandler.WithTxnOwnership(ownership)
+		}
+		d.Register(24, 0, 3, addPartHandler)
+	}
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())
@@ -465,3 +486,37 @@ func fmtExternalHost(pattern string, ordinal int32) string {
 }
 
 var _ handlers.BrokerSource = (*K8sBrokerSource)(nil)
+
+// txnPartitionStoreAdapter wraps coordinator.TxnStateStore so it
+// satisfies handlers.TxnPartitionStore. The two interfaces are
+// near-identical; the adapter exists only to translate
+// coordinator's sentinel errors to the handler-package sentinels
+// (which avoids a handlers→coordinator import cycle), and to
+// convert the codec-aware [] handlers.TxnPartitionAddition into
+// [] coordinator.TxnTopic. gh #23.
+type txnPartitionStoreAdapter struct {
+	store *coordinator.TxnStateStore
+}
+
+func (a *txnPartitionStoreAdapter) AddPartitions(txnID string, pid int64, epoch int16, additions []handlers.TxnPartitionAddition) error {
+	tt := make([]coordinator.TxnTopic, 0, len(additions))
+	for _, add := range additions {
+		tt = append(tt, coordinator.TxnTopic{
+			Topic:      add.Topic,
+			Partitions: append([]int32(nil), add.Partitions...),
+		})
+	}
+	if err := a.store.AddPartitions(txnID, pid, epoch, tt); err != nil {
+		switch {
+		case errors.Is(err, coordinator.ErrEmptyTxnID):
+			return handlers.ErrTxnPartitionEmptyID
+		case errors.Is(err, coordinator.ErrTxnUnknownProducer):
+			return handlers.ErrTxnPartitionUnknownProducer
+		case errors.Is(err, coordinator.ErrTxnEpochFenced):
+			return handlers.ErrTxnPartitionEpochFenced
+		default:
+			return err
+		}
+	}
+	return nil
+}

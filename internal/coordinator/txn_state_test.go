@@ -444,7 +444,7 @@ func TestTxnStateMigrateLayoutFromLargerNumSlots(t *testing.T) {
 			t.Errorf("entry %q lost during shrink-migration", txnID)
 			continue
 		}
-		if got != expected {
+		if !txnEntriesEqual(got, expected) {
 			t.Errorf("%q changed: got %+v, want %+v", txnID, got, expected)
 		}
 	}
@@ -614,7 +614,7 @@ func TestTxnStateMigrateLayoutIsIdempotent(t *testing.T) {
 		t.Errorf("entry count diverged after idempotent re-migration: %d → %d", len(snap1), len(snap2))
 	}
 	for k, v := range snap1 {
-		if got := snap2[k]; got != v {
+		if got := snap2[k]; !txnEntriesEqual(got, v) {
 			t.Errorf("idempotent migration altered %q: %+v → %+v", k, v, got)
 		}
 	}
@@ -649,5 +649,190 @@ func TestTxnStateSlotFileLayout(t *testing.T) {
 		if n < 0 || n >= numSlots {
 			t.Errorf("slot index %d out of range [0,%d)", n, numSlots)
 		}
+	}
+}
+
+// TestAddPartitionsRejectsEmptyTxnID pins the gh #23 input check.
+// Apache Kafka's handleAddPartitionsToTransaction returns
+// INVALID_REQUEST for an empty/null transactionalId; the storage
+// layer surfaces a sentinel that the handler maps to the wire code.
+func TestAddPartitionsRejectsEmptyTxnID(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.AddPartitions("", 1, 0, []TxnTopic{{Topic: "t", Partitions: []int32{0}}}); err == nil {
+		t.Fatal("expected ErrEmptyTxnID, got nil")
+	}
+}
+
+// TestAddPartitionsRejectsUnknownTxn: AddPartitions before
+// InitProducerId should fail with ErrTxnUnknownProducer (handler
+// maps to INVALID_PRODUCER_ID_MAPPING). Apache equivalent:
+// `getTransactionState(transactionalId)` returns None.
+func TestAddPartitionsRejectsUnknownTxn(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	err = s.AddPartitions("never-init", 100, 0, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	if err != ErrTxnUnknownProducer {
+		t.Fatalf("got %v, want ErrTxnUnknownProducer", err)
+	}
+}
+
+// TestAddPartitionsRejectsPIDMismatch: the (txnID, PID) tuple must
+// match the persisted entry exactly. A wrong PID could mean a stale
+// session that pre-dates an epoch rotation; surface
+// ErrTxnUnknownProducer so the handler returns
+// INVALID_PRODUCER_ID_MAPPING (Apache parity).
+func TestAddPartitionsRejectsPIDMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alloc, _ := allocCounter()
+	pid, epoch, err := s.GetOrAllocate("tx-pid-mismatch", alloc)
+	if err != nil {
+		t.Fatalf("alloc: %v", err)
+	}
+	err = s.AddPartitions("tx-pid-mismatch", pid+999, epoch, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	if err != ErrTxnUnknownProducer {
+		t.Fatalf("got %v, want ErrTxnUnknownProducer", err)
+	}
+}
+
+// TestAddPartitionsRejectsEpochMismatch: a stale-epoch caller
+// (zombie session that didn't see the rejoin) gets fenced.
+// Apache equivalent: PRODUCER_FENCED.
+func TestAddPartitionsRejectsEpochMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alloc, _ := allocCounter()
+	pid, epoch, err := s.GetOrAllocate("tx-epoch-mismatch", alloc)
+	if err != nil {
+		t.Fatalf("alloc: %v", err)
+	}
+	err = s.AddPartitions("tx-epoch-mismatch", pid, epoch-1, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	if err != ErrTxnEpochFenced {
+		t.Fatalf("got %v, want ErrTxnEpochFenced", err)
+	}
+}
+
+// TestAddPartitionsHappyPathPersists: a successful add unions the
+// partitions into the entry and persists the slot file.
+func TestAddPartitionsHappyPathPersists(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alloc, _ := allocCounter()
+	pid, epoch, err := s.GetOrAllocate("tx-happy", alloc)
+	if err != nil {
+		t.Fatalf("alloc: %v", err)
+	}
+	err = s.AddPartitions("tx-happy", pid, epoch, []TxnTopic{
+		{Topic: "alpha", Partitions: []int32{0, 4}},
+		{Topic: "beta", Partitions: []int32{2}},
+	})
+	if err != nil {
+		t.Fatalf("addPartitions: %v", err)
+	}
+
+	// Reopen the store from disk to confirm persistence.
+	s2, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	snap := s2.Snapshot()
+	got, ok := snap["tx-happy"]
+	if !ok {
+		t.Fatal("entry lost across reopen")
+	}
+	if got.PID != pid || got.Epoch != epoch {
+		t.Errorf("(PID, epoch) = (%d, %d), want (%d, %d)", got.PID, got.Epoch, pid, epoch)
+	}
+	if len(got.Partitions) != 2 {
+		t.Fatalf("expected 2 topic entries, got %d: %+v", len(got.Partitions), got.Partitions)
+	}
+}
+
+// TestAddPartitionsIdempotentReAdd is Apache's `subsetOf` shortcut:
+// re-adding a partition that's already in the entry returns nil
+// without rewriting the slot file. We can't easily observe "did it
+// rewrite?" from the public API, but we CAN observe that the
+// entry is unchanged and a follow-up call still sees the same
+// state.
+func TestAddPartitionsIdempotentReAdd(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-idem", alloc)
+	additions := []TxnTopic{{Topic: "t", Partitions: []int32{0, 1, 2}}}
+
+	if err := s.AddPartitions("tx-idem", pid, epoch, additions); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	// Re-add the same set — should be a no-op success.
+	if err := s.AddPartitions("tx-idem", pid, epoch, additions); err != nil {
+		t.Fatalf("second add (idempotent): %v", err)
+	}
+	// Add a partial-overlap set: one new partition (3), two already
+	// present (1, 2). Should succeed and union to {0,1,2,3}.
+	if err := s.AddPartitions("tx-idem", pid, epoch, []TxnTopic{
+		{Topic: "t", Partitions: []int32{1, 2, 3}},
+	}); err != nil {
+		t.Fatalf("partial-overlap: %v", err)
+	}
+
+	got := s.Snapshot()["tx-idem"]
+	if len(got.Partitions) != 1 {
+		t.Fatalf("expected 1 topic entry, got %d", len(got.Partitions))
+	}
+	if got.Partitions[0].Topic != "t" {
+		t.Fatalf("topic=%q, want t", got.Partitions[0].Topic)
+	}
+	want := map[int32]bool{0: true, 1: true, 2: true, 3: true}
+	for _, p := range got.Partitions[0].Partitions {
+		if !want[p] {
+			t.Errorf("unexpected partition %d in union", p)
+		}
+		delete(want, p)
+	}
+	if len(want) != 0 {
+		t.Errorf("missing partitions: %v", want)
+	}
+}
+
+// TestAddPartitionsAcrossMultipleTopics confirms different topics
+// in one call produce independent entries in entry.Partitions.
+func TestAddPartitionsAcrossMultipleTopics(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-multi", alloc)
+	if err := s.AddPartitions("tx-multi", pid, epoch, []TxnTopic{
+		{Topic: "alpha", Partitions: []int32{0}},
+		{Topic: "beta", Partitions: []int32{0, 1}},
+		{Topic: "gamma", Partitions: []int32{42}},
+	}); err != nil {
+		t.Fatalf("addPartitions: %v", err)
+	}
+	got := s.Snapshot()["tx-multi"]
+	if len(got.Partitions) != 3 {
+		t.Fatalf("expected 3 topic entries, got %d", len(got.Partitions))
 	}
 }

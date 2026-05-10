@@ -85,9 +85,27 @@ type TxnStateStore struct {
 // moves. Once Epoch saturates int16 we rotate to a fresh PID
 // (the InitProducerIdHandler does the rotation; TxnStateStore
 // just records what it's told).
+//
+// Partitions is the gh #23 per-txn partition list — every (topic,
+// partition) the producer has called AddPartitionsToTxn for in the
+// current transaction. Empty when no txn is in progress (the
+// implicit "Empty" state from Apache's TransactionState machine).
+// Mirrors `TransactionMetadata.topicPartitions` in
+// TransactionMetadata.scala. EndTxn (#25/#26) will clear this list
+// after writing the commit/abort marker.
 type TxnEntry struct {
-	PID   int64 `json:"pid"`
-	Epoch int16 `json:"epoch"`
+	PID        int64       `json:"pid"`
+	Epoch      int16       `json:"epoch"`
+	Partitions []TxnTopic  `json:"partitions,omitempty"`
+}
+
+// TxnTopic is one (topic, partitions) tuple inside a TxnEntry.
+// Apache's wire/storage shape uses TopicPartition (a single
+// (topic, int32) pair) but groups by topic on the wire to avoid
+// repeating the topic name; we store the same grouped form.
+type TxnTopic struct {
+	Topic      string  `json:"topic"`
+	Partitions []int32 `json:"partitions"`
 }
 
 // NewTxnStateStore opens the per-cluster transactional-state dir.
@@ -182,6 +200,143 @@ func (s *TxnStateStore) GetOrAllocate(txnID string, alloc func() int64) (int64, 
 		return 0, 0, err
 	}
 	return entry.PID, entry.Epoch, nil
+}
+
+// AddPartitions records that the producer at (txnID, pid, epoch) has
+// added the listed (topic, partitions) tuples to its in-progress
+// transaction. gh #23 — mirrors Apache's
+// TransactionCoordinator.handleAddPartitionsToTransaction.
+//
+// Validation order matches Apache:
+//  1. txnID empty → ErrEmptyTxnID
+//  2. No entry for txnID → ErrTxnUnknownProducer (caller maps to
+//     INVALID_PRODUCER_ID_MAPPING)
+//  3. PID mismatch → ErrTxnUnknownProducer
+//  4. Epoch mismatch → ErrTxnEpochFenced (caller maps to
+//     PRODUCER_FENCED)
+//  5. Otherwise: union the partition list into entry.Partitions and
+//     persist atomically. Idempotent — re-adding the same partitions
+//     is a no-op success (matches Apache's
+//     `partitions.subsetOf(txnMetadata.topicPartitions)` shortcut).
+//
+// Apache's full state machine has more rejection modes
+// (CONCURRENT_TRANSACTIONS for PrepareCommit/PrepareAbort,
+// pendingTransitionInProgress, etc). Skafka doesn't yet have a
+// state field — that lands with #25/#26 EndTxn. For now,
+// AddPartitions is always allowed when (txnID, PID, epoch) match.
+func (s *TxnStateStore) AddPartitions(txnID string, pid int64, epoch int16, additions []TxnTopic) error {
+	if txnID == "" {
+		return ErrEmptyTxnID
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	slot := s.slotFor(txnID)
+	state, err := s.loadSlot(slot)
+	if err != nil {
+		return err
+	}
+
+	entry, ok := state[txnID]
+	if !ok {
+		return ErrTxnUnknownProducer
+	}
+	if entry.PID != pid {
+		return ErrTxnUnknownProducer
+	}
+	if entry.Epoch != epoch {
+		return ErrTxnEpochFenced
+	}
+
+	if !mergePartitions(&entry, additions) {
+		// Every requested (topic, partitions) tuple was already
+		// recorded — Apache's idempotent shortcut, no log write.
+		return nil
+	}
+
+	state[txnID] = entry
+	return s.persistSlot(slot, state)
+}
+
+// mergePartitions unions additions into entry.Partitions in place.
+// Returns true if anything new was added (caller persists), false
+// if every (topic, partition) was already recorded (idempotent
+// no-op success — matches Apache's `subsetOf` shortcut).
+func mergePartitions(entry *TxnEntry, additions []TxnTopic) bool {
+	changed := false
+	for _, add := range additions {
+		idx := -1
+		for i := range entry.Partitions {
+			if entry.Partitions[i].Topic == add.Topic {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			// New topic — record all partitions.
+			entry.Partitions = append(entry.Partitions, TxnTopic{
+				Topic:      add.Topic,
+				Partitions: append([]int32(nil), add.Partitions...),
+			})
+			changed = true
+			continue
+		}
+		// Topic already tracked — union the partition list.
+		existing := entry.Partitions[idx].Partitions
+		for _, p := range add.Partitions {
+			present := false
+			for _, e := range existing {
+				if e == p {
+					present = true
+					break
+				}
+			}
+			if !present {
+				existing = append(existing, p)
+				changed = true
+			}
+		}
+		entry.Partitions[idx].Partitions = existing
+	}
+	return changed
+}
+
+// Sentinel errors mapped to Kafka error codes by the
+// AddPartitionsToTxnHandler (gh #23). Keeping the storage layer
+// transport-free lets the handler choose between v0-3 (per-
+// partition error code) and v4+ (top-level error code) shapes
+// without leaking codec types into the coordinator package.
+var (
+	ErrEmptyTxnID         = errors.New("txn state: empty transactional id")
+	ErrTxnUnknownProducer = errors.New("txn state: unknown txnID or pid mismatch")
+	ErrTxnEpochFenced     = errors.New("txn state: producer epoch fenced")
+)
+
+// txnEntriesEqual is a deep-equality helper. Necessary because
+// TxnEntry contains a slice (Partitions) — direct struct comparison
+// is a compile error.
+func txnEntriesEqual(a, b TxnEntry) bool {
+	if a.PID != b.PID || a.Epoch != b.Epoch {
+		return false
+	}
+	if len(a.Partitions) != len(b.Partitions) {
+		return false
+	}
+	for i := range a.Partitions {
+		if a.Partitions[i].Topic != b.Partitions[i].Topic {
+			return false
+		}
+		if len(a.Partitions[i].Partitions) != len(b.Partitions[i].Partitions) {
+			return false
+		}
+		for j := range a.Partitions[i].Partitions {
+			if a.Partitions[i].Partitions[j] != b.Partitions[i].Partitions[j] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Snapshot returns a copy of every txn entry across every slot.
@@ -410,7 +565,11 @@ func layoutsEqual(a, b map[int]map[string]TxnEntry) bool {
 			return false
 		}
 		for txnID, aEntry := range aState {
-			if bEntry, ok := bState[txnID]; !ok || aEntry != bEntry {
+			bEntry, ok := bState[txnID]
+			if !ok {
+				return false
+			}
+			if !txnEntriesEqual(aEntry, bEntry) {
 				return false
 			}
 		}

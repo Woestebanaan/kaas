@@ -39,6 +39,12 @@ const (
 	ErrOutOfOrderSequenceNumber    ErrorCode = 45
 	ErrDuplicateSequenceNumber     ErrorCode = 46
 	ErrInvalidProducerEpoch        ErrorCode = 47
+	// ErrInvalidProducerIDMapping (49) is what
+	// AddPartitionsToTransaction returns when the (transactionalID,
+	// PID) tuple is unknown to the coordinator — either no
+	// InitProducerId has been seen, or the PID in the request
+	// doesn't match the persisted entry. gh #23.
+	ErrInvalidProducerIDMapping    ErrorCode = 49
 	ErrTransactionalIdAuthFailed   ErrorCode = 53
 	ErrNonEmptyGroup               ErrorCode = 67
 	ErrGroupIDNotFound             ErrorCode = 69
@@ -53,5 +59,14 @@ const (
 	// initial request does not. Used to fence "zombie" members that
 	// reconnected with no memberID after a network blip.
 	ErrMemberIDRequired ErrorCode = 79
+
+	// ErrProducerFenced (90) is returned when an InitProducerId or
+	// AddPartitionsToTransaction arrives with an epoch that doesn't
+	// match the coordinator's stored entry — i.e. another session
+	// of the same transactional.id has bumped the epoch. The
+	// fenced producer must call initTransactions() (which
+	// re-allocates a fresh epoch) or surface the error to the
+	// application. Apache Kafka's `Errors.PRODUCER_FENCED`. gh #23.
+	ErrProducerFenced ErrorCode = 90
 )
 
