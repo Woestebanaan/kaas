@@ -83,6 +83,10 @@ spec:
                   fieldPath: metadata.namespace
             - name: SKAFKA_HEADLESS_SVC
               value: {{ include "skafka.headlessName" . }}
+            # gh #97: cluster DNS suffix for the per-broker FQDN
+            # advertised in MetadataResponse. See values.yaml comment.
+            - name: SKAFKA_CLUSTER_DOMAIN
+              value: {{ .Values.listeners.internal.clusterDomain | default "cluster.local" }}
             - name: SKAFKA_DATA_DIR
               value: {{ .Values.storage.mountPath }}
             - name: SKAFKA_CLUSTER_ID

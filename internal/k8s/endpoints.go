@@ -21,17 +21,31 @@ type BrokerEndpoint struct {
 }
 
 // BrokerRegistry maintains a live map of broker endpoints derived from EndpointSlice events.
+//
+// gh #97: each peer endpoint advertises the StatefulSet pod's FQDN
+// (e.g. "skafka-1.skafka-headless.skafka.svc.cluster.local"), not the
+// pod IP from EndpointSlice.Endpoints[].Addresses[0]. Pod IPs change
+// across restarts; the FQDN is stable. dns is set at construction
+// (zero value collapses to legacy IP-only behaviour for tests that
+// don't care about FQDNs).
 type BrokerRegistry struct {
 	self     BrokerEndpoint
+	dns      DNSConfig
 	onChange func([]BrokerEndpoint)
 
 	mu      sync.RWMutex
 	brokers map[int32]BrokerEndpoint // ordinal → endpoint
 }
 
-func NewBrokerRegistry(self BrokerEndpoint, onChange func([]BrokerEndpoint)) *BrokerRegistry {
+// NewBrokerRegistry constructs a registry. dns is the cluster DNS
+// shape (typically built once at startup from BrokerIdentity.DNS);
+// passing the zero value falls back to the EndpointSlice's pod IP
+// for peer hosts — fine for tests, broken under pod restart in
+// production.
+func NewBrokerRegistry(self BrokerEndpoint, dns DNSConfig, onChange func([]BrokerEndpoint)) *BrokerRegistry {
 	return &BrokerRegistry{
 		self:     self,
+		dns:      dns,
 		onChange: onChange,
 		brokers:  map[int32]BrokerEndpoint{self.NodeID: self},
 	}
@@ -143,7 +157,15 @@ func (r *BrokerRegistry) applySlice(es *discoveryv1.EndpointSlice) {
 		}
 		ready := ep.Conditions.Ready != nil && *ep.Conditions.Ready
 		if ready {
-			r.brokers[ordinal] = BrokerEndpoint{NodeID: ordinal, Host: ep.Addresses[0], Port: port, Ready: true}
+			// gh #97: prefer the per-broker FQDN over the pod IP
+			// so clients survive pod restarts. Fall back to the
+			// raw address only when DNS isn't configured (tests
+			// that pass a zero DNSConfig).
+			host := ep.Addresses[0]
+			if r.dns.HeadlessSvc != "" {
+				host = r.dns.FQDN(*ep.Hostname)
+			}
+			r.brokers[ordinal] = BrokerEndpoint{NodeID: ordinal, Host: host, Port: port, Ready: true}
 		} else {
 			delete(r.brokers, ordinal)
 		}

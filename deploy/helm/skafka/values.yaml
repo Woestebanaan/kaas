@@ -280,6 +280,22 @@ listeners:
     # Plaintext in-cluster listener. Always active; clients use headless DNS.
     port: 9092
 
+    # gh #97: cluster DNS suffix used to build the per-broker FQDN
+    # the broker advertises in MetadataResponse. Default works for
+    # >99% of k8s distros (kubeadm / k3s / EKS / GKE / AKS); override
+    # only if your cluster's CoreDNS uses a non-default domain (some
+    # on-prem installs, EKS clusters with privateDnsHostnames
+    # disabled).
+    #
+    # The advertised host is computed at runtime as:
+    #   {podName}.{headlessSvc}.{namespace}.svc.{clusterDomain}
+    #
+    # so a pod restart that gets a new IP doesn't invalidate clients'
+    # cached metadata — they re-resolve the same DNS name to the new
+    # IP. Mirrors the StatefulSet headless-Service per-pod DNS shape
+    # Strimzi uses for in-cluster traffic.
+    clusterDomain: cluster.local
+
   external:
     # External listener is opt-in. When disabled, no Certificate / per-broker
     # Service / TLSRoute is created; clients must use the internal headless DNS.

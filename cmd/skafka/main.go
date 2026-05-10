@@ -94,7 +94,7 @@ func runBroker(ctx context.Context) {
 		brokerID = identity.Ordinal
 
 		self := k8spkg.BrokerEndpoint{NodeID: identity.Ordinal, Host: identity.Host, Port: portNum, Ready: true}
-		brokerReg = k8spkg.NewBrokerRegistry(self, nil)
+		brokerReg = k8spkg.NewBrokerRegistry(self, identity.DNS, nil)
 		go func() {
 			if err := brokerReg.Watch(ctx, k8sClient, namespace, headlessSvc); err != nil && ctx.Err() == nil {
 				slog.Error("endpoint watcher stopped", "err", err)

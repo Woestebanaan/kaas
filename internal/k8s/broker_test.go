@@ -57,6 +57,62 @@ func TestNewBrokerIdentityBuildsFQDN(t *testing.T) {
 	if id.Host != want {
 		t.Errorf("Host=%q, want %q", id.Host, want)
 	}
+	// DNS sub-struct must be populated so BrokerRegistry can reuse
+	// the same shape for peer FQDNs (gh #97).
+	if id.DNS.HeadlessSvc != "skafka-headless" {
+		t.Errorf("DNS.HeadlessSvc=%q, want skafka-headless", id.DNS.HeadlessSvc)
+	}
+	if id.DNS.Namespace != "kafka" {
+		t.Errorf("DNS.Namespace=%q, want kafka", id.DNS.Namespace)
+	}
+	if id.DNS.ClusterDomain != "cluster.local" {
+		t.Errorf("DNS.ClusterDomain=%q, want cluster.local", id.DNS.ClusterDomain)
+	}
+}
+
+// TestNewBrokerIdentityHonorsClusterDomainEnv: gh #97. SKAFKA_CLUSTER_DOMAIN
+// overrides the default "cluster.local" — required for clusters whose
+// CoreDNS uses a non-default suffix.
+func TestNewBrokerIdentityHonorsClusterDomainEnv(t *testing.T) {
+	os.Setenv("MY_POD_NAME", "skafka-1")
+	os.Setenv("SKAFKA_CLUSTER_DOMAIN", "cluster.dev")
+	defer os.Unsetenv("MY_POD_NAME")
+	defer os.Unsetenv("SKAFKA_CLUSTER_DOMAIN")
+
+	id, err := NewBrokerIdentity("skafka", "skafka-headless", 9092)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "skafka-1.skafka-headless.skafka.svc.cluster.dev"
+	if id.Host != want {
+		t.Errorf("Host=%q, want %q", id.Host, want)
+	}
+	if id.DNS.ClusterDomain != "cluster.dev" {
+		t.Errorf("DNS.ClusterDomain=%q, want cluster.dev", id.DNS.ClusterDomain)
+	}
+}
+
+// TestDNSConfigFQDN pins the FQDN shape used by both BrokerIdentity
+// (self) and BrokerRegistry (peers). Drift between the two would
+// surface as a Metadata response inconsistency where self and peer
+// hosts disagree on the DNS suffix — clients hit DNS NXDOMAIN.
+func TestDNSConfigFQDN(t *testing.T) {
+	d := DNSConfig{
+		Namespace:     "skafka",
+		HeadlessSvc:   "skafka-headless",
+		ClusterDomain: "cluster.local",
+	}
+	cases := []struct{ pod, want string }{
+		{"skafka-0", "skafka-0.skafka-headless.skafka.svc.cluster.local"},
+		{"skafka-1", "skafka-1.skafka-headless.skafka.svc.cluster.local"},
+		{"skafka-broker-12", "skafka-broker-12.skafka-headless.skafka.svc.cluster.local"},
+	}
+	for _, tc := range cases {
+		got := d.FQDN(tc.pod)
+		if got != tc.want {
+			t.Errorf("FQDN(%q)=%q, want %q", tc.pod, got, tc.want)
+		}
+	}
 }
 
 func TestParseOrdinalFromIdentity(t *testing.T) {
