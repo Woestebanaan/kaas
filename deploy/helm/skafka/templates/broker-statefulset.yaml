@@ -83,8 +83,15 @@ spec:
                   fieldPath: metadata.namespace
             - name: SKAFKA_HEADLESS_SVC
               value: {{ include "skafka.headlessName" . }}
-            # gh #97: cluster DNS suffix for the per-broker FQDN
-            # advertised in MetadataResponse. See values.yaml comment.
+            # gh #97: per-broker ClusterIP Service name pattern (one
+            # Service per broker, see broker-per-pod-services.yaml).
+            # The broker advertises `<pattern>.<ns>.svc.<domain>` as
+            # its host in MetadataResponse, so cached metadata
+            # survives pod restarts (Service VIP stays stable; only
+            # the underlying pod IP changes). %d is replaced with
+            # the broker ordinal at runtime.
+            - name: SKAFKA_BROKER_SERVICE_PATTERN
+              value: "{{ include "skafka.fullname" . }}-broker-%d"
             - name: SKAFKA_CLUSTER_DOMAIN
               value: {{ .Values.listeners.internal.clusterDomain | default "cluster.local" }}
             - name: SKAFKA_DATA_DIR

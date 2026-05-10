@@ -157,13 +157,13 @@ func (r *BrokerRegistry) applySlice(es *discoveryv1.EndpointSlice) {
 		}
 		ready := ep.Conditions.Ready != nil && *ep.Conditions.Ready
 		if ready {
-			// gh #97: prefer the per-broker FQDN over the pod IP
-			// so clients survive pod restarts. Fall back to the
-			// raw address only when DNS isn't configured (tests
-			// that pass a zero DNSConfig).
+			// gh #97: prefer the per-broker Service FQDN over
+			// the pod IP so clients survive pod restarts. Fall
+			// back to the raw address only when DNS isn't
+			// configured (tests that pass a zero DNSConfig).
 			host := ep.Addresses[0]
-			if r.dns.HeadlessSvc != "" {
-				host = r.dns.FQDN(*ep.Hostname)
+			if r.dns.BrokerServicePattern != "" {
+				host = r.dns.FQDN(ordinal)
 			}
 			r.brokers[ordinal] = BrokerEndpoint{NodeID: ordinal, Host: host, Port: port, Ready: true}
 		} else {

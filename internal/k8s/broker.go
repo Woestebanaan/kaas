@@ -13,20 +13,28 @@ import (
 // (which the chart fills from values.yaml). Threaded through both
 // BrokerIdentity (self FQDN) and BrokerRegistry (peer FQDNs from
 // EndpointSlice events) so the two paths agree byte-for-byte.
+//
+// The FQDN points at a per-broker ClusterIP Service (Strimzi's
+// pattern: one Service per broker, deterministic name + stable
+// VIP). The Service VIP doesn't change across pod restarts; only
+// the underlying pod IP does, and kube-proxy follows it via the
+// pod-name selector. This is more robust than the StatefulSet
+// headless DNS shape, which depends on per-pod A records that
+// some non-default CoreDNS configs handle inconsistently.
 type DNSConfig struct {
-	Namespace     string
-	HeadlessSvc   string
-	ClusterDomain string // e.g. "cluster.local"; default for >99% of k8s distros
+	Namespace            string
+	BrokerServicePattern string // fmt-style with %d for ordinal, e.g. "skafka-broker-%d"
+	ClusterDomain        string // e.g. "cluster.local"; default for >99% of k8s distros
 }
 
-// FQDN builds the StatefulSet pod's per-broker DNS name:
+// FQDN builds the per-broker Service's DNS name:
 //
-//	<podName>.<headlessSvc>.<namespace>.svc.<clusterDomain>
+//	fmt.Sprintf(BrokerServicePattern, ordinal) + "." + Namespace + ".svc." + ClusterDomain
 //
-// e.g. "skafka-0.skafka-headless.skafka.svc.cluster.local". The
-// pod's IP changes across restarts; this DNS doesn't.
-func (d DNSConfig) FQDN(podName string) string {
-	return fmt.Sprintf("%s.%s.%s.svc.%s", podName, d.HeadlessSvc, d.Namespace, d.ClusterDomain)
+// e.g. "skafka-broker-0.skafka.svc.cluster.local".
+func (d DNSConfig) FQDN(ordinal int32) string {
+	svc := fmt.Sprintf(d.BrokerServicePattern, ordinal)
+	return fmt.Sprintf("%s.%s.svc.%s", svc, d.Namespace, d.ClusterDomain)
 }
 
 // BrokerIdentity holds the identity of this broker pod derived from the Kubernetes
@@ -55,6 +63,11 @@ func NewBrokerIdentity(namespace, headlessSvc string, port int32) (*BrokerIdenti
 	if headlessSvc == "" {
 		headlessSvc = envOr("SKAFKA_HEADLESS_SVC", "skafka-headless")
 	}
+	// Default broker-service pattern: assume the chart's StatefulSet
+	// metadata.name == "skafka" and the per-broker Service helper
+	// produces "skafka-broker-N". Override via env when the chart's
+	// fullname differs (e.g. multiple skafka clusters in one ns).
+	brokerSvcPattern := envOr("SKAFKA_BROKER_SERVICE_PATTERN", "skafka-broker-%d")
 	clusterDomain := envOr("SKAFKA_CLUSTER_DOMAIN", "cluster.local")
 
 	ordinal, err := parseOrdinal(podName)
@@ -63,15 +76,16 @@ func NewBrokerIdentity(namespace, headlessSvc string, port int32) (*BrokerIdenti
 	}
 
 	dns := DNSConfig{
-		Namespace:     namespace,
-		HeadlessSvc:   headlessSvc,
-		ClusterDomain: clusterDomain,
+		Namespace:            namespace,
+		BrokerServicePattern: brokerSvcPattern,
+		ClusterDomain:        clusterDomain,
 	}
+	_ = headlessSvc // retained for caller use (EndpointSlice peer-discovery), not part of FQDN
 	return &BrokerIdentity{
 		PodName:   podName,
 		Ordinal:   ordinal,
 		Namespace: namespace,
-		Host:      dns.FQDN(podName),
+		Host:      dns.FQDN(ordinal),
 		Port:      port,
 		DNS:       dns,
 	}, nil
