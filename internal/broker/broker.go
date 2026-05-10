@@ -454,6 +454,15 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 			b.coord.WireTxnOffsetHook(b.txnStore)
 		}
 	}
+
+	// gh #114: WriteTxnMarkers (key 27) v0–v1. Receives marker
+	// dispatch requests from txn coordinators after EndTxn; writes
+	// the COMMIT/ABORT control batch on the partition leader.
+	wtmHandler := handlers.NewWriteTxnMarkersHandler(b.store)
+	if owns, ok := b.brokerCoord.(handlers.WriteTxnMarkersOwnership); ok {
+		wtmHandler = wtmHandler.WithOwnership(owns)
+	}
+	d.Register(27, 0, 1, wtmHandler)
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())

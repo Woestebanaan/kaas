@@ -109,6 +109,14 @@ func classifyIdempotence(states map[int64]*producerEntry, info batchProducerInfo
 	if info.producerID < 0 {
 		return idemNotIdempotent, 0
 	}
+	// gh #114: a transactional control batch (COMMIT/ABORT marker)
+	// carries a real producerID but baseSequence=-1 and is exempt
+	// from the idempotence ring — the marker is a side-channel signal,
+	// not a producer-data batch. Apache's storage layer treats control
+	// batches as idempotence-transparent for the same reason.
+	if info.firstSeq < 0 {
+		return idemNotIdempotent, 0
+	}
 	entry, ok := states[info.producerID]
 	if !ok || info.epoch > entry.epoch {
 		// First batch ever from this PID, or a fresh-epoch reset
