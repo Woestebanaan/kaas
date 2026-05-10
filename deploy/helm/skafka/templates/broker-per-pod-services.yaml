@@ -35,6 +35,15 @@ spec:
     - name: kafka
       port: {{ $.Values.broker.ports.kafka }}
       targetPort: kafka
+    # Heartbeat: brokers dial each other's heartbeat port to reach the
+    # elected cluster controller (cluster_runtime.go's
+    # WithTargetFunc resolver). Without this port on the per-broker
+    # Service, heartbeats fail and the alive-set churns, which makes
+    # the partition-leader assignment oscillate and producers see a
+    # NOT_LEADER_OR_FOLLOWER stuck loop. Mirrors the headless service.
+    - name: heartbeat
+      port: {{ $.Values.broker.ports.heartbeat }}
+      targetPort: heartbeat
     {{- if $.Values.listeners.external.enabled }}
     - name: kafka-tls
       port: {{ $.Values.listeners.external.port | default $.Values.broker.ports.tls }}
