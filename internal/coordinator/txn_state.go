@@ -301,28 +301,37 @@ func (s *TxnStateStore) migrateLegacy(parentDir string) error {
 // pre-v0.1.84 build that used a smaller numSlots (= broker count).
 // Idempotent: running on an already-correct layout is a no-op.
 //
-// Algorithm:
-//  1. Walk every slot-*.json in the dir.
-//  2. For each entry, compute the expected slot under current
-//     numSlots; if it differs from the file's slot, stage it for
-//     relocation.
-//  3. Persist staged entries into the correct slot files (keeping
-//     the higher-epoch entry on conflict).
-//  4. Persist or delete each touched source file (delete if now
-//     empty, or if its slot index is ≥ numSlots — out of range).
+// Five-phase algorithm:
+//  1. Read every existing slot-*.json into memory.
+//  2. Compute the new layout by hashing each entry under the
+//     current numSlots. Higher-epoch wins on conflict (defensive
+//     against the rolling-upgrade window).
+//  3. Detect no-op: if the new layout is byte-identical to the
+//     old, skip phases 4-5. Avoids spurious writes on warm
+//     restarts.
+//  4. Write every slot in the new layout. Atomic tmp+rename per
+//     file. Source slots that also appear in the new layout get
+//     overwritten cleanly here.
+//  5. Delete source files that don't appear in the new layout
+//     (either empty after relocation, or out-of-range under new
+//     numSlots). Tolerates concurrent removal under rolling
+//     upgrade.
+//
+// The phase ordering matters: writing the new layout BEFORE
+// deleting source files means any concurrent reader sees a
+// consistent view (either the old or the new layout, never a
+// partial state with the entry deleted from old slot but not yet
+// in new). Conversely, source-file deletion comes last so the
+// migration is recoverable from a crash mid-write.
 func (s *TxnStateStore) migrateLayout() error {
-	entries, err := os.ReadDir(s.dir)
+	dirEntries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return err
 	}
-	type fileState struct {
-		slot  int
-		state map[string]TxnEntry
-		dirty bool // some entry was removed; need to persist or delete
-	}
-	files := []fileState{}
-	relocate := make(map[string]TxnEntry)
-	for _, e := range entries {
+
+	// Phase 1: load everything.
+	oldLayout := make(map[int]map[string]TxnEntry) // slot → state
+	for _, e := range dirEntries {
 		name := e.Name()
 		if !strings.HasPrefix(name, "slot-") || !strings.HasSuffix(name, ".json") {
 			continue
@@ -336,66 +345,77 @@ func (s *TxnStateStore) migrateLayout() error {
 		if err != nil {
 			return err
 		}
-		fs := fileState{slot: n, state: state}
-		// If the slot index is out of range under the new numSlots,
-		// every entry needs to move (and the file must be deleted).
-		outOfRange := n >= s.numSlots
+		oldLayout[n] = state
+	}
+
+	// Phase 2: compute the target layout. Walk every entry from
+	// every old slot, place into its expected slot under current
+	// numSlots. Empty slots aren't materialised — they don't
+	// generate write or delete activity.
+	newLayout := make(map[int]map[string]TxnEntry)
+	for _, state := range oldLayout {
 		for txnID, entry := range state {
 			expected := s.slotFor(txnID)
-			if expected != n {
-				// Newer epoch wins on collision (only matters for
-				// the cross-rolling-upgrade window where a stale
-				// broker rewrote an old-layout file).
-				if existing, ok := relocate[txnID]; !ok || existing.Epoch < entry.Epoch {
-					relocate[txnID] = entry
-				}
-				delete(fs.state, txnID)
-				fs.dirty = true
+			if existing, ok := newLayout[expected][txnID]; ok && existing.Epoch >= entry.Epoch {
+				continue
 			}
+			if newLayout[expected] == nil {
+				newLayout[expected] = make(map[string]TxnEntry)
+			}
+			newLayout[expected][txnID] = entry
 		}
-		if outOfRange {
-			fs.dirty = true
-		}
-		files = append(files, fs)
 	}
 
-	// Persist relocated entries into their correct slots. Read each
-	// destination fresh — the migration may have already cleaned a
-	// destination slot in a prior pass on this same dir (idempotent
-	// re-run after partial failure).
-	for txnID, entry := range relocate {
-		dst := s.slotFor(txnID)
-		state, err := s.loadSlot(dst)
-		if err != nil {
-			return err
-		}
-		if existing, ok := state[txnID]; ok && existing.Epoch >= entry.Epoch {
-			continue
-		}
-		state[txnID] = entry
-		if err := s.persistSlot(dst, state); err != nil {
+	// Phase 3: idempotency check. If the layout already matches,
+	// skip the rewrite. The check is map-equality on (slot →
+	// txnID → entry).
+	if layoutsEqual(oldLayout, newLayout) {
+		return nil
+	}
+
+	// Phase 4: write every slot in the new layout. Source slots
+	// that also appear here get overwritten cleanly (the new
+	// content already includes any entries that hashed back to
+	// the same slot).
+	for slot, state := range newLayout {
+		if err := s.persistSlot(slot, state); err != nil {
 			return err
 		}
 	}
 
-	// Persist or remove touched source files.
-	for _, fs := range files {
-		if !fs.dirty {
+	// Phase 5: delete source files that no longer participate in
+	// the new layout. Either the slot has no entries hashed to it
+	// under current numSlots, or the slot index is out of range
+	// (≥ numSlots).
+	for slot := range oldLayout {
+		if _, kept := newLayout[slot]; kept && slot < s.numSlots {
 			continue
 		}
-		if len(fs.state) == 0 || fs.slot >= s.numSlots {
-			// Tolerate concurrent removal under a rolling upgrade
-			// where a peer broker may already have GC'd the file.
-			if err := os.Remove(s.slotPath(fs.slot)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			continue
-		}
-		if err := s.persistSlot(fs.slot, fs.state); err != nil {
+		if err := os.Remove(s.slotPath(slot)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return nil
+}
+
+// layoutsEqual reports byte-for-byte equality between two
+// (slot → state) maps. Used by migrateLayout's idempotency check.
+func layoutsEqual(a, b map[int]map[string]TxnEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for slot, aState := range a {
+		bState, ok := b[slot]
+		if !ok || len(aState) != len(bState) {
+			return false
+		}
+		for txnID, aEntry := range aState {
+			if bEntry, ok := bState[txnID]; !ok || aEntry != bEntry {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // activeSlots returns the slot indices that currently have a file

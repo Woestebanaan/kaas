@@ -394,6 +394,200 @@ func TestTxnStateMigrateLayoutFromSmallerNumSlots(t *testing.T) {
 	}
 }
 
+// TestTxnStateMigrateLayoutFromLargerNumSlots is the inverse of the
+// upgrade test: a cluster previously running with numSlots=50 (or
+// any larger value) is reopened with numSlots=3. Out-of-range slot
+// files (slot index ≥ numSlots) must be removed; entries inside
+// must relocate to a valid slot. Exercises the
+// "outOfRange = n >= s.numSlots" branch in migrateLayout.
+func TestTxnStateMigrateLayoutFromLargerNumSlots(t *testing.T) {
+	dir := t.TempDir()
+	const oldNumSlots = 50
+	const newNumSlots = 3
+
+	old, _ := NewTxnStateStore(dir, oldNumSlots)
+	alloc, _ := allocCounter()
+	want := map[string]TxnEntry{}
+	for _, txnID := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		pid, epoch, err := old.GetOrAllocate(txnID, alloc)
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		want[txnID] = TxnEntry{PID: pid, Epoch: epoch}
+	}
+
+	// Confirm the seed produced at least one slot file with index
+	// ≥ 3 (otherwise the test wouldn't actually exercise the
+	// out-of-range branch).
+	preSlots, _ := old.activeSlots()
+	hasOutOfRange := false
+	for _, n := range preSlots {
+		if n >= newNumSlots {
+			hasOutOfRange = true
+			break
+		}
+	}
+	if !hasOutOfRange {
+		t.Skip("seed didn't land any entry in slot ≥ 3 — test would be vacuous")
+	}
+
+	migrated, err := NewTxnStateStore(dir, newNumSlots)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// All entries still readable.
+	snap := migrated.Snapshot()
+	for txnID, expected := range want {
+		got, ok := snap[txnID]
+		if !ok {
+			t.Errorf("entry %q lost during shrink-migration", txnID)
+			continue
+		}
+		if got != expected {
+			t.Errorf("%q changed: got %+v, want %+v", txnID, got, expected)
+		}
+	}
+
+	// No slot files with index ≥ newNumSlots.
+	postSlots, _ := migrated.activeSlots()
+	for _, n := range postSlots {
+		if n >= newNumSlots {
+			t.Errorf("out-of-range slot-%d.json survived shrink-migration", n)
+		}
+	}
+}
+
+// TestTxnStateMigrateLayoutHandlesCorruptSlotFile guards graceful
+// handling of a slot file with garbage content (e.g. a half-written
+// crash, manual edit). Migration should surface a real error rather
+// than silently discarding the file's entries — an operator should
+// know they have a corrupt slot to investigate.
+func TestTxnStateMigrateLayoutHandlesCorruptSlotFile(t *testing.T) {
+	dir := t.TempDir()
+	// Open + close once to create the dir layout.
+	if _, err := NewTxnStateStore(dir, 3); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Drop a corrupt JSON file directly in the slot dir.
+	slotDir := filepath.Join(dir, "txn_state")
+	corruptPath := filepath.Join(slotDir, "slot-1.json")
+	if err := os.WriteFile(corruptPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	// Reopen — migration should error rather than silently dropping
+	// the corrupt entries.
+	_, err := NewTxnStateStore(dir, 50)
+	if err == nil {
+		t.Fatal("expected error when slot file is corrupt")
+	}
+}
+
+// TestTxnStateNumSlotsOne pins behaviour at the degenerate edge: a
+// single-broker dev cluster (or operator that explicitly sets
+// numSlots=1) collapses every txnID to slot 0. Every operation
+// must still work. Catches a divide-by-zero / off-by-one in
+// slotFor or the migration logic.
+func TestTxnStateNumSlotsOne(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 1)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	alloc, _ := allocCounter()
+	for _, txnID := range []string{"alpha", "beta", "gamma"} {
+		pid, ep, err := s.GetOrAllocate(txnID, alloc)
+		if err != nil {
+			t.Fatalf("alloc %s: %v", txnID, err)
+		}
+		if ep != 0 {
+			t.Errorf("first alloc of %s: epoch=%d, want 0", txnID, ep)
+		}
+		if pid <= 0 {
+			t.Errorf("PID for %s = %d, want positive", txnID, pid)
+		}
+	}
+	// Exactly one slot file should exist.
+	slots, _ := s.activeSlots()
+	if len(slots) != 1 || slots[0] != 0 {
+		t.Errorf("expected exactly slot-0.json with numSlots=1, got %v", slots)
+	}
+	// Re-open with numSlots=50 — every entry hashes to its real
+	// slot and slot-0 likely empties out (depends on FNV
+	// distribution). Confirm at least that nothing is lost.
+	pre := s.Snapshot()
+	wide, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("widen: %v", err)
+	}
+	post := wide.Snapshot()
+	if len(pre) != len(post) {
+		t.Errorf("entry count changed across widen: %d → %d", len(pre), len(post))
+	}
+}
+
+// TestTxnStateMigrateLayoutNoOpOnFreshDir: opening a fresh dir
+// (no slot files at all) must not fail and must not produce
+// spurious empty slot files. Catches a bug where the migration
+// eagerly walks an empty dir and crashes on a nil iteration.
+func TestTxnStateMigrateLayoutNoOpOnFreshDir(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("fresh open: %v", err)
+	}
+	slots, err := s.activeSlots()
+	if err != nil {
+		t.Fatalf("activeSlots: %v", err)
+	}
+	if len(slots) != 0 {
+		t.Errorf("fresh dir should have 0 slot files, got %d: %v", len(slots), slots)
+	}
+}
+
+// TestTxnStateMigrateLayoutPreservesEpochOnConflict: if two slot
+// files happen to contain the SAME txnID (shouldn't normally
+// occur, but defensive against operator mistakes — e.g. a manual
+// rename or a partial migration crash that left dual writes), the
+// migration must keep the higher-epoch entry. Losing the higher
+// epoch would silently allow zombie writes from an older session.
+func TestTxnStateMigrateLayoutPreservesEpochOnConflict(t *testing.T) {
+	dir := t.TempDir()
+	// Create the slot dir layout.
+	if _, err := NewTxnStateStore(dir, 3); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	slotDir := filepath.Join(dir, "txn_state")
+	// Write the SAME txnID into two different slot files with
+	// different epochs. Defensive scenario: which epoch wins on
+	// merge?
+	older := map[string]TxnEntry{"foo": {PID: 100, Epoch: 5}}
+	newer := map[string]TxnEntry{"foo": {PID: 100, Epoch: 9}}
+	for _, pair := range []struct {
+		path  string
+		state map[string]TxnEntry
+	}{
+		{filepath.Join(slotDir, "slot-0.json"), older},
+		{filepath.Join(slotDir, "slot-1.json"), newer},
+	} {
+		data, _ := json.Marshal(pair.state)
+		if err := os.WriteFile(pair.path, data, 0o644); err != nil {
+			t.Fatalf("seed write: %v", err)
+		}
+	}
+
+	// Reopen with numSlots=50 — both slot files relocate, the
+	// merge must keep the higher-epoch (9) entry.
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	got := s.Snapshot()["foo"]
+	if got.PID != 100 || got.Epoch != 9 {
+		t.Errorf("conflict resolution wrong: got %+v, want PID=100 Epoch=9 (higher epoch wins)", got)
+	}
+}
+
 // TestTxnStateMigrateLayoutIsIdempotent: running migration on an
 // already-correct layout must be a no-op. Catches a bug where the
 // migration eagerly rewrites every file even when nothing changed
