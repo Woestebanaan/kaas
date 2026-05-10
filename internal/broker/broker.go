@@ -402,6 +402,15 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 		WithBrokerConfig(autoCreate.Enabled, autoCreate.NumPartitions))
 	d.Register(35, 0, 1, handlers.NewDescribeLogDirsHandler(b.store, b.topics))
 	d.Register(36, 0, 2, handlers.NewSaslAuthenticateHandler(b.auth))
+	// gh #102: DescribeCluster (key 60). AdminClient.describeCluster()
+	// and `kafka-cluster.sh --describe` need this; without it they
+	// return empty / "no controller". ControllerID falls back to
+	// Self().NodeID (every broker reports itself as controller),
+	// matching the existing Metadata response (gh #85). Accurate
+	// controller-id reporting via ControllerWatch.CurrentHolder is
+	// a future enhancement once a pod-name → NodeID resolver is in
+	// place.
+	d.Register(60, 0, 1, handlers.NewDescribeClusterHandler(b.brokers, b.cfg.ClusterID))
 
 	supported := d.SupportedVersions()
 	supported[18] = [2]int16{0, 4}
