@@ -45,6 +45,16 @@ const (
 	// InitProducerId has been seen, or the PID in the request
 	// doesn't match the persisted entry. gh #23.
 	ErrInvalidProducerIDMapping    ErrorCode = 49
+	// ErrInvalidTxnState (50) is what EndTxn returns when the
+	// requested transition isn't legal from the current state — e.g.,
+	// abort against a CompleteCommit entry, or any EndTxn against
+	// an Empty entry. gh #25/#26.
+	ErrInvalidTxnState             ErrorCode = 50
+	// ErrConcurrentTransactions (51) is what AddPartitionsToTxn and
+	// EndTxn return when another transition for the same txnID is
+	// already in flight. Retriable; client backs off and re-sends.
+	// gh #25.
+	ErrConcurrentTransactions      ErrorCode = 51
 	ErrTransactionalIdAuthFailed   ErrorCode = 53
 	ErrNonEmptyGroup               ErrorCode = 67
 	ErrGroupIDNotFound             ErrorCode = 69

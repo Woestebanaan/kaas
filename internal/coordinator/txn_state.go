@@ -94,9 +94,24 @@ type TxnStateStore struct {
 // TransactionMetadata.scala. EndTxn (#25/#26) will clear this list
 // after writing the commit/abort marker.
 type TxnEntry struct {
-	PID        int64       `json:"pid"`
-	Epoch      int16       `json:"epoch"`
-	Partitions []TxnTopic  `json:"partitions,omitempty"`
+	PID        int64      `json:"pid"`
+	Epoch      int16      `json:"epoch"`
+	Partitions []TxnTopic `json:"partitions,omitempty"`
+	// State is the transaction state machine field — gh #25/#26.
+	// Mirrors Apache's TransactionState (TransactionMetadata.scala):
+	//
+	//   "" or "Empty"   — no transaction in progress (default)
+	//   "Ongoing"       — at least one AddPartitionsToTxn succeeded
+	//   "PrepareCommit" — EndTxn(commit) accepted, transition in flight
+	//   "PrepareAbort"  — EndTxn(abort) accepted, transition in flight
+	//   "CompleteCommit"— commit finished (idempotent retries return NONE)
+	//   "CompleteAbort" — abort finished
+	//
+	// Skafka transitions Prepare→Complete atomically in one EndTxn call
+	// (no separate marker-write phase yet — that's the gh #27/#31
+	// follow-up which adds WriteTxnMarkers + read-committed isolation).
+	// The Prepare* states exist in the schema for forward compat.
+	State string `json:"state,omitempty"`
 }
 
 // TxnTopic is one (topic, partitions) tuple inside a TxnEntry.
@@ -249,15 +264,134 @@ func (s *TxnStateStore) AddPartitions(txnID string, pid int64, epoch int16, addi
 		return ErrTxnEpochFenced
 	}
 
-	if !mergePartitions(&entry, additions) {
+	// gh #25/#26: a Prepare* state is mid-transition; refuse new
+	// partitions. Apache returns CONCURRENT_TRANSACTIONS here.
+	// Mid-Complete* state is fine — it means the previous txn finished
+	// and this is a new transaction starting; advance state to Ongoing.
+	switch entry.State {
+	case TxnStatePrepareCommit, TxnStatePrepareAbort:
+		return ErrTxnConcurrent
+	}
+
+	merged := mergePartitions(&entry, additions)
+
+	// State machine: a fresh AddPartitionsToTxn starts a new
+	// transaction. Empty/Complete* transitions to Ongoing. Ongoing
+	// stays Ongoing.
+	wasNotOngoing := entry.State != TxnStateOngoing
+	if wasNotOngoing {
+		entry.State = TxnStateOngoing
+	}
+
+	if !merged && !wasNotOngoing {
 		// Every requested (topic, partitions) tuple was already
-		// recorded — Apache's idempotent shortcut, no log write.
+		// recorded AND no state change — Apache's idempotent
+		// shortcut, no log write.
 		return nil
 	}
 
 	state[txnID] = entry
 	return s.persistSlot(slot, state)
 }
+
+// EndTxn implements the EndTxn (API key 26) state transition.
+// gh #25 (commit) + gh #26 (abort).
+//
+// Mirrors Apache's `TransactionCoordinator.endTransaction`:
+//
+//	Ongoing       → PrepareCommit → CompleteCommit  (commit=true)
+//	Ongoing       → PrepareAbort  → CompleteAbort   (commit=false)
+//	CompleteCommit + commit=true   → NONE (idempotent retry)
+//	CompleteAbort  + commit=false  → NONE
+//	CompleteCommit + commit=false  → ErrTxnInvalidState
+//	CompleteAbort  + commit=true   → ErrTxnInvalidState
+//	Empty / no-state               → ErrTxnInvalidState
+//
+// Skafka collapses Prepare→Complete into a single atomic transition
+// because we don't yet write marker control batches (those land with
+// the gh #27/#31 WriteTxnMarkers + read-committed isolation pair).
+// Apache observes Prepare* externally only when the marker write
+// fails halfway through; with no marker phase we never observe
+// PrepareCommit or PrepareAbort from outside the lock.
+//
+// On success, clears entry.Partitions — Apache's
+// completeTransitionTo(CompleteCommit/Abort) zeros topicPartitions
+// since the next transaction starts fresh.
+func (s *TxnStateStore) EndTxn(txnID string, pid int64, epoch int16, commit bool) error {
+	if txnID == "" {
+		return ErrEmptyTxnID
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	slot := s.slotFor(txnID)
+	state, err := s.loadSlot(slot)
+	if err != nil {
+		return err
+	}
+
+	entry, ok := state[txnID]
+	if !ok {
+		return ErrTxnUnknownProducer
+	}
+	if entry.PID != pid {
+		return ErrTxnUnknownProducer
+	}
+	if entry.Epoch != epoch {
+		return ErrTxnEpochFenced
+	}
+
+	// State machine. Apache's full table at TransactionMetadata.scala
+	// validPreviousStates — we cover the cases reachable today.
+	switch entry.State {
+	case TxnStateOngoing:
+		// Happy path — transition to Complete*.
+		if commit {
+			entry.State = TxnStateCompleteCommit
+		} else {
+			entry.State = TxnStateCompleteAbort
+		}
+		entry.Partitions = nil
+	case TxnStateCompleteCommit:
+		// Idempotent retry of commit — return NONE without persist.
+		// Mismatched action (abort on committed txn) is invalid.
+		if !commit {
+			return ErrTxnInvalidState
+		}
+		return nil
+	case TxnStateCompleteAbort:
+		if commit {
+			return ErrTxnInvalidState
+		}
+		return nil
+	case TxnStatePrepareCommit, TxnStatePrepareAbort:
+		// Apache returns CONCURRENT_TRANSACTIONS — Prepare* means
+		// another EndTxn is mid-flight. Skafka transitions atomically
+		// so this branch is unreachable today, but kept for forward
+		// compat when marker writes split the transition into phases.
+		return ErrTxnConcurrent
+	default:
+		// "" or "Empty" or anything else — no txn to end.
+		// Apache: INVALID_TXN_STATE on EndTxn against Empty.
+		return ErrTxnInvalidState
+	}
+
+	state[txnID] = entry
+	return s.persistSlot(slot, state)
+}
+
+// Transaction state constants — mirror Apache's TransactionState
+// names so the persisted JSON is human-readable and aligns with
+// debugging tooling expectations.
+const (
+	TxnStateEmpty          = "Empty"
+	TxnStateOngoing        = "Ongoing"
+	TxnStatePrepareCommit  = "PrepareCommit"
+	TxnStatePrepareAbort   = "PrepareAbort"
+	TxnStateCompleteCommit = "CompleteCommit"
+	TxnStateCompleteAbort  = "CompleteAbort"
+)
 
 // mergePartitions unions additions into entry.Partitions in place.
 // Returns true if anything new was added (caller persists), false
@@ -311,6 +445,14 @@ var (
 	ErrEmptyTxnID         = errors.New("txn state: empty transactional id")
 	ErrTxnUnknownProducer = errors.New("txn state: unknown txnID or pid mismatch")
 	ErrTxnEpochFenced     = errors.New("txn state: producer epoch fenced")
+	// ErrTxnConcurrent mirrors Apache's CONCURRENT_TRANSACTIONS (51):
+	// another transition for this txnID is already in flight. gh #25.
+	ErrTxnConcurrent = errors.New("txn state: concurrent transition in progress")
+	// ErrTxnInvalidState mirrors Apache's INVALID_TXN_STATE: the
+	// requested state transition is not allowed from the current
+	// state (e.g., EndTxn against an Empty entry, or abort against
+	// a CompleteCommit entry). gh #25/#26.
+	ErrTxnInvalidState = errors.New("txn state: invalid state transition")
 )
 
 // txnEntriesEqual is a deep-equality helper. Necessary because

@@ -836,3 +836,169 @@ func TestAddPartitionsAcrossMultipleTopics(t *testing.T) {
 		t.Fatalf("expected 3 topic entries, got %d", len(got.Partitions))
 	}
 }
+
+// TestEndTxnHappyCommit pins the gh #25 commit path: Ongoing →
+// CompleteCommit, partition list cleared, persisted to disk.
+func TestEndTxnHappyCommit(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-commit", alloc)
+	if err := s.AddPartitions("tx-commit", pid, epoch, []TxnTopic{
+		{Topic: "t", Partitions: []int32{0, 1}},
+	}); err != nil {
+		t.Fatalf("addPartitions: %v", err)
+	}
+	if err := s.EndTxn("tx-commit", pid, epoch, true); err != nil {
+		t.Fatalf("endTxn: %v", err)
+	}
+
+	// Reopen to confirm persistence.
+	s2, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got := s2.Snapshot()["tx-commit"]
+	if got.State != TxnStateCompleteCommit {
+		t.Errorf("state=%q, want %q", got.State, TxnStateCompleteCommit)
+	}
+	if len(got.Partitions) != 0 {
+		t.Errorf("partitions should be cleared on commit, got %+v", got.Partitions)
+	}
+	if got.PID != pid || got.Epoch != epoch {
+		t.Errorf("(PID, epoch) drifted: got (%d, %d), want (%d, %d)",
+			got.PID, got.Epoch, pid, epoch)
+	}
+}
+
+// TestEndTxnHappyAbort: same shape, abort=false → CompleteAbort.
+func TestEndTxnHappyAbort(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-abort", alloc)
+	if err := s.AddPartitions("tx-abort", pid, epoch, []TxnTopic{
+		{Topic: "t", Partitions: []int32{0}},
+	}); err != nil {
+		t.Fatalf("addPartitions: %v", err)
+	}
+	if err := s.EndTxn("tx-abort", pid, epoch, false); err != nil {
+		t.Fatalf("endTxn: %v", err)
+	}
+	got := s.Snapshot()["tx-abort"]
+	if got.State != TxnStateCompleteAbort {
+		t.Errorf("state=%q, want %q", got.State, TxnStateCompleteAbort)
+	}
+	if len(got.Partitions) != 0 {
+		t.Errorf("partitions should be cleared on abort, got %+v", got.Partitions)
+	}
+}
+
+// TestEndTxnIdempotentCommitRetry: post-CompleteCommit retry returns
+// nil (NONE) without re-writing. Mirrors Apache's
+// "CompleteCommit + commit → NONE" branch.
+func TestEndTxnIdempotentCommitRetry(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-rep", alloc)
+	_ = s.AddPartitions("tx-rep", pid, epoch, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	if err := s.EndTxn("tx-rep", pid, epoch, true); err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+	// Retry — same action, post-Complete state. Must succeed.
+	if err := s.EndTxn("tx-rep", pid, epoch, true); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+}
+
+// TestEndTxnAbortAfterCommitRejected: mismatched action against a
+// completed txn is INVALID_TXN_STATE. Apache's "Complete* + opposite
+// action → invalid" branch.
+func TestEndTxnAbortAfterCommitRejected(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-mix", alloc)
+	_ = s.AddPartitions("tx-mix", pid, epoch, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	_ = s.EndTxn("tx-mix", pid, epoch, true) // commit first
+	if err := s.EndTxn("tx-mix", pid, epoch, false); err != ErrTxnInvalidState {
+		t.Fatalf("abort-after-commit: got %v, want ErrTxnInvalidState", err)
+	}
+}
+
+// TestEndTxnNoStartedTxnRejected: EndTxn against an Empty entry
+// (InitProducerId without AddPartitionsToTxn).
+func TestEndTxnNoStartedTxnRejected(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-unstarted", alloc)
+	if err := s.EndTxn("tx-unstarted", pid, epoch, true); err != ErrTxnInvalidState {
+		t.Fatalf("got %v, want ErrTxnInvalidState (no Ongoing txn to end)", err)
+	}
+}
+
+// TestEndTxnRejectsEpochMismatch: stale-epoch caller gets fenced.
+func TestEndTxnRejectsEpochMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-fence", alloc)
+	_ = s.AddPartitions("tx-fence", pid, epoch, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	if err := s.EndTxn("tx-fence", pid, epoch-1, true); err != ErrTxnEpochFenced {
+		t.Fatalf("got %v, want ErrTxnEpochFenced", err)
+	}
+}
+
+// TestEndTxnRejectsPIDMismatch: wrong PID.
+func TestEndTxnRejectsPIDMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-wrong-pid", alloc)
+	_ = s.AddPartitions("tx-wrong-pid", pid, epoch, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	if err := s.EndTxn("tx-wrong-pid", pid+999, epoch, true); err != ErrTxnUnknownProducer {
+		t.Fatalf("got %v, want ErrTxnUnknownProducer", err)
+	}
+}
+
+// TestEndTxnEmptyIDRejected: input validation.
+func TestEndTxnEmptyIDRejected(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	if err := s.EndTxn("", 1, 0, true); err != ErrEmptyTxnID {
+		t.Fatalf("got %v, want ErrEmptyTxnID", err)
+	}
+}
+
+// TestNewTxnAfterCompleteCommit: after a successful commit, a fresh
+// AddPartitionsToTxn must transition state back to Ongoing for the
+// next transaction. Apache's CompleteCommit → Ongoing transition.
+func TestNewTxnAfterCompleteCommit(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-recycle", alloc)
+	_ = s.AddPartitions("tx-recycle", pid, epoch, []TxnTopic{{Topic: "t", Partitions: []int32{0}}})
+	_ = s.EndTxn("tx-recycle", pid, epoch, true)
+	// Second transaction reuses the same (PID, epoch).
+	if err := s.AddPartitions("tx-recycle", pid, epoch, []TxnTopic{
+		{Topic: "t", Partitions: []int32{5}},
+	}); err != nil {
+		t.Fatalf("second txn AddPartitions: %v", err)
+	}
+	got := s.Snapshot()["tx-recycle"]
+	if got.State != TxnStateOngoing {
+		t.Errorf("state=%q, want Ongoing (CompleteCommit → Ongoing on new AddPartitions)", got.State)
+	}
+	if len(got.Partitions) != 1 || got.Partitions[0].Partitions[0] != 5 {
+		t.Errorf("new-txn partitions wrong: %+v", got.Partitions)
+	}
+}

@@ -413,6 +413,18 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 			addPartHandler = addPartHandler.WithTxnOwnership(ownership)
 		}
 		d.Register(24, 0, 3, addPartHandler)
+
+		// gh #25/#26: EndTxn (key 26) v0–v3 — state-machine only.
+		// Marker control-batch writes to per-partition leaders land
+		// with WriteTxnMarkers (#27 follow-up) + read-committed
+		// isolation (#31). Until then EndTxn transitions the txn
+		// state and the Java producer's commitTransaction() /
+		// abortTransaction() returns success.
+		endTxnHandler := handlers.NewEndTxnHandler(&txnEndStoreAdapter{store: b.txnStore})
+		if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
+			endTxnHandler = endTxnHandler.WithTxnOwnership(ownership)
+		}
+		d.Register(26, 0, 3, endTxnHandler)
 	}
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
@@ -486,6 +498,34 @@ func fmtExternalHost(pattern string, ordinal int32) string {
 }
 
 var _ handlers.BrokerSource = (*K8sBrokerSource)(nil)
+
+// txnEndStoreAdapter wraps coordinator.TxnStateStore so it
+// satisfies handlers.TxnEndStore. Translates coordinator's
+// sentinels to handler-package sentinels (avoiding the
+// handlers→coordinator import cycle). gh #25/#26.
+type txnEndStoreAdapter struct {
+	store *coordinator.TxnStateStore
+}
+
+func (a *txnEndStoreAdapter) EndTxn(txnID string, pid int64, epoch int16, commit bool) error {
+	if err := a.store.EndTxn(txnID, pid, epoch, commit); err != nil {
+		switch {
+		case errors.Is(err, coordinator.ErrEmptyTxnID):
+			return handlers.ErrTxnEndEmptyID
+		case errors.Is(err, coordinator.ErrTxnUnknownProducer):
+			return handlers.ErrTxnEndUnknownProducer
+		case errors.Is(err, coordinator.ErrTxnEpochFenced):
+			return handlers.ErrTxnEndEpochFenced
+		case errors.Is(err, coordinator.ErrTxnConcurrent):
+			return handlers.ErrTxnEndConcurrent
+		case errors.Is(err, coordinator.ErrTxnInvalidState):
+			return handlers.ErrTxnEndInvalidState
+		default:
+			return err
+		}
+	}
+	return nil
+}
 
 // txnPartitionStoreAdapter wraps coordinator.TxnStateStore so it
 // satisfies handlers.TxnPartitionStore. The two interfaces are
