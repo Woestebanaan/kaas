@@ -333,13 +333,15 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// skips the dev path.
 	if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
 		clusterDir := filepath.Join(dataDir, "__cluster")
-		// numSlots = StatefulSet replica count (mirrors gh #91's
-		// PickTxnCoordinator divisor). Stable across rolling restarts;
-		// scale-out from N→N' would require re-sharding which is out
-		// of scope for #108 phase 1. Default 1 collapses every txnID
-		// to slot-0 — correct for single-broker dev clusters.
-		numSlots := 1
-		if v := os.Getenv("SKAFKA_NUM_BROKERS"); v != "" {
+		// numSlots is decoupled from the StatefulSet replica count
+		// (gh #108 follow-up): pinning to a fixed cluster-wide
+		// constant — Apache's transaction.state.log.num.partitions=50
+		// default — keeps the storage layout stable across scale
+		// operations. Override via SKAFKA_TXN_NUM_SLOTS if 50 is
+		// wrong for the cluster (set once at bootstrap; changes
+		// trigger a re-shard pass on every broker startup).
+		numSlots := 0 // 0 → DefaultNumSlots (50)
+		if v := os.Getenv("SKAFKA_TXN_NUM_SLOTS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				numSlots = n
 			}

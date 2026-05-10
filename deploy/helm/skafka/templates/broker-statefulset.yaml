@@ -108,13 +108,19 @@ spec:
               value: "{{ .Values.broker.controllerLease.retryPeriodSeconds }}"
             - name: SKAFKA_FLUSH_INTERVAL_MESSAGES
               value: "{{ .Values.broker.flushIntervalMessages | default 1 }}"
-            # gh #108: numSlots for the sharded TxnStateStore. Must match
-            # the StatefulSet replica count so hash(txnID) % numSlots
-            # picks the same slot file on every broker. Cluster-wide
-            # constant; scaling out N→N' would re-shard, which is
-            # tracked separately.
-            - name: SKAFKA_NUM_BROKERS
-              value: "{{ .Values.broker.replicaCount }}"
+            # gh #108 (refactored v0.1.84): numSlots for the sharded
+            # TxnStateStore is decoupled from the StatefulSet replica
+            # count and pinned to a fixed cluster-wide constant —
+            # mirrors Apache's transaction.state.log.num.partitions=50
+            # default. Scale ops change which broker owns each slot
+            # (gh #91 hash routing) but every slot file remains
+            # valid. Set ONCE at cluster bootstrap; later changes
+            # trigger a re-shard pass on every broker startup
+            # (idempotent, but lossy under heavy concurrent writes
+            # during a rolling upgrade — drain transactional
+            # producers first if changing).
+            - name: SKAFKA_TXN_NUM_SLOTS
+              value: "{{ .Values.broker.txnState.numSlots }}"
             # gh #109: auto.create.topics.enable (default true, matches
             # Apache 3.7). When the broker receives MetadataRequest for
             # an unknown topic with AllowAutoTopicCreation=true, it

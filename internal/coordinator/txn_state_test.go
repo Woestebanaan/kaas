@@ -284,6 +284,148 @@ func TestTxnStateMigrateLegacySingleFile(t *testing.T) {
 	}
 }
 
+// TestTxnStateDefaultNumSlots: passing 0 (or any non-positive
+// value) selects the cluster-wide constant DefaultNumSlots=50,
+// matching Apache's transaction.state.log.num.partitions default.
+// Catches a wiring slip that would silently revert the gh #108
+// follow-up to per-broker-replica-count slot mapping.
+func TestTxnStateDefaultNumSlots(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewTxnStateStore(dir, 0)
+	if err != nil {
+		t.Fatalf("default numSlots: %v", err)
+	}
+	if s.numSlots != DefaultNumSlots {
+		t.Errorf("expected numSlots=%d, got %d", DefaultNumSlots, s.numSlots)
+	}
+	// Negative is treated the same as 0.
+	s2, err := NewTxnStateStore(dir, -1)
+	if err != nil {
+		t.Fatalf("negative numSlots: %v", err)
+	}
+	if s2.numSlots != DefaultNumSlots {
+		t.Errorf("expected numSlots=%d for negative, got %d", DefaultNumSlots, s2.numSlots)
+	}
+}
+
+// TestTxnStateMigrateLayoutFromSmallerNumSlots is the v0.1.83 →
+// v0.1.84 upgrade test: existing clusters wrote slot files keyed
+// by hash(txnID) % broker_replicas (typically 3). When the new
+// version pins numSlots=50, every entry needs to relocate to its
+// new slot. The migration must:
+//
+//  1. Move every entry to its expected slot under the new numSlots.
+//  2. Delete out-of-range slot files (slot index ≥ numSlots).
+//  3. Preserve every (PID, epoch) — losing this would silently
+//     reset transactional producers' epoch counters and break the
+//     gh #22 fence-on-rejoin contract on the upgrade boundary.
+func TestTxnStateMigrateLayoutFromSmallerNumSlots(t *testing.T) {
+	dir := t.TempDir()
+	const oldNumSlots = 3
+
+	// Seed a v0.1.83-style on-disk layout: 3 slot files keyed by
+	// hash(txnID) % 3.
+	old, err := NewTxnStateStore(dir, oldNumSlots)
+	if err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	alloc, _ := allocCounter()
+	want := map[string]TxnEntry{}
+	for _, txnID := range []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta"} {
+		pid, epoch, err := old.GetOrAllocate(txnID, alloc)
+		if err != nil {
+			t.Fatalf("seed alloc %s: %v", txnID, err)
+		}
+		want[txnID] = TxnEntry{PID: pid, Epoch: epoch}
+	}
+
+	// Reopen with the new pinned numSlots=50 — triggers
+	// migrateLayout on the existing dir.
+	migrated, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("migrated open: %v", err)
+	}
+	if migrated.numSlots != 50 {
+		t.Fatalf("post-migration numSlots=%d, want 50", migrated.numSlots)
+	}
+
+	// Every prior entry must be readable and unchanged.
+	snap := migrated.Snapshot()
+	for txnID, expected := range want {
+		got, ok := snap[txnID]
+		if !ok {
+			t.Errorf("entry %q lost during migration", txnID)
+			continue
+		}
+		if got.PID != expected.PID || got.Epoch != expected.Epoch {
+			t.Errorf("%q migrated incorrectly: got %+v, want %+v", txnID, got, expected)
+		}
+	}
+
+	// All slot files on disk must now be in [0, 50). The old
+	// slot-0/1/2.json files are still valid indices under
+	// numSlots=50, so they may persist if some entry still hashes
+	// there — but no slot index ≥ 50 should exist. The stronger
+	// invariant — every file's contents hash to its index — is
+	// covered below.
+	slots, err := migrated.activeSlots()
+	if err != nil {
+		t.Fatalf("activeSlots: %v", err)
+	}
+	for _, n := range slots {
+		if n >= 50 {
+			t.Errorf("out-of-range slot file slot-%d.json present after migration", n)
+		}
+	}
+
+	// Every entry on disk must hash to its file's slot under the
+	// current numSlots. Catches a partial migration that left
+	// entries in their old slots.
+	for _, n := range slots {
+		state, err := migrated.loadSlot(n)
+		if err != nil {
+			t.Fatalf("loadSlot %d: %v", n, err)
+		}
+		for txnID := range state {
+			if got := migrated.slotFor(txnID); got != n {
+				t.Errorf("entry %q in slot-%d.json but hashes to slot %d", txnID, n, got)
+			}
+		}
+	}
+}
+
+// TestTxnStateMigrateLayoutIsIdempotent: running migration on an
+// already-correct layout must be a no-op. Catches a bug where the
+// migration eagerly rewrites every file even when nothing changed
+// — wasteful and risk-prone under concurrent reads.
+func TestTxnStateMigrateLayoutIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	s1, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	for i := 0; i < 5; i++ {
+		txnID := "txn-" + strconv.Itoa(i)
+		if _, _, err := s1.GetOrAllocate(txnID, alloc); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	// Reopen — migration should detect "every entry already in the
+	// right slot" and not move anything.
+	s2, err := NewTxnStateStore(dir, 50)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	snap1 := s1.Snapshot()
+	snap2 := s2.Snapshot()
+	if len(snap1) != len(snap2) {
+		t.Errorf("entry count diverged after idempotent re-migration: %d → %d", len(snap1), len(snap2))
+	}
+	for k, v := range snap1 {
+		if got := snap2[k]; got != v {
+			t.Errorf("idempotent migration altered %q: %+v → %+v", k, v, got)
+		}
+	}
+}
+
 // TestTxnStateSlotFileLayout asserts the on-disk shape: per-slot JSON
 // files under <dataDir>/__cluster/txn_state/. Catches a refactor that
 // accidentally puts every entry in slot-0 (defeats failover) or

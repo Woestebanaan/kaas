@@ -14,6 +14,16 @@ import (
 	"sync"
 )
 
+// DefaultNumSlots matches Apache Kafka's
+// `transaction.state.log.num.partitions=50` default. Pinning the slot
+// count to a fixed cluster-wide constant — instead of the StatefulSet
+// replica count — decouples the storage layout from broker scale
+// operations: scaling up or down changes which broker owns each slot
+// (gh #91 hash routing), but every slot file remains valid. Same
+// shape Apache uses: __transaction_state has a fixed 50 partitions;
+// scaling brokers shifts leadership, never the partition count.
+const DefaultNumSlots = 50
+
 // TxnStateStore tracks (producerID, epoch) per transactional.id so
 // InitProducerId can implement the epoch-fence-on-rejoin contract
 // (gh #22). Apache Kafka's transactional producer relies on this:
@@ -45,6 +55,18 @@ import (
 // that recently wrote. Cost: ~2 file ops per InitProducerId (cold
 // path; transactional producers init rarely).
 //
+// numSlots is a "set once at bootstrap" value. Apache enforces this
+// by reading transaction.state.log.num.partitions at first cluster
+// start and ignoring later changes; skafka has a softer guarantee —
+// changing the value requires a re-shard pass that runs in
+// migrateLayout() on every broker startup. The migration is
+// idempotent: it walks every existing slot-*.json, computes each
+// entry's expected slot under the current numSlots, moves any
+// misplaced entry, and removes empty / out-of-range slot files.
+// Best-effort during rolling upgrades: while old-version brokers
+// still write to old-numSlots files, the new-version brokers' next
+// startup migration catches them.
+//
 // Split-brain risk: during a controller transition (~15s window)
 // two brokers can both think they own a slot. Last-write-wins on
 // slot-N.json. Mitigated for the common case by the controller's
@@ -71,18 +93,24 @@ type TxnEntry struct {
 // NewTxnStateStore opens the per-cluster transactional-state dir.
 // dir is typically <dataDir>/__cluster.
 //
-// numSlots is the StatefulSet replica count (same value the gh #91
-// PickTxnCoordinator hashes into). Pinning this to the configured
-// replica count — not len(alive) — keeps slot mapping stable across
-// rolling restarts; a scale-out from N→N' would re-shard, which is
-// out of scope for #108 and tracked separately.
+// numSlots ≤ 0 falls back to DefaultNumSlots (50). Pinning to a
+// fixed cluster-wide constant — independent of broker count —
+// keeps the storage layout stable across scale operations. Mirrors
+// Apache's `transaction.state.log.num.partitions=50` default.
 //
-// Migrates the legacy single-file layout (transactional_state.json)
-// on first open: every entry is hashed and written into the new
-// slot-keyed shape, then the legacy file is deleted.
+// Two migrations run on open, both idempotent:
+//
+//  1. Legacy single-file layout (pre-v0.1.81) — read
+//     transactional_state.json, distribute entries to slot files,
+//     delete the legacy file.
+//  2. Slot-layout drift — re-shard any entry currently sitting in
+//     slot-K.json where hash(txnID) % numSlots != K. Catches the
+//     v0.1.81-v0.1.83 → v0.1.84 transition (numSlots was the
+//     replica count, now pinned to 50) plus any future numSlots
+//     change. Removes empty / out-of-range slot files.
 func NewTxnStateStore(dir string, numSlots int) (*TxnStateStore, error) {
 	if numSlots <= 0 {
-		return nil, fmt.Errorf("txn state store: numSlots must be > 0, got %d", numSlots)
+		numSlots = DefaultNumSlots
 	}
 	slotDir := filepath.Join(dir, "txn_state")
 	if err := os.MkdirAll(slotDir, 0o755); err != nil {
@@ -93,6 +121,9 @@ func NewTxnStateStore(dir string, numSlots int) (*TxnStateStore, error) {
 		numSlots: numSlots,
 	}
 	if err := s.migrateLegacy(dir); err != nil {
+		return nil, err
+	}
+	if err := s.migrateLayout(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -262,6 +293,109 @@ func (s *TxnStateStore) migrateLegacy(parentDir string) error {
 		}
 	}
 	return os.Remove(legacy)
+}
+
+// migrateLayout re-shards any entry sitting in a slot file that
+// disagrees with the current numSlots — the case when an operator
+// changes numSlots between boots, or when upgrading from a
+// pre-v0.1.84 build that used a smaller numSlots (= broker count).
+// Idempotent: running on an already-correct layout is a no-op.
+//
+// Algorithm:
+//  1. Walk every slot-*.json in the dir.
+//  2. For each entry, compute the expected slot under current
+//     numSlots; if it differs from the file's slot, stage it for
+//     relocation.
+//  3. Persist staged entries into the correct slot files (keeping
+//     the higher-epoch entry on conflict).
+//  4. Persist or delete each touched source file (delete if now
+//     empty, or if its slot index is ≥ numSlots — out of range).
+func (s *TxnStateStore) migrateLayout() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return err
+	}
+	type fileState struct {
+		slot  int
+		state map[string]TxnEntry
+		dirty bool // some entry was removed; need to persist or delete
+	}
+	files := []fileState{}
+	relocate := make(map[string]TxnEntry)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "slot-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		nstr := strings.TrimSuffix(strings.TrimPrefix(name, "slot-"), ".json")
+		n, err := strconv.Atoi(nstr)
+		if err != nil {
+			continue
+		}
+		state, err := s.loadSlot(n)
+		if err != nil {
+			return err
+		}
+		fs := fileState{slot: n, state: state}
+		// If the slot index is out of range under the new numSlots,
+		// every entry needs to move (and the file must be deleted).
+		outOfRange := n >= s.numSlots
+		for txnID, entry := range state {
+			expected := s.slotFor(txnID)
+			if expected != n {
+				// Newer epoch wins on collision (only matters for
+				// the cross-rolling-upgrade window where a stale
+				// broker rewrote an old-layout file).
+				if existing, ok := relocate[txnID]; !ok || existing.Epoch < entry.Epoch {
+					relocate[txnID] = entry
+				}
+				delete(fs.state, txnID)
+				fs.dirty = true
+			}
+		}
+		if outOfRange {
+			fs.dirty = true
+		}
+		files = append(files, fs)
+	}
+
+	// Persist relocated entries into their correct slots. Read each
+	// destination fresh — the migration may have already cleaned a
+	// destination slot in a prior pass on this same dir (idempotent
+	// re-run after partial failure).
+	for txnID, entry := range relocate {
+		dst := s.slotFor(txnID)
+		state, err := s.loadSlot(dst)
+		if err != nil {
+			return err
+		}
+		if existing, ok := state[txnID]; ok && existing.Epoch >= entry.Epoch {
+			continue
+		}
+		state[txnID] = entry
+		if err := s.persistSlot(dst, state); err != nil {
+			return err
+		}
+	}
+
+	// Persist or remove touched source files.
+	for _, fs := range files {
+		if !fs.dirty {
+			continue
+		}
+		if len(fs.state) == 0 || fs.slot >= s.numSlots {
+			// Tolerate concurrent removal under a rolling upgrade
+			// where a peer broker may already have GC'd the file.
+			if err := os.Remove(s.slotPath(fs.slot)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			continue
+		}
+		if err := s.persistSlot(fs.slot, fs.state); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // activeSlots returns the slot indices that currently have a file

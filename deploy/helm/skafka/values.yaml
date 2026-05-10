@@ -111,6 +111,19 @@ broker:
   #               at segment roll. Maximum throughput, weakest durability.
   flushIntervalMessages: 1
 
+  # gh #108: TxnStateStore slot count. Pinned to a cluster-wide
+  # constant independent of replicaCount — mirrors Apache's
+  # transaction.state.log.num.partitions=50 default. Scale ops change
+  # which broker owns each slot (via gh #91 hash routing); slot files
+  # remain valid. Strimzi's Kafka CR exposes the same knob via
+  # spec.kafka.config and treats it as bootstrap-once; skafka treats
+  # changes as triggering a re-shard pass (idempotent on startup).
+  # If you change this on a live cluster, drain transactional
+  # producers first to avoid losing in-flight (PID, epoch) state
+  # during the rolling upgrade window.
+  txnState:
+    numSlots: 50
+
   # gh #109: auto.create.topics.enable.
   #   enabled — default true, matches Apache 3.7. When a producer sends
   #     MetadataRequest with AllowAutoTopicCreation=true for an unknown
