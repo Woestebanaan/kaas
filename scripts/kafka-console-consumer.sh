@@ -25,6 +25,30 @@ got=$("$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$BOOTSTRAP" \
   --topic "$TOPIC" --partition 0 --offset latest --timeout-ms 3000 || true)
 [ -z "$got" ] || echo "WARN: unexpected output: $got"
 
+echo ">> Scenario 3: --isolation-level read_committed (gh #31 wire surface)"
+# v4+ FetchRequest carries IsolationLevel. Read-committed against
+# a topic with no in-flight txns must return the same records as
+# read-uncommitted (LSO = HighWatermark when no txns are active).
+got=$("$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$BOOTSTRAP" \
+  --topic "$TOPIC" --from-beginning --max-messages 3 --timeout-ms 10000 \
+  --consumer-property isolation.level=read_committed)
+echo "$got"
+[ "$(echo "$got" | wc -l)" -eq 3 ] || {
+  echo "FAIL: read_committed returned $(echo "$got" | wc -l) lines, want 3 (no in-flight txns)" >&2
+  exit 1
+}
+
+echo ">> Scenario 4: --formatter explicit + --offset earliest"
+# Verifies the metadata path returns offsets correctly via a
+# different selector shape.
+got=$("$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$BOOTSTRAP" \
+  --topic "$TOPIC" --partition 0 --offset earliest --max-messages 3 --timeout-ms 10000 \
+  --formatter kafka.tools.DefaultMessageFormatter \
+  --property print.partition=true \
+  --property print.offset=true)
+echo "$got"
+[ "$(echo "$got" | wc -l)" -eq 3 ] || { echo "FAIL: explicit-formatter offset-earliest" >&2; exit 1; }
+
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --delete --topic "$TOPIC" || true
 
 echo ">> PASS"

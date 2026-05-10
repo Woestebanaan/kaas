@@ -36,6 +36,20 @@ echo ">> Scenario 4: --reset-offsets --to-earliest --execute"
 "$KAFKA_BIN/kafka-consumer-groups.sh" --bootstrap-server "$BOOTSTRAP" \
   --reset-offsets --to-earliest --topic "$TOPIC" --group "$GROUP" --execute
 
+echo ">> Scenario 4b: --reset-offsets --to-latest --execute"
+# A different reset variant — exercises OffsetFetch + OffsetCommit
+# round-trip via the latest-offset path. Pre-#92 hash routing
+# this could mismatch coordinator → group lookups; today it must
+# succeed and the next --describe shows current-offset == end-offset.
+"$KAFKA_BIN/kafka-consumer-groups.sh" --bootstrap-server "$BOOTSTRAP" \
+  --reset-offsets --to-latest --topic "$TOPIC" --group "$GROUP" --execute
+
+echo ">> Scenario 4c: --reset-offsets --shift-by -2 --execute"
+# Validate relative-shift form. After the prior to-latest reset,
+# current-offset was 5 (the topic has 5 messages); shift -2 → 3.
+"$KAFKA_BIN/kafka-consumer-groups.sh" --bootstrap-server "$BOOTSTRAP" \
+  --reset-offsets --shift-by -2 --topic "$TOPIC" --group "$GROUP" --execute
+
 echo ">> Scenario 5: --delete must actually remove the group"
 # Pre-#89 this returned UnsupportedVersionException and we
 # tolerated it via "|| true". Now the broker advertises key 42

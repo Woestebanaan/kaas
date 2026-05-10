@@ -29,6 +29,22 @@ else
   echo "(expected) alter rejected — broker work needed (#9)"
 fi
 
+echo ">> Scenario 4: --describe with --all (every config key, not just overridden)"
+# Exercises the broader DescribeConfigs surface — every key
+# returned must have its source (DEFAULT_CONFIG, TOPIC_CONFIG, etc).
+# Pre-#93 only overridden keys were returned; the broker config
+# should now expose its full key set.
+out=$("$KAFKA_BIN/kafka-configs.sh" --bootstrap-server "$BOOTSTRAP" \
+  --entity-type topics --entity-name "$TOPIC" --describe --all 2>&1)
+echo "$out" | head -20
+echo "$out" | grep -q 'cleanup.policy' || { echo "FAIL: cleanup.policy not in --describe --all output" >&2; exit 1; }
+
+echo ">> Scenario 5: --describe specific broker config"
+# Per-broker (id=0) describe vs default. Required for tools like
+# kafbat-ui that query individual brokers.
+"$KAFKA_BIN/kafka-configs.sh" --bootstrap-server "$BOOTSTRAP" \
+  --entity-type brokers --entity-name 0 --describe 2>&1 | head -5
+
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --delete --topic "$TOPIC" || true
 
 echo ">> PASS (read paths)"
