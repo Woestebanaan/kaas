@@ -762,9 +762,58 @@ func (g *group) startRebalanceTimer(initial bool) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		if g.state == statePreparingRebalance && len(g.joinWaiters) > 0 {
+			g.evictNonRejoiningMembers()
 			g.completeRebalance()
 		}
 	})
+}
+
+// evictNonRejoiningMembers removes dynamic members that didn't issue
+// a JoinGroup during this rebalance round, mirroring Apache's
+// `onCompleteJoin` path:
+//
+//	notYetRejoinedDynamicMembers = group.notYetRejoinedMembers.filterNot(_._2.isStaticMember)
+//	notYetRejoinedDynamicMembers.values.foreach { failedMember =>
+//	  group.remove(failedMember.memberId)
+//	  removeHeartbeatForLeavingMember(group, failedMember.memberId)
+//	}
+//
+// Static members (`group.instance.id` set) survive a missed
+// rebalance — they reconnect with the same identity. gh #113 layer 2:
+// without this, a stale member entry in g.members but absent from
+// g.joinWaiters at completeRebalance time means the leader's
+// resp.Members omits it, the missing-fill safety net (layer 4)
+// fires, and we burn one round-trip per stale entry per rebalance.
+// Caller must hold g.mu.
+func (g *group) evictNonRejoiningMembers() {
+	if len(g.members) == len(g.joinWaiters) {
+		// Fast path: every member has rejoined.
+		return
+	}
+	rejoined := make(map[string]struct{}, len(g.joinWaiters))
+	for _, w := range g.joinWaiters {
+		rejoined[w.memberID] = struct{}{}
+	}
+	// Snapshot the map keys before iterating — removeMember mutates
+	// g.members.
+	stale := make([]string, 0)
+	for mid, m := range g.members {
+		if _, ok := rejoined[mid]; ok {
+			continue
+		}
+		if m.groupInstanceID != "" {
+			// Static member — Apache's filterNot(_._2.isStaticMember).
+			continue
+		}
+		stale = append(stale, mid)
+	}
+	for _, mid := range stale {
+		slog.Warn("rebalance: evicting dynamic member that did not rejoin within rebalanceTimeoutMs",
+			"group", g.id,
+			"member", mid,
+			"generation", g.generationID)
+		g.removeMember(mid)
+	}
 }
 
 // selectProtocol finds the first protocol in the leader's preference

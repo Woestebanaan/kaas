@@ -297,6 +297,111 @@ func TestInitialRebalanceWaitsForLateColdStartArrivals(t *testing.T) {
 	}
 }
 
+// TestRebalanceTimerEvictsNonRejoiningDynamicMember is gh #113
+// layer 2: when the rebalance-completion timer fires, members
+// in g.members but absent from g.joinWaiters (i.e. they didn't
+// re-join within rebalanceTimeoutMs) are dropped. Mirrors
+// Apache's onCompleteJoin → notYetRejoinedDynamicMembers eviction.
+func TestRebalanceTimerEvictsNonRejoiningDynamicMember(t *testing.T) {
+	prevDelay := initialRebalanceDelayMs
+	initialRebalanceDelayMs = 60
+	t.Cleanup(func() { initialRebalanceDelayMs = prevDelay })
+
+	g := newGroup("evict-cg")
+	// Seed two pre-existing members from a hypothetical prior
+	// generation. State=Stable so the next join() bumps to
+	// PreparingRebalance via the stateStable arm (which does NOT
+	// reset initialRebalance — that flag is only reset by
+	// completeRebalance, and we're past the first one here).
+	g.initialRebalance = false
+	g.state = stateStable
+	g.generationID = 7
+	g.members["alice"] = &groupMember{
+		id:                 "alice",
+		protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("a")}},
+		rebalanceTimeoutMs: 60,
+	}
+	g.members["bob-stale"] = &groupMember{
+		id:                 "bob-stale",
+		protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("b")}},
+		rebalanceTimeoutMs: 60,
+	}
+
+	// Only alice rejoins. Bob never sends a JoinGroup; the timer
+	// must evict him before completeRebalance fires.
+	resp := g.join(&api.JoinGroupRequest{
+		MemberID:           "alice",
+		ProtocolType:       "consumer",
+		SessionTimeoutMs:   60_000,
+		RebalanceTimeoutMs: 60,
+		Protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("a")}},
+	}, 9, "alice-client")
+
+	if resp.ErrorCode != 0 {
+		t.Fatalf("alice rejoin errCode=%d", resp.ErrorCode)
+	}
+	if resp.GenerationID != 8 {
+		t.Fatalf("expected generation 8, got %d", resp.GenerationID)
+	}
+
+	g.mu.Lock()
+	_, bobStillThere := g.members["bob-stale"]
+	_, aliceThere := g.members["alice"]
+	g.mu.Unlock()
+
+	if bobStillThere {
+		t.Fatal("bob-stale should have been evicted by the rebalance timer (didn't rejoin within rebalanceTimeoutMs)")
+	}
+	if !aliceThere {
+		t.Fatal("alice should have survived — she rejoined within the window")
+	}
+}
+
+// TestRebalanceTimerSparesStaticMember pins Apache's
+// `filterNot(_._2.isStaticMember)` carve-out: static members
+// (group.instance.id set) are NOT evicted on a missed rebalance,
+// because they re-identify across reconnects via that ID.
+func TestRebalanceTimerSparesStaticMember(t *testing.T) {
+	prevDelay := initialRebalanceDelayMs
+	initialRebalanceDelayMs = 60
+	t.Cleanup(func() { initialRebalanceDelayMs = prevDelay })
+
+	g := newGroup("static-cg")
+	g.initialRebalance = false
+	g.state = stateStable
+	g.generationID = 3
+	g.members["worker-A"] = &groupMember{
+		id:                 "worker-A",
+		groupInstanceID:    "instance-A", // static member
+		protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("a")}},
+		rebalanceTimeoutMs: 60,
+	}
+	g.members["dyn-rejoiner"] = &groupMember{
+		id:                 "dyn-rejoiner",
+		protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("d")}},
+		rebalanceTimeoutMs: 60,
+	}
+
+	// Only the dynamic member rejoins; static member doesn't.
+	resp := g.join(&api.JoinGroupRequest{
+		MemberID:           "dyn-rejoiner",
+		ProtocolType:       "consumer",
+		SessionTimeoutMs:   60_000,
+		RebalanceTimeoutMs: 60,
+		Protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("d")}},
+	}, 9, "dyn-client")
+	if resp.ErrorCode != 0 {
+		t.Fatalf("dyn-rejoiner errCode=%d", resp.ErrorCode)
+	}
+
+	g.mu.Lock()
+	_, staticThere := g.members["worker-A"]
+	g.mu.Unlock()
+	if !staticThere {
+		t.Fatal("worker-A is static (group.instance.id set) — must survive the missed rebalance")
+	}
+}
+
 // TestSyncGroupNotCanceledAfterLeaderStored guards the inverse: a
 // normal leader-completes-first delivery must NOT be flipped to
 // REBALANCE_IN_PROGRESS by a late cancel. cancelSync's already-closed
