@@ -49,6 +49,14 @@ func TestFlexibleRequestHeaderCoverage(t *testing.T) {
 		{"EndTxn v0 not flexible", 26, 0, false},
 		{"EndTxn v2 not flexible", 26, 2, false},
 		{"EndTxn v3 flexible", 26, 3, true},
+		// gh #24 — AddOffsetsToTxn flexibleVersions=3+.
+		{"AddOffsetsToTxn v0 not flexible", 25, 0, false},
+		{"AddOffsetsToTxn v2 not flexible", 25, 2, false},
+		{"AddOffsetsToTxn v3 flexible", 25, 3, true},
+		// gh #27 — TxnOffsetCommit flexibleVersions=3+.
+		{"TxnOffsetCommit v0 not flexible", 28, 0, false},
+		{"TxnOffsetCommit v2 not flexible", 28, 2, false},
+		{"TxnOffsetCommit v3 flexible", 28, 3, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

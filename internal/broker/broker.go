@@ -425,6 +425,34 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 			endTxnHandler = endTxnHandler.WithTxnOwnership(ownership)
 		}
 		d.Register(26, 0, 3, endTxnHandler)
+
+		// gh #24: AddOffsetsToTxn (key 25) v0–v3. A transactional
+		// producer calls this before TxnOffsetCommit to tell the
+		// txn coordinator "I'll commit offsets for group G as part
+		// of this txn". The recorded group association drives the
+		// pending-offset commit/abort on EndTxn (via txnOffsetHook
+		// wired from cluster_runtime).
+		addOffsetsHandler := handlers.NewAddOffsetsToTxnHandler(&txnGroupStoreAdapter{store: b.txnStore})
+		if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
+			addOffsetsHandler = addOffsetsHandler.WithTxnOwnership(ownership)
+		}
+		d.Register(25, 0, 3, addOffsetsHandler)
+	}
+	// gh #27: TxnOffsetCommit (key 28) v0–v3 — routes through the
+	// GROUP coordinator (not the txn coordinator). Wired from
+	// the consumer-group manager's existing OffsetCommit path. The
+	// handler stages offsets in the offset store's pending layer;
+	// they become visible to OffsetFetch when EndTxn(commit) fires
+	// via the TxnStateStore's txnOffsetHook.
+	if b.coord != nil {
+		d.Register(28, 0, 3, handlers.NewTxnOffsetCommitHandler(b.coord))
+		// Wire the gh #24/#27 hook: EndTxn(commit) materialises any
+		// pending offsets staged by TxnOffsetCommit, EndTxn(abort)
+		// discards them. Same-broker only — cross-broker dispatch
+		// lands with gh #114.
+		if b.txnStore != nil {
+			b.coord.WireTxnOffsetHook(b.txnStore)
+		}
 	}
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
@@ -498,6 +526,33 @@ func fmtExternalHost(pattern string, ordinal int32) string {
 }
 
 var _ handlers.BrokerSource = (*K8sBrokerSource)(nil)
+
+// txnGroupStoreAdapter wraps coordinator.TxnStateStore so it
+// satisfies handlers.TxnGroupStore (AddOffsetsToTxn). Mirrors
+// txnPartitionStoreAdapter from gh #23. gh #24.
+type txnGroupStoreAdapter struct {
+	store *coordinator.TxnStateStore
+}
+
+func (a *txnGroupStoreAdapter) AddOffsetsToTxn(txnID string, pid int64, epoch int16, groupID string) error {
+	if err := a.store.AddOffsetsToTxn(txnID, pid, epoch, groupID); err != nil {
+		switch {
+		case errors.Is(err, coordinator.ErrEmptyTxnID):
+			return handlers.ErrTxnGroupEmptyID
+		case errors.Is(err, coordinator.ErrTxnUnknownProducer):
+			return handlers.ErrTxnGroupUnknownProducer
+		case errors.Is(err, coordinator.ErrTxnEpochFenced):
+			return handlers.ErrTxnGroupEpochFenced
+		case errors.Is(err, coordinator.ErrTxnConcurrent):
+			return handlers.ErrTxnGroupConcurrent
+		case errors.Is(err, coordinator.ErrTxnInvalidState):
+			return handlers.ErrTxnGroupInvalidState
+		default:
+			return err
+		}
+	}
+	return nil
+}
 
 // txnEndStoreAdapter wraps coordinator.TxnStateStore so it
 // satisfies handlers.TxnEndStore. Translates coordinator's

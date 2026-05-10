@@ -44,6 +44,11 @@ const (
 	// PID) tuple is unknown to the coordinator — either no
 	// InitProducerId has been seen, or the PID in the request
 	// doesn't match the persisted entry. gh #23.
+	// ErrInvalidGroupID (24) — TxnOffsetCommit / AddOffsetsToTxn
+	// reject an empty groupID at the wire level. Distinct from
+	// ErrGroupIDNotFound which signals "this group is unknown to
+	// the coordinator" (a state-level error).
+	ErrInvalidGroupID              ErrorCode = 24
 	ErrInvalidProducerIDMapping    ErrorCode = 49
 	// ErrInvalidTxnState (50) is what EndTxn returns when the
 	// requested transition isn't legal from the current state — e.g.,

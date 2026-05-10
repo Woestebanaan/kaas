@@ -1002,3 +1002,126 @@ func TestNewTxnAfterCompleteCommit(t *testing.T) {
 		t.Errorf("new-txn partitions wrong: %+v", got.Partitions)
 	}
 }
+
+// TestAddOffsetsToTxnHappyPath: tracks groupID in entry.Groups,
+// transitions Empty/Complete* → Ongoing. gh #24.
+func TestAddOffsetsToTxnHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-offsets", alloc)
+	if err := s.AddOffsetsToTxn("tx-offsets", pid, epoch, "consumer-group-A"); err != nil {
+		t.Fatalf("addOffsetsToTxn: %v", err)
+	}
+	got := s.Snapshot()["tx-offsets"]
+	if got.State != TxnStateOngoing {
+		t.Errorf("state=%q, want Ongoing", got.State)
+	}
+	if len(got.Groups) != 1 || got.Groups[0] != "consumer-group-A" {
+		t.Errorf("groups=%+v, want [consumer-group-A]", got.Groups)
+	}
+}
+
+// TestAddOffsetsToTxnIdempotent: re-adding same group is no-op.
+func TestAddOffsetsToTxnIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-idem", alloc)
+	_ = s.AddOffsetsToTxn("tx-idem", pid, epoch, "cg-1")
+	if err := s.AddOffsetsToTxn("tx-idem", pid, epoch, "cg-1"); err != nil {
+		t.Fatalf("idempotent re-add: %v", err)
+	}
+	got := s.Snapshot()["tx-idem"]
+	if len(got.Groups) != 1 {
+		t.Errorf("duplicate add added group twice: %+v", got.Groups)
+	}
+}
+
+// TestAddOffsetsToTxnEmptyGroupID: gh #24 input validation.
+func TestAddOffsetsToTxnEmptyGroupID(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-no-group", alloc)
+	if err := s.AddOffsetsToTxn("tx-no-group", pid, epoch, ""); err != ErrTxnInvalidState {
+		t.Fatalf("got %v, want ErrTxnInvalidState (empty groupID)", err)
+	}
+}
+
+// TestAddOffsetsToTxnEpochFenced.
+func TestAddOffsetsToTxnEpochFenced(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-epoch", alloc)
+	if err := s.AddOffsetsToTxn("tx-epoch", pid, epoch-1, "cg"); err != ErrTxnEpochFenced {
+		t.Fatalf("got %v, want ErrTxnEpochFenced", err)
+	}
+}
+
+// TestEndTxnFiresOffsetHook: when commit fires, the hook receives
+// each (groupID, pid, true). When abort, (groupID, pid, false).
+func TestEndTxnFiresOffsetHook(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-hook", alloc)
+	_ = s.AddOffsetsToTxn("tx-hook", pid, epoch, "cg-A")
+	_ = s.AddOffsetsToTxn("tx-hook", pid, epoch, "cg-B")
+
+	var calls []struct {
+		group  string
+		pid    int64
+		commit bool
+	}
+	s.SetTxnOffsetHook(func(group string, p int64, commit bool) {
+		calls = append(calls, struct {
+			group  string
+			pid    int64
+			commit bool
+		}{group, p, commit})
+	})
+
+	if err := s.EndTxn("tx-hook", pid, epoch, true); err != nil {
+		t.Fatalf("endTxn: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 hook calls, got %d: %+v", len(calls), calls)
+	}
+	gotGroups := map[string]bool{calls[0].group: true, calls[1].group: true}
+	if !gotGroups["cg-A"] || !gotGroups["cg-B"] {
+		t.Errorf("missing groups in hook calls: %+v", calls)
+	}
+	for _, c := range calls {
+		if c.pid != pid || !c.commit {
+			t.Errorf("call mismatch: %+v want pid=%d commit=true", c, pid)
+		}
+	}
+
+	// Groups list cleared after EndTxn.
+	got := s.Snapshot()["tx-hook"]
+	if len(got.Groups) != 0 {
+		t.Errorf("groups should be cleared post-commit: %+v", got.Groups)
+	}
+}
+
+// TestEndTxnAbortFiresOffsetHookWithCommitFalse.
+func TestEndTxnAbortFiresOffsetHookWithCommitFalse(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 50)
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocate("tx-abort-hook", alloc)
+	_ = s.AddOffsetsToTxn("tx-abort-hook", pid, epoch, "cg-X")
+
+	var commits []bool
+	s.SetTxnOffsetHook(func(_ string, _ int64, commit bool) {
+		commits = append(commits, commit)
+	})
+	if err := s.EndTxn("tx-abort-hook", pid, epoch, false); err != nil {
+		t.Fatalf("endTxn abort: %v", err)
+	}
+	if len(commits) != 1 || commits[0] {
+		t.Errorf("expected one hook call with commit=false, got %+v", commits)
+	}
+}

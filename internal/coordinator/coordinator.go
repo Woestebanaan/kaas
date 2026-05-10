@@ -381,6 +381,103 @@ func (m *Manager) OffsetCommit(req *api.OffsetCommitRequest) *api.OffsetCommitRe
 	return resp
 }
 
+// WireTxnOffsetHook installs the gh #24/#27 cross-coordinator hook
+// on a TxnStateStore so that EndTxn(commit) materialises any pending
+// offsets staged by TxnOffsetCommit, and EndTxn(abort) discards
+// them. Wired from cmd/skafka/cluster_runtime.go after both the
+// txn store and the offset coord are up.
+//
+// Same-broker scope: when txn coordinator and group coordinator
+// happen to be the same broker (single-broker dev, or hash collision)
+// the hook fires locally. Cross-broker dispatch — when the txn
+// coordinator must signal another broker's offset store — lands
+// with gh #114 WriteTxnMarkers.
+func (m *Manager) WireTxnOffsetHook(s *TxnStateStore) {
+	s.SetTxnOffsetHook(func(groupID string, pid int64, commit bool) {
+		if !m.isCoordinator(groupID) {
+			// Cross-broker — gh #114 follow-up will dispatch a
+			// WriteTxnMarkers RPC here. Today the pending offsets
+			// remain staged on the actual group-coord broker; a
+			// future commit/abort RPC will reach them.
+			return
+		}
+		if commit {
+			_ = m.offsets.CommitPending(groupID, pid)
+		} else {
+			m.offsets.DiscardPending(groupID, pid)
+		}
+	})
+}
+
+// TxnOffsetCommit (API key 28) stages offsets from a transactional
+// producer's `sendOffsetsToTransaction`. Mirrors Apache's
+// GroupCoordinator.handleTxnCommitOffsets. gh #27.
+//
+// Validation:
+//   - groupID empty → INVALID_GROUP_ID (per partition)
+//   - this broker isn't the group coordinator → NOT_COORDINATOR
+//   - txnID empty → INVALID_REQUEST
+//
+// Offsets are staged in the offset store's pending layer keyed by
+// (groupID, producerID); they are NOT visible to OffsetFetch until
+// EndTxn(commit) fires CommitPending via the TxnStateStore's
+// txnOffsetHook. EndTxn(abort) calls DiscardPending instead.
+//
+// Producer epoch / member-identity validation is intentionally
+// loose at this layer — the gh #91 TxnOwnership gate (when wired
+// upstream) plus the storage-side (PID, epoch) match in EndTxn
+// catch the load-bearing cases.
+func (m *Manager) TxnOffsetCommit(req *api.TxnOffsetCommitRequest) *api.TxnOffsetCommitResponse {
+	makeErrResp := func(errCode int16) *api.TxnOffsetCommitResponse {
+		resp := &api.TxnOffsetCommitResponse{}
+		for _, t := range req.Topics {
+			tr := api.TxnOffsetCommitResponseTopic{Name: t.Name}
+			for _, p := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, api.TxnOffsetCommitResponsePartition{
+					PartitionIndex: p.PartitionIndex,
+					ErrorCode:      errCode,
+				})
+			}
+			resp.Topics = append(resp.Topics, tr)
+		}
+		return resp
+	}
+
+	if req.TransactionalID == "" {
+		return makeErrResp(int16(codec.ErrInvalidRequest))
+	}
+	if req.GroupID == "" {
+		return makeErrResp(int16(codec.ErrInvalidGroupID))
+	}
+	if !m.isCoordinator(req.GroupID) {
+		return makeErrResp(int16(codec.ErrNotCoordinator))
+	}
+
+	// Stage offsets. Use a single map (no per-partition partial
+	// failure today — the storage layer either takes them all or
+	// fails fully).
+	offsets := make(map[string]int64)
+	for _, t := range req.Topics {
+		for _, p := range t.Partitions {
+			offsets[offsetKey(t.Name, p.PartitionIndex)] = p.CommittedOffset
+		}
+	}
+	m.offsets.StorePending(req.GroupID, req.ProducerID, offsets)
+
+	// Per-partition response: every partition gets NONE on success.
+	resp := &api.TxnOffsetCommitResponse{}
+	for _, t := range req.Topics {
+		tr := api.TxnOffsetCommitResponseTopic{Name: t.Name}
+		for _, p := range t.Partitions {
+			tr.Partitions = append(tr.Partitions, api.TxnOffsetCommitResponsePartition{
+				PartitionIndex: p.PartitionIndex,
+			})
+		}
+		resp.Topics = append(resp.Topics, tr)
+	}
+	return resp
+}
+
 func (m *Manager) OffsetFetch(req *api.OffsetFetchRequest) *api.OffsetFetchResponse {
 	resp := &api.OffsetFetchResponse{}
 

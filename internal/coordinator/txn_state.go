@@ -78,6 +78,12 @@ type TxnStateStore struct {
 	numSlots int
 
 	mu sync.Mutex
+
+	// txnOffsetHook is the gh #24/#27 cross-coordinator hook fired
+	// from EndTxn for each (groupID, producerID) that has staged
+	// pending offsets. Optional — nil in tests / dev mode where the
+	// offset store hasn't been wired.
+	txnOffsetHook TxnOffsetHook
 }
 
 // TxnEntry is the persistent record of a transactional producer.
@@ -112,6 +118,16 @@ type TxnEntry struct {
 	// follow-up which adds WriteTxnMarkers + read-committed isolation).
 	// The Prepare* states exist in the schema for forward compat.
 	State string `json:"state,omitempty"`
+	// Groups is the gh #24 per-txn consumer-group list — the
+	// transactional producer called AddOffsetsToTxn(groupID) once per
+	// group it intends to commit offsets to. On EndTxn the txn
+	// coordinator signals each group's offset coordinator (via
+	// WriteTxnMarkers gh #114 follow-up) to materialise or discard
+	// the pending offsets. Apache's TransactionMetadata records this
+	// implicitly by adding the __consumer_offsets[partitionFor(groupId)]
+	// partition to topicPartitions; skafka tracks the groupID
+	// directly since we don't have a __consumer_offsets topic.
+	Groups []string `json:"groups,omitempty"`
 }
 
 // TxnTopic is one (topic, partitions) tuple inside a TxnEntry.
@@ -294,6 +310,101 @@ func (s *TxnStateStore) AddPartitions(txnID string, pid int64, epoch int16, addi
 	return s.persistSlot(slot, state)
 }
 
+// AddOffsetsToTxn records that the producer will commit offsets to
+// consumer group `groupID` as part of this transaction. gh #24
+// (API key 25) — sibling of AddPartitionsToTxn for the offset path.
+//
+// Same validation pattern: (txnID, PID, epoch) must match an
+// Ongoing-or-Empty entry; state transitions Empty/Complete* →
+// Ongoing. Idempotent — re-adding the same group is a no-op.
+//
+// The recorded group list is used by EndTxn (and the future #114
+// WriteTxnMarkers path) to know which offset coordinators need a
+// commit/abort signal at txn completion time.
+func (s *TxnStateStore) AddOffsetsToTxn(txnID string, pid int64, epoch int16, groupID string) error {
+	if txnID == "" {
+		return ErrEmptyTxnID
+	}
+	if groupID == "" {
+		// Apache's INVALID_GROUP_ID — caller may map to
+		// ErrInvalidGroupID, but the AddOffsetsToTxn wire spec
+		// surfaces it as INVALID_REQUEST at the txn handler. Keep
+		// ErrEmptyTxnID's behaviour shape: caller distinguishes.
+		return ErrTxnInvalidState
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	slot := s.slotFor(txnID)
+	state, err := s.loadSlot(slot)
+	if err != nil {
+		return err
+	}
+
+	entry, ok := state[txnID]
+	if !ok {
+		return ErrTxnUnknownProducer
+	}
+	if entry.PID != pid {
+		return ErrTxnUnknownProducer
+	}
+	if entry.Epoch != epoch {
+		return ErrTxnEpochFenced
+	}
+	switch entry.State {
+	case TxnStatePrepareCommit, TxnStatePrepareAbort:
+		return ErrTxnConcurrent
+	}
+
+	// Idempotent dedup of the group list.
+	for _, g := range entry.Groups {
+		if g == groupID {
+			// State machine still needs to advance to Ongoing if it's
+			// somehow in Empty/Complete* with a stale group entry.
+			if entry.State != TxnStateOngoing {
+				entry.State = TxnStateOngoing
+				state[txnID] = entry
+				return s.persistSlot(slot, state)
+			}
+			return nil
+		}
+	}
+	entry.Groups = append(entry.Groups, groupID)
+	if entry.State != TxnStateOngoing {
+		entry.State = TxnStateOngoing
+	}
+	state[txnID] = entry
+	return s.persistSlot(slot, state)
+}
+
+// TxnOffsetHook is the txn-coordinator → offset-coordinator signal
+// that fires on every EndTxn transition. gh #24/#27: for each group
+// that was registered via AddOffsetsToTxn, the txn coordinator must
+// tell the group's offset store to either materialise
+// (commit) or discard (abort) the pending offsets that
+// TxnOffsetCommit staged earlier.
+//
+// In Apache, this signal travels via WriteTxnMarkers to the
+// __consumer_offsets[partitionFor(groupId)] partition's leader.
+// Skafka v0.1.97+ stages this as a local hook — when txn coord and
+// group coord live on the same broker it fires directly; gh #114
+// will add the cross-broker dispatch.
+//
+// commit=true → CommitPending, commit=false → DiscardPending.
+type TxnOffsetHook func(groupID string, producerID int64, commit bool)
+
+// SetTxnOffsetHook wires the cross-coordinator signal. Optional —
+// when nil, EndTxn just clears the per-txn group list and the
+// pending offsets remain staged (a follow-up commit/abort will
+// reach them indirectly). Production wires manager.go's
+// `(groupID, pid, commit) → m.OffsetStore.{Commit,Discard}Pending`.
+func (s *TxnStateStore) SetTxnOffsetHook(h TxnOffsetHook) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.txnOffsetHook = h
+}
+
 // EndTxn implements the EndTxn (API key 26) state transition.
 // gh #25 (commit) + gh #26 (abort).
 //
@@ -353,6 +464,18 @@ func (s *TxnStateStore) EndTxn(txnID string, pid int64, epoch int16, commit bool
 			entry.State = TxnStateCompleteAbort
 		}
 		entry.Partitions = nil
+		// gh #24/#27: fire the cross-coordinator hook for each
+		// (groupID, pid) so its offset store either materialises or
+		// discards the pending offsets staged by TxnOffsetCommit.
+		// When txn coord = group coord (single broker, or same hash
+		// slot), this is a local call. Cross-broker dispatch lands
+		// with gh #114 WriteTxnMarkers.
+		if s.txnOffsetHook != nil {
+			for _, g := range entry.Groups {
+				s.txnOffsetHook(g, pid, commit)
+			}
+		}
+		entry.Groups = nil
 	case TxnStateCompleteCommit:
 		// Idempotent retry of commit — return NONE without persist.
 		// Mismatched action (abort on committed txn) is invalid.
@@ -459,7 +582,7 @@ var (
 // TxnEntry contains a slice (Partitions) — direct struct comparison
 // is a compile error.
 func txnEntriesEqual(a, b TxnEntry) bool {
-	if a.PID != b.PID || a.Epoch != b.Epoch {
+	if a.PID != b.PID || a.Epoch != b.Epoch || a.State != b.State {
 		return false
 	}
 	if len(a.Partitions) != len(b.Partitions) {
@@ -476,6 +599,14 @@ func txnEntriesEqual(a, b TxnEntry) bool {
 			if a.Partitions[i].Partitions[j] != b.Partitions[i].Partitions[j] {
 				return false
 			}
+		}
+	}
+	if len(a.Groups) != len(b.Groups) {
+		return false
+	}
+	for i := range a.Groups {
+		if a.Groups[i] != b.Groups[i] {
+			return false
 		}
 	}
 	return true

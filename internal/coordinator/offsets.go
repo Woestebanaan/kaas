@@ -15,6 +15,28 @@ type OffsetStore struct {
 	dataDir string
 	mu      sync.RWMutex
 	cache   map[string]map[string]int64 // groupID → "topic/partition" → offset
+
+	// pending is the gh #27 in-flight transactional offset commit
+	// buffer. Keyed by (groupID, producerID): the offsets a
+	// transactional producer wrote via TxnOffsetCommit but the
+	// transaction has not yet committed (EndTxn not yet seen).
+	// Regular Fetch ignores these — they're invisible until the
+	// txn coordinator signals CommitPending. EndTxn(abort) calls
+	// DiscardPending.
+	//
+	// Persisted in memory only; on broker restart in-flight
+	// transactional offsets are lost (correct: an unfinished txn
+	// must rebuild from scratch). The committed Fetch view survives
+	// restart via the regular cache/disk file.
+	pending map[pendingKey]map[string]int64
+}
+
+// pendingKey is the (groupID, producerID) identity of a pending
+// transactional offset-commit batch. Multiple producers can be
+// mid-txn against the same group; each gets a separate slot.
+type pendingKey struct {
+	groupID    string
+	producerID int64
 }
 
 // FetchSpec describes which topic partitions to fetch offsets for.
@@ -27,7 +49,69 @@ func NewOffsetStore(dataDir string) *OffsetStore {
 	return &OffsetStore{
 		dataDir: dataDir,
 		cache:   make(map[string]map[string]int64),
+		pending: make(map[pendingKey]map[string]int64),
 	}
+}
+
+// CommitPending stages offsets from a TxnOffsetCommit (API 28).
+// They are NOT visible to OffsetFetch until CommitPending(committed=true)
+// is called from the EndTxn path. Mirrors Apache's
+// `GroupMetadataManager.storeOffsets(... producerId, producerEpoch ...)`
+// which marks the offsets as in-flight in the offset-cache. gh #27.
+func (s *OffsetStore) StorePending(groupID string, producerID int64, offsets map[string]int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := pendingKey{groupID, producerID}
+	existing := s.pending[key]
+	if existing == nil {
+		existing = make(map[string]int64, len(offsets))
+		s.pending[key] = existing
+	}
+	for k, v := range offsets {
+		existing[k] = v
+	}
+}
+
+// CommitPending materialises the staged offsets for (group, pid) as
+// committed (merged into the visible cache + persisted). Called from
+// the EndTxn(commit) handler — gh #27 / gh #114 follow-up will wire
+// the cross-coordinator signal. Idempotent: no pending entry → nil.
+func (s *OffsetStore) CommitPending(groupID string, producerID int64) error {
+	s.mu.Lock()
+	key := pendingKey{groupID, producerID}
+	pendingOffsets, ok := s.pending[key]
+	if !ok {
+		s.mu.Unlock()
+		return nil
+	}
+	delete(s.pending, key)
+	s.mu.Unlock()
+	return s.Commit(groupID, pendingOffsets)
+}
+
+// DiscardPending drops staged offsets for (group, pid) without
+// materialising. Called from EndTxn(abort). Idempotent.
+func (s *OffsetStore) DiscardPending(groupID string, producerID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, pendingKey{groupID, producerID})
+}
+
+// PendingFor returns a snapshot of staged offsets for (group, pid).
+// Exposed for tests; production code paths use CommitPending /
+// DiscardPending. Returns nil when no pending entry exists.
+func (s *OffsetStore) PendingFor(groupID string, producerID int64) map[string]int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src := s.pending[pendingKey{groupID, producerID}]
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
 }
 
 func offsetKey(topic string, partition int32) string {

@@ -159,7 +159,9 @@ func flexibleRequestHeader(apiKey, apiVersion int16) bool {
 		21: 2,  // DeleteRecords
 		22: 2,  // InitProducerId
 		24: 3,  // AddPartitionsToTxn (gh #23, flexibleVersions=3+)
+		25: 3,  // AddOffsetsToTxn (gh #24, flexibleVersions=3+)
 		26: 3,  // EndTxn (gh #25/#26, flexibleVersions=3+)
+		28: 3,  // TxnOffsetCommit (gh #27, flexibleVersions=3+)
 		42: 2,  // DeleteGroups
 		29: 2,  // DescribeAcls
 		30: 2,  // CreateAcls
