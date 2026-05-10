@@ -105,6 +105,43 @@ type group struct {
 	// their memberID across a network blip without polluting the
 	// rebalance — Apache's `pendingMembers` set in GroupMetadata.scala.
 	pendingMembers map[string]*time.Timer
+
+	// initialRebalance is true from group creation until the first
+	// completeRebalance fires. While true, maybeCompleteRebalance is
+	// a no-op and every new joiner extends the rebalance-completion
+	// timer by initialRebalanceDelayMs (capped at the absolute
+	// initialRebalanceDeadline). Mirrors Apache Kafka's
+	// InitialDelayedJoin + newMemberAdded extension
+	// (GroupCoordinator.scala). Without this, skafka completes the
+	// initial rebalance the instant len(joinWaiters) catches up to
+	// len(members) — which on a 4-pod cold-start fires at 2/2 and
+	// kicks pods 3-4 into a second-generation rebalance, racing the
+	// first generation's SyncGroup. gh #111 cold-start race.
+	initialRebalance         bool
+	initialRebalanceDeadline time.Time
+}
+
+// emptyConsumerAssignment returns a freshly-allocated, wire-valid
+// serialized ConsumerProtocolAssignment v0 with no partitions and
+// null userData. Used by the gh #111 layer-4 missing-fill path when
+// the leader omits a member from its SyncGroup payload — the client
+// deserialises this cleanly (10 bytes) instead of tripping
+// IllegalStateException on a 0-byte field.
+//
+// Wire format (Apache ConsumerProtocol.SCHEMA_V0):
+//
+//	version          int16 = 0          → 0x00 0x00
+//	assigned_topics  array_len int32=0  → 0x00 0x00 0x00 0x00
+//	user_data        bytes_len int32=-1 → 0xff 0xff 0xff 0xff
+//
+// Returns a fresh slice each call so callers can safely store it
+// in a map without aliasing.
+func emptyConsumerAssignment() []byte {
+	return []byte{
+		0x00, 0x00, // version 0
+		0x00, 0x00, 0x00, 0x00, // empty assigned_topics array
+		0xff, 0xff, 0xff, 0xff, // null user_data
+	}
 }
 
 // cancelSync marks ss as aborted and closes ss.done so any followers
@@ -127,9 +164,10 @@ func cancelSync(ss *syncState) {
 
 func newGroup(id string) *group {
 	return &group{
-		id:             id,
-		members:        make(map[string]*groupMember),
-		pendingMembers: make(map[string]*time.Timer),
+		id:               id,
+		members:          make(map[string]*groupMember),
+		pendingMembers:   make(map[string]*time.Timer),
+		initialRebalance: true,
 	}
 }
 
@@ -192,14 +230,16 @@ func (g *group) join(req *api.JoinGroupRequest, version int16, clientID string) 
 
 	g.resetHeartbeatTimer(m)
 
-	// isNewGroup tracks whether this is the first member of a brand-new group.
-	// For new groups we never complete early — we always wait for the rebalance timer
-	// so that concurrent joiners have a chance to register before the rebalance fires.
-	isNewGroup := g.state == stateEmpty
-
 	switch g.state {
 	case stateEmpty:
 		g.state = statePreparingRebalance
+		// Initial rebalance: set the absolute deadline so the
+		// per-arrival timer extension can't loop indefinitely if
+		// new members keep arriving every <initialRebalanceDelayMs.
+		// Capped at the longest member's rebalanceTimeoutMs (default
+		// 30s), mirrors Apache's `rebalanceTimeoutMs` ceiling on
+		// InitialDelayedJoin extensions.
+		g.initialRebalanceDeadline = time.Now().Add(maxRebalanceTimeout(g))
 		g.startRebalanceTimer(true)
 	case stateStable, stateCompletingRebalance:
 		g.state = statePreparingRebalance
@@ -211,13 +251,20 @@ func (g *group) join(req *api.JoinGroupRequest, version int16, clientID string) 
 		}
 	case statePreparingRebalance:
 		// Already rebalancing — just add/update the member.
+		// During the INITIAL rebalance, extend the completion timer
+		// by initialRebalanceDelayMs each time a new member arrives.
+		// This is what stops the gh #111 cold-start race at the
+		// source: the rebalance can't complete until 3s of quiet,
+		// so all 4 pods have time to register in joinWaiters before
+		// the leader is picked. Bounded by initialRebalanceDeadline.
+		if g.initialRebalance && !exists {
+			g.startRebalanceTimer(true)
+		}
 	}
 
 	ch := make(chan joinResult, 1)
 	g.joinWaiters = append(g.joinWaiters, joinWaiter{memberID: memberID, ch: ch})
-	if !isNewGroup {
-		g.maybeCompleteRebalance()
-	}
+	g.maybeCompleteRebalance()
 
 	g.mu.Unlock()
 
@@ -226,9 +273,36 @@ func (g *group) join(req *api.JoinGroupRequest, version int16, clientID string) 
 }
 
 func (g *group) maybeCompleteRebalance() {
+	// Initial rebalance never completes early — rely on the timer so
+	// late-arriving cold-start members have a chance to register
+	// before the leader is picked (gh #111 layer 1 / Apache's
+	// InitialDelayedJoin). Subsequent rebalances are safe to
+	// short-circuit because every g.members entry is from a prior
+	// generation; if all of them have rejoined, no new arrivals are
+	// expected.
+	if g.initialRebalance {
+		return
+	}
 	if g.state == statePreparingRebalance && len(g.joinWaiters) >= len(g.members) {
 		g.completeRebalance()
 	}
+}
+
+// maxRebalanceTimeout returns the longest rebalanceTimeoutMs declared
+// by any current member, defaulting to 30s when no member set one.
+// Used as the absolute upper bound on the initial-rebalance window.
+// Caller must hold g.mu.
+func maxRebalanceTimeout(g *group) time.Duration {
+	var maxMs int32
+	for _, m := range g.members {
+		if m.rebalanceTimeoutMs > maxMs {
+			maxMs = m.rebalanceTimeoutMs
+		}
+	}
+	if maxMs <= 0 {
+		maxMs = 30_000
+	}
+	return time.Duration(maxMs) * time.Millisecond
 }
 
 func (g *group) completeRebalance() {
@@ -253,6 +327,8 @@ func (g *group) completeRebalance() {
 		g.rebalanceTimer = nil
 	}
 	g.state = stateCompletingRebalance
+	g.initialRebalance = false
+	g.initialRebalanceDeadline = time.Time{}
 	g.generationID++
 	g.protocolName = selectProtocol(g.members, g.joinWaiters)
 	span.SetAttributes(
@@ -347,17 +423,22 @@ func (g *group) sync(req *api.SyncGroupRequest) *api.SyncGroupResponse {
 		for _, a := range req.Assignments {
 			ss.assignments[a.MemberID] = a.Assignment
 		}
-		// gh #111: Apache fills any member missing from the leader's
-		// payload with explicit empty bytes + warn log
-		// (GroupCoordinator.scala:605-609). This makes the broker's
-		// view explicit instead of inferring from a nil map lookup,
-		// and any future regression that drops a member shows up in
-		// the broker logs rather than as an opaque
-		// IllegalStateException on the client.
+		// gh #111 layer 4: when the leader omits a member, fill that
+		// member's slot with a *valid serialized empty
+		// ConsumerProtocolAssignment* (10 bytes: int16 version=0,
+		// int32 array-len=0 partitions, int32 bytes-len=-1 null
+		// userData). Apache stores Array.empty[Byte] here
+		// (GroupCoordinator.scala:605-609) which is 0 wire bytes —
+		// and Java's ConsumerCoordinator then throws
+		// IllegalStateException ("insufficient bytes available to
+		// read assignment"). We exceed Apache parity and write a
+		// valid empty assignment so the client deserialises cleanly
+		// and waits for the next rebalance instead of crashing.
+		// The warn log keeps the broker-side incident visible.
 		for memberID := range g.members {
 			if _, ok := ss.assignments[memberID]; !ok {
-				ss.assignments[memberID] = []byte{}
-				slog.Warn("syncgroup: leader omitted member from assignment, sending empty bytes",
+				ss.assignments[memberID] = emptyConsumerAssignment()
+				slog.Warn("syncgroup: leader omitted member from assignment, sending valid-empty assignment",
 					"group", g.id,
 					"member", memberID,
 					"generation", g.generationID,
@@ -641,10 +722,16 @@ func (g *group) resetHeartbeatTimer(m *groupMember) {
 // Mirrors Kafka's group.initial.rebalance.delay.ms — short enough that a single consumer
 // joining a brand-new group doesn't have to wait out the client's max.poll.interval.ms
 // (which is sent as RebalanceTimeoutMs and defaults to 5 minutes).
-const initialRebalanceDelayMs int32 = 3000
+//
+// Declared as a var (not const) so the package's own tests can shrink
+// it; production callers never mutate it.
+var initialRebalanceDelayMs int32 = 3000
 
 // startRebalanceTimer starts the rebalance completion timer.
 // initial=true caps the wait at initialRebalanceDelayMs for the first rebalance of a new group.
+// During an initial rebalance with the absolute deadline already set,
+// the wait is further capped at the time remaining to that deadline,
+// so repeated extensions can't loop past rebalanceTimeoutMs.
 // Must be called with g.mu held.
 func (g *group) startRebalanceTimer(initial bool) {
 	var maxMs int32
@@ -658,6 +745,15 @@ func (g *group) startRebalanceTimer(initial bool) {
 	}
 	if initial && maxMs > initialRebalanceDelayMs {
 		maxMs = initialRebalanceDelayMs
+	}
+	if initial && !g.initialRebalanceDeadline.IsZero() {
+		remainingMs := time.Until(g.initialRebalanceDeadline).Milliseconds()
+		if remainingMs < 0 {
+			remainingMs = 0
+		}
+		if int64(maxMs) > remainingMs {
+			maxMs = int32(remainingMs)
+		}
 	}
 	if g.rebalanceTimer != nil {
 		g.rebalanceTimer.Stop()

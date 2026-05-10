@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"bytes"
 	"sync"
 	"testing"
 	"time"
@@ -51,15 +52,15 @@ func TestSyncGroupFollowerInStableState(t *testing.T) {
 	}
 }
 
-// TestSyncGroupLeaderOmittedMemberFilledExplicitly guards the gh #111
-// safety net Apache emits at GroupCoordinator.scala:605-609 — when the
-// leader's req.Assignments is missing a group member, the broker fills
-// that member's slot with explicit empty bytes (not nil) and emits a
-// warn log. The wire result is still 0 bytes (Apache's choice), but
-// having an explicit map entry makes the decision auditable in the
-// broker logs and prevents future regressions where a nil-map lookup
-// looks identical to "leader said empty".
-func TestSyncGroupLeaderOmittedMemberFilledExplicitly(t *testing.T) {
+// TestSyncGroupLeaderOmittedMemberFilledWithValidEmpty guards the gh
+// #111 layer-4 safety net: when the leader's req.Assignments is
+// missing a group member, the broker fills that slot with a valid
+// serialized ConsumerProtocolAssignment-v0 (10 bytes) instead of an
+// empty byte slice. Apache stores Array.empty[Byte] here, but Java's
+// ConsumerCoordinator then throws IllegalStateException — we exceed
+// Apache parity by writing a wire-valid empty assignment so the
+// client deserialises cleanly.
+func TestSyncGroupLeaderOmittedMemberFilledWithValidEmpty(t *testing.T) {
 	g := newGroup("test-cg")
 	g.members["leader"] = &groupMember{id: "leader"}
 	g.members["forgotten"] = &groupMember{id: "forgotten"}
@@ -92,11 +93,9 @@ func TestSyncGroupLeaderOmittedMemberFilledExplicitly(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected explicit fill for omitted member, ss.assignments[\"forgotten\"] not present")
 	}
-	if val == nil {
-		t.Fatalf("expected explicit empty bytes (non-nil), got nil — defeats the audit-log purpose")
-	}
-	if len(val) != 0 {
-		t.Fatalf("expected zero-length bytes, got %d", len(val))
+	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff}
+	if !bytes.Equal(val, want) {
+		t.Fatalf("expected valid serialized empty assignment %x, got %x", want, val)
 	}
 }
 
@@ -211,6 +210,90 @@ func TestSyncGroupCanceledByConcurrentJoinReturnsRebalanceInProgress(t *testing.
 	}
 	if len(resp.Assignment) != 0 {
 		t.Fatalf("canceled response should have empty assignment, got %d bytes", len(resp.Assignment))
+	}
+}
+
+// TestInitialRebalanceWaitsForLateColdStartArrivals exercises gh #111
+// layer 1: on a brand-new group, maybeCompleteRebalance must NOT
+// short-circuit when the second joiner makes len(joinWaiters) catch
+// up with len(members). Pre-fix the rebalance completed at 2/2 and
+// the 3rd/4th cold-start members were forced into a second
+// generation, racing the first generation's SyncGroup. Post-fix the
+// rebalance waits the (extended) initial-delay timer; all 4 members
+// land in a single generation.
+func TestInitialRebalanceWaitsForLateColdStartArrivals(t *testing.T) {
+	// Shrink the delay so the test doesn't sit for 3s. Each new
+	// joiner extends the timer by this amount; after the last
+	// joiner, the rebalance fires <delay> later.
+	prev := initialRebalanceDelayMs
+	initialRebalanceDelayMs = 80
+	t.Cleanup(func() { initialRebalanceDelayMs = prev })
+
+	g := newGroup("cold-start-cg")
+
+	// Helper: drive a v9 JoinGroup synchronously through the
+	// KIP-394 two-step flow, return the final response (gen + leader
+	// + members list if leader).
+	twoStep := func(name string) *api.JoinGroupResponse {
+		first := g.join(&api.JoinGroupRequest{
+			ProtocolType:       "consumer",
+			SessionTimeoutMs:   30_000,
+			RebalanceTimeoutMs: 30_000,
+			Protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("m")}},
+		}, 9, name)
+		if first.ErrorCode != int16(codec.ErrMemberIDRequired) {
+			t.Fatalf("first-step expected MemberIDRequired, got errorCode=%d", first.ErrorCode)
+		}
+		return g.join(&api.JoinGroupRequest{
+			MemberID:           first.MemberID,
+			ProtocolType:       "consumer",
+			SessionTimeoutMs:   30_000,
+			RebalanceTimeoutMs: 30_000,
+			Protocols:          []api.JoinGroupProtocol{{Name: "range", Metadata: []byte("m")}},
+		}, 9, name)
+	}
+
+	// 4 cold-start consumers fan out concurrently. Stagger them
+	// inside the 80ms initial-delay window so the timer extension
+	// must absorb late arrivals.
+	results := make([]*api.JoinGroupResponse, 4)
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			time.Sleep(time.Duration(idx*20) * time.Millisecond)
+			results[idx] = twoStep("client-" + string(rune('A'+idx)))
+		}(i)
+	}
+	wg.Wait()
+
+	// Every member must land in the SAME generation — the cold-start
+	// race shows up as different generationIDs for early vs late
+	// arrivals. Membership in resp.Members for the leader's response
+	// must include all 4.
+	gen := results[0].GenerationID
+	for i, r := range results {
+		if r.ErrorCode != 0 {
+			t.Fatalf("result[%d]: errorCode=%d", i, r.ErrorCode)
+		}
+		if r.GenerationID != gen {
+			t.Fatalf("result[%d]: generation %d, want %d (all members must share one generation on cold start)",
+				i, r.GenerationID, gen)
+		}
+	}
+
+	// Find the leader's response and assert its Members list covers all 4.
+	var leaderMembers []api.JoinGroupMember
+	for _, r := range results {
+		if r.MemberID == r.Leader {
+			leaderMembers = r.Members
+			break
+		}
+	}
+	if len(leaderMembers) != 4 {
+		t.Fatalf("leader's resp.Members has %d entries, want 4 — late cold-start members were lost",
+			len(leaderMembers))
 	}
 }
 
