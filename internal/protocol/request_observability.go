@@ -38,7 +38,14 @@ import (
 // thread a Metrics pointer through main.go.
 func RequestObservability() Middleware {
 	return func(apiKey int16, next Handler) Handler {
+		// Capture both the numeric key (joinable to the wire protocol)
+		// and the human-readable name (joinable to Grafana legends)
+		// once at Register so the per-request path is allocation-free.
+		// Adding api_name is essentially free here: maps[int16]string
+		// is single-allocation at startup; the labelled metric.WithAttributes
+		// call goes through the same SDK attribute pipeline either way.
 		keyAttr := attribute.Int("api_key", int(apiKey))
+		nameAttr := attribute.String("api_name", APIName(apiKey))
 		return HandlerFunc(func(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
 			start := time.Now()
 			resp, err := next.Handle(conn, version, body)
@@ -47,6 +54,7 @@ func RequestObservability() Middleware {
 				time.Since(start).Seconds(),
 				metric.WithAttributes(
 					keyAttr,
+					nameAttr,
 					attribute.Int("version", int(version)),
 				),
 			)

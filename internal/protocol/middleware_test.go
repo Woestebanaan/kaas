@@ -125,6 +125,10 @@ func TestRequestObservabilityUniformCoverage(t *testing.T) {
 	}
 
 	seen := map[int64]bool{}
+	// gh #128 follow-up: every datapoint also carries the api_name
+	// string attribute. wantNames maps the int key to the expected
+	// human-readable name produced by APIName().
+	wantNames := map[int64]string{3: "Metadata", 11: "JoinGroup", 25: "AddOffsetsToTxn"}
 	for _, sm := range rm.ScopeMetrics {
 		for _, inst := range sm.Metrics {
 			if inst.Name != "skafka.request.latency" {
@@ -135,8 +139,16 @@ func TestRequestObservabilityUniformCoverage(t *testing.T) {
 				continue
 			}
 			for _, dp := range h.DataPoints {
-				if v, ok := dp.Attributes.Value("api_key"); ok {
-					seen[v.AsInt64()] = true
+				keyV, hasKey := dp.Attributes.Value("api_key")
+				nameV, hasName := dp.Attributes.Value("api_name")
+				if !hasKey {
+					continue
+				}
+				seen[keyV.AsInt64()] = true
+				if want, ok := wantNames[keyV.AsInt64()]; ok {
+					if !hasName || nameV.AsString() != want {
+						t.Errorf("api_key=%d carries api_name=%q, want %q", keyV.AsInt64(), nameV.AsString(), want)
+					}
 				}
 			}
 		}

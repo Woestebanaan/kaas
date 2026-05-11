@@ -12,8 +12,8 @@ import (
 
 // TestRequestTracingEmitsSpan pins gh #121 PR4's central contract:
 // every Dispatch call produces exactly one span on the tracer
-// provider, named "kafka.api_key=<n>" and attributed with api_key,
-// version, client_id, request_bytes, response_bytes.
+// provider, named "kafka.<APIName>" and attributed with api_key,
+// api_name, version, client_id, request_bytes, response_bytes.
 func TestRequestTracingEmitsSpan(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(
@@ -43,8 +43,8 @@ func TestRequestTracingEmitsSpan(t *testing.T) {
 		t.Fatalf("got %d spans, want 1", len(spans))
 	}
 	s := spans[0]
-	if s.Name() != "kafka.api_key=3" {
-		t.Errorf("name=%q, want kafka.api_key=3", s.Name())
+	if s.Name() != "kafka.Metadata" {
+		t.Errorf("name=%q, want kafka.Metadata", s.Name())
 	}
 
 	attrs := map[string]any{}
@@ -53,6 +53,9 @@ func TestRequestTracingEmitsSpan(t *testing.T) {
 	}
 	if v, ok := attrs["kafka.api_key"].(int64); !ok || v != 3 {
 		t.Errorf("kafka.api_key=%v, want 3", attrs["kafka.api_key"])
+	}
+	if v, ok := attrs["kafka.api_name"].(string); !ok || v != "Metadata" {
+		t.Errorf("kafka.api_name=%v, want Metadata", attrs["kafka.api_name"])
 	}
 	if v, ok := attrs["kafka.version"].(int64); !ok || v != 5 {
 		t.Errorf("kafka.version=%v, want 5", attrs["kafka.version"])

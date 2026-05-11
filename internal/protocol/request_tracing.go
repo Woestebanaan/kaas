@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"context"
-	"fmt"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -36,14 +35,20 @@ import (
 // internally).
 func RequestTracing() Middleware {
 	return func(apiKey int16, next Handler) Handler {
-		spanName := fmt.Sprintf("kafka.api_key=%d", apiKey)
+		// gh #128 follow-up: name the span by API rather than by raw
+		// key so Tempo / Jaeger UIs show "kafka.Produce" instead of
+		// "kafka.api_key=0".
+		apiNameStr := APIName(apiKey)
+		spanName := "kafka." + apiNameStr
 		keyAttr := attribute.Int("kafka.api_key", int(apiKey))
+		nameAttr := attribute.String("kafka.api_name", apiNameStr)
 		return HandlerFunc(func(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
 			_, span := observability.Tracer().Start(
 				context.Background(),
 				spanName,
 				trace.WithAttributes(
 					keyAttr,
+					nameAttr,
 					attribute.Int("kafka.version", int(version)),
 					attribute.String("kafka.client_id", conn.ClientID),
 					attribute.Int("kafka.request_bytes", len(body)),
