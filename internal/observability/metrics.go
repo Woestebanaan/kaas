@@ -129,6 +129,23 @@ type Metrics struct {
 	// Connection counters per listener.
 	Connections     metric.Int64Counter
 	ConnectionsOpen metric.Int64UpDownCounter
+
+	// gh #121 PR3: cleaner + compactor instrumentation. Pre-PR3 the
+	// retention and log-compaction paths were completely unobserved —
+	// the only way to know whether they ran was to grep slog output.
+	// Cleaner = retention (delete-by-time, delete-by-size). Compactor
+	// = log-compaction (keep-latest-per-key). They share NewMetrics
+	// but live in distinct namespaces so dashboards can split them.
+	CleanerRuns              metric.Int64Counter     // per-cycle (label: result=ok|error)
+	CleanerDuration          metric.Float64Histogram // wall-clock per partition cleaned
+	CleanerSegmentsDeleted   metric.Int64Counter     // (label: reason=time|size)
+	CleanerBytesReclaimed    metric.Int64Counter     // sum of deleted-segment sizes (label: reason=time|size)
+	CompactionRuns           metric.Int64Counter     // per partition compaction (label: result=ok|error|aborted)
+	CompactionDuration       metric.Float64Histogram // wall-clock per partition compaction
+	CompactionRecordsKept    metric.Int64Counter     // records surviving the compactor pass
+	CompactionRecordsDropped metric.Int64Counter     // records superseded by later writes (deduplication win)
+	CompactionBytesIn        metric.Int64Counter     // total source-segment bytes scanned
+	CompactionBytesOut       metric.Int64Counter     // bytes written to the replacement segment
 }
 
 // NewMetrics creates all instruments on the given meter. Errors from individual
@@ -263,6 +280,58 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.ConnectionsOpen, err = m.Int64UpDownCounter("skafka.connections.open",
 		metric.WithDescription("Currently open client connections")); err != nil {
+		return nil, err
+	}
+	// gh #121 PR3: cleaner + compactor instruments. Pre-PR3 nothing
+	// emitted from these paths — runtime visibility was log-grep only.
+	if mx.CleanerRuns, err = m.Int64Counter("skafka.cleaner.runs",
+		metric.WithDescription("Retention cleaner partition-pass completions (result=ok|error)")); err != nil {
+		return nil, err
+	}
+	if mx.CleanerDuration, err = m.Float64Histogram("skafka.cleaner.duration",
+		metric.WithDescription("Wall-clock per retention cleaner partition pass"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
+		return nil, err
+	}
+	if mx.CleanerSegmentsDeleted, err = m.Int64Counter("skafka.cleaner.segments.deleted",
+		metric.WithDescription("Segments deleted by the retention cleaner (reason=time|size)"),
+		metric.WithUnit("{segment}")); err != nil {
+		return nil, err
+	}
+	if mx.CleanerBytesReclaimed, err = m.Int64Counter("skafka.cleaner.bytes.reclaimed",
+		metric.WithDescription("Bytes freed by retention deletes (reason=time|size). Approximates disk-pressure relief; on NFS the actual unlink may lag if another broker held the fd."),
+		metric.WithUnit("By")); err != nil {
+		return nil, err
+	}
+	if mx.CompactionRuns, err = m.Int64Counter("skafka.compaction.runs",
+		metric.WithDescription("Log compactor partition-pass completions (result=ok|error|aborted)")); err != nil {
+		return nil, err
+	}
+	if mx.CompactionDuration, err = m.Float64Histogram("skafka.compaction.duration",
+		metric.WithDescription("Wall-clock per log compactor partition pass"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
+		return nil, err
+	}
+	if mx.CompactionRecordsKept, err = m.Int64Counter("skafka.compaction.records.kept",
+		metric.WithDescription("Records surviving the compactor's keep-latest-per-key pass"),
+		metric.WithUnit("{record}")); err != nil {
+		return nil, err
+	}
+	if mx.CompactionRecordsDropped, err = m.Int64Counter("skafka.compaction.records.dropped",
+		metric.WithDescription("Records superseded by a later write for the same key — the dedup win"),
+		metric.WithUnit("{record}")); err != nil {
+		return nil, err
+	}
+	if mx.CompactionBytesIn, err = m.Int64Counter("skafka.compaction.bytes.in",
+		metric.WithDescription("Source-segment bytes scanned by the compactor (before dedup)"),
+		metric.WithUnit("By")); err != nil {
+		return nil, err
+	}
+	if mx.CompactionBytesOut, err = m.Int64Counter("skafka.compaction.bytes.out",
+		metric.WithDescription("Replacement-segment bytes written by the compactor (after dedup). bytes.in - bytes.out is the size savings."),
+		metric.WithUnit("By")); err != nil {
 		return nil, err
 	}
 	return mx, nil

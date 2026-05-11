@@ -6,7 +6,11 @@ import (
 	"os"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/woestebanaan/skafka/internal/lease"
+	"github.com/woestebanaan/skafka/internal/observability"
 )
 
 // CleanupPolicySource is the gh #48 hook the cleaner uses to learn
@@ -104,6 +108,15 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 		policy = c.policySrc.CleanupPolicy(p.Topic)
 	}
 
+	mx := observability.Global()
+	cleanStart := time.Now()
+	cleanResult := "ok"
+	defer func() {
+		mx.CleanerDuration.Record(context.Background(), time.Since(cleanStart).Seconds(),
+			metric.WithAttributes(attribute.String("topic", p.Topic)))
+		mx.CleanerRuns.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", cleanResult)))
+	}()
+
 	// gh #48: if the topic's policy involves compaction, run it
 	// first. Compaction operates on closed segments and produces
 	// a single replacement segment — the retention pass that
@@ -112,8 +125,9 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 	// and tail; we don't hold it during compaction's I/O.
 	if policyIsCompact(policy) {
 		if _, _, cerr := c.engine.compactPartition(ps); cerr != nil {
-			slog.Warn("compactor: partition failed",
+			slog.Warn("compactor: partition pass failed (retention pass will still run; compactor retries on next cycle)",
 				"topic", p.Topic, "partition", p.Partition, "err", cerr)
+			cleanResult = "error"
 		}
 	}
 
@@ -129,6 +143,7 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 
 	// --- time-based retention ---
 	deletedByTime := 0
+	bytesByTime := int64(0)
 	for len(ps.segments) > 0 {
 		seg := ps.segments[0]
 
@@ -145,12 +160,15 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 			break
 		}
 
+		sz := segmentSize(seg)
 		slog.Info("retention cleaner: deleting segment (time)",
 			"topic", p.Topic, "partition", p.Partition,
 			"baseOffset", seg.baseOffset,
-			"maxTimestamp", seg.maxTimestamp)
+			"maxTimestamp", seg.maxTimestamp,
+			"sizeBytes", sz)
 		ps.deleteSegment(0)
 		deletedByTime++
+		bytesByTime += sz
 	}
 
 	// --- size-based retention (gh #47) ---
@@ -162,6 +180,7 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 		limit = c.engine.cfg.RetentionBytes
 	}
 	deletedBySize := 0
+	bytesBySize := int64(0)
 	if limit > 0 {
 		total := totalClosedSize(ps.segments)
 		// Don't delete every closed segment to satisfy a tight limit —
@@ -178,13 +197,28 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 			total -= sz
 			ps.deleteSegment(0)
 			deletedBySize++
+			bytesBySize += sz
 		}
+	}
+
+	if deletedByTime > 0 {
+		mx.CleanerSegmentsDeleted.Add(context.Background(), int64(deletedByTime),
+			metric.WithAttributes(attribute.String("reason", "time")))
+		mx.CleanerBytesReclaimed.Add(context.Background(), bytesByTime,
+			metric.WithAttributes(attribute.String("reason", "time")))
+	}
+	if deletedBySize > 0 {
+		mx.CleanerSegmentsDeleted.Add(context.Background(), int64(deletedBySize),
+			metric.WithAttributes(attribute.String("reason", "size")))
+		mx.CleanerBytesReclaimed.Add(context.Background(), bytesBySize,
+			metric.WithAttributes(attribute.String("reason", "size")))
 	}
 
 	if deletedByTime > 0 || deletedBySize > 0 {
 		slog.Info("retention cleaner: cleaned partition",
 			"topic", p.Topic, "partition", p.Partition,
-			"deletedByTime", deletedByTime, "deletedBySize", deletedBySize)
+			"deletedByTime", deletedByTime, "deletedBySize", deletedBySize,
+			"bytesReclaimed", bytesByTime+bytesBySize)
 		// Persist the new logStartOffset so a broker restart picks
 		// up the cleaner's progress instead of "rediscovering" the
 		// already-deleted segments via a directory listing. The
@@ -193,8 +227,11 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 		// logStart advances. Best-effort — a write failure just
 		// means the next clean cycle re-deletes (idempotent).
 		if err := ps.persistManifestLocked(); err != nil {
-			slog.Warn("retention cleaner: persist manifest failed",
-				"topic", p.Topic, "partition", p.Partition, "err", err)
+			slog.Warn("retention cleaner: persisting manifest after deletes failed (cleaner re-runs on next cycle; harmless retry)",
+				"topic", p.Topic, "partition", p.Partition,
+				"deletedByTime", deletedByTime, "deletedBySize", deletedBySize,
+				"err", err)
+			cleanResult = "error"
 		}
 	}
 }

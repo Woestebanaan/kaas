@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -9,7 +10,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 )
 
@@ -50,6 +56,19 @@ import (
 // Returns (recordsKept, recordsDropped, err). On error the partition
 // is left untouched — the cleaner's next pass will retry.
 func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped int, err error) {
+	// gh #121 PR3: instrument the compaction path. Pre-PR3 nothing
+	// emitted from here; the only visibility was the slog.Info at the
+	// end of a successful run. Result is set to "error" on any failure
+	// and "aborted" on the segments-changed-under-us race; otherwise
+	// stays "ok".
+	mx := observability.Global()
+	compactStart := time.Now()
+	result := "ok"
+	defer func() {
+		mx.CompactionDuration.Record(context.Background(), time.Since(compactStart).Seconds())
+		mx.CompactionRuns.Add(context.Background(), 1, metric.WithAttributes(attribute.String("result", result)))
+	}()
+
 	ps.mu.Lock()
 	if len(ps.segments) == 0 {
 		ps.mu.Unlock()
@@ -63,6 +82,14 @@ func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped 
 	dir := ps.dir
 	epoch := ps.epoch
 	ps.mu.Unlock()
+
+	// bytes.in is the total source-segment size scanned. We capture
+	// it once before the rewrite; closedSegs is the immutable
+	// snapshot above.
+	var bytesIn int64
+	for _, seg := range closedSegs {
+		bytesIn += segmentSize(seg)
+	}
 
 	// Pass 1: build the key → highest-offset map. Walk segments in
 	// order so a later occurrence in a later segment overwrites
@@ -110,6 +137,7 @@ func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped 
 		k, d, werr := rewriteSegment(seg.logPath, out, offsetMap)
 		if werr != nil {
 			err = fmt.Errorf("compactor pass 2 (%s): %w", seg.logPath, werr)
+			result = "error"
 			return 0, 0, err
 		}
 		kept += k
@@ -117,12 +145,15 @@ func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped 
 	}
 
 	if err = out.Sync(); err != nil {
+		result = "error"
 		return 0, 0, fmt.Errorf("compactor: sync tmp: %w", err)
 	}
 	if err = out.Close(); err != nil {
+		result = "error"
 		return 0, 0, fmt.Errorf("compactor: close tmp: %w", err)
 	}
 	if err = os.Rename(tmpPath, finalPath); err != nil {
+		result = "error"
 		return 0, 0, fmt.Errorf("compactor: rename %s → %s: %w", tmpPath, finalPath, err)
 	}
 
@@ -137,7 +168,8 @@ func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped 
 	if len(ps.segments) == 0 || ps.segments[0].logPath != closedSegs[0].logPath {
 		ps.mu.Unlock()
 		_ = os.Remove(finalPath)
-		return 0, 0, fmt.Errorf("compactor: ps.segments changed during compaction; aborting")
+		result = "aborted"
+		return 0, 0, fmt.Errorf("compactor: ps.segments changed during compaction (concurrent takeover/recovery); discarding rewrite, next cycle retries")
 	}
 	// Remove the entries we compacted. Closed segments at the head
 	// of ps.segments are the ones we processed (sorted by baseOffset);
@@ -160,8 +192,24 @@ func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped 
 		_ = os.Remove(strings.TrimSuffix(seg.logPath, ".log") + ".timeindex")
 	}
 
+	// Stat the replacement segment for bytes_out. Best-effort —
+	// metric reports 0 if the stat races a takeover that closed it.
+	var bytesOut int64
+	if fi, statErr := os.Stat(finalPath); statErr == nil {
+		bytesOut = fi.Size()
+	}
+	mx.CompactionRecordsKept.Add(context.Background(), int64(kept))
+	mx.CompactionRecordsDropped.Add(context.Background(), int64(dropped))
+	mx.CompactionBytesIn.Add(context.Background(), bytesIn)
+	mx.CompactionBytesOut.Add(context.Background(), bytesOut)
+
 	slog.Info("compactor: compacted partition",
-		"dir", dir, "segments_in", len(closedSegs), "records_kept", kept, "records_dropped", dropped)
+		"dir", dir,
+		"segments_in", len(closedSegs),
+		"records_kept", kept,
+		"records_dropped", dropped,
+		"bytes_in", bytesIn,
+		"bytes_out", bytesOut)
 	return kept, dropped, nil
 }
 
