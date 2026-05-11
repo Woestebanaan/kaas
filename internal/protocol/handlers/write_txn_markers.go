@@ -97,7 +97,7 @@ func (h *WriteTxnMarkersHandler) writeMarker(topic string, partition int32, batc
 	// epoch=0 for control batches — they're idempotence-exempt
 	// (baseSequence=-1 in the encoded batch).
 	if _, err := h.store.Append(context.Background(), topic, partition, 0, batch); err != nil {
-		slog.Warn("write-txn-markers: append failed",
+		slog.Warn("write-txn-markers: appending a control batch (COMMIT/ABORT marker) failed (consumers in read_committed mode will not see the transaction's records as committed until the producer retries; client receives UNKNOWN_SERVER_ERROR and TransactionCoordinator retries)",
 			"topic", topic, "partition", partition, "err", err)
 		return int16(codec.ErrUnknownServerError)
 	}

@@ -255,9 +255,10 @@ func (r *PartitionReaper) reapOne(ctx context.Context, job reapJob) {
 		return
 	}
 	backoff := r.cfg.RetryBackoff * time.Duration(job.attempts)
-	slog.Warn("reaper: transient error, will retry",
+	slog.Warn("reaper: partition reap hit a transient error (NFS stalling, peer broker still holding a stale fd, or directory not yet empty); will retry after backoff. After MaxRetries the reaper gives up and the directory persists until next startup sweep",
 		"topic", job.topic, "partition", job.partition,
-		"attempts", job.attempts, "backoff", backoff, "err", err)
+		"attempts", job.attempts, "max_retries", r.cfg.MaxRetries,
+		"backoff", backoff, "err", err)
 	if r.metrics != nil {
 		r.metrics.Retried.Add(ctx, 1)
 	}

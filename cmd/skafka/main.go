@@ -99,7 +99,8 @@ func runBroker(ctx context.Context) {
 		brokerReg = k8spkg.NewBrokerRegistry(self, identity.DNS, nil)
 		go func() {
 			if err := brokerReg.Watch(ctx, k8sClient, namespace, headlessSvc); err != nil && ctx.Err() == nil {
-				slog.Error("endpoint watcher stopped", "err", err)
+				slog.Error("endpoint watcher: stopped before ctx cancellation (broker has lost EndpointSlice watch and will not see peer broker join/leave events until restart; assignment-based ownership decisions still work because the controller writes assignment.json independently)",
+					"err", err)
 			}
 		}()
 		src := broker.NewK8sBrokerSource(brokerReg)
@@ -183,7 +184,8 @@ func runBroker(ctx context.Context) {
 		if km, ok := leaseManager.(*lease.KubernetesLeaseManager); ok {
 			km.SetOnStartedLeading(func(topic string, partition int32, epoch int64) {
 				if err := engine.TakeoverPartition(topic, partition, epoch); err != nil {
-					slog.Error("takeover partition", "topic", topic, "partition", partition, "err", err)
+					slog.Error("takeover: opening file handles + replaying recovery for partition we just won leadership of failed (this broker holds the lease but cannot serve Produce/Fetch for this partition; clients will see NOT_LEADER until the next assignment change or partition relinquish/retake)",
+						"topic", topic, "partition", partition, "epoch", epoch, "err", err)
 				}
 			})
 			km.SetOnStoppedLeading(func(topic string, partition int32) {
@@ -200,7 +202,8 @@ func runBroker(ctx context.Context) {
 			// headless service.
 			ru := k8spkg.NewReadinessUpdater(k8sClient, os.Getenv("MY_POD_NAME"), namespace)
 			if err := ru.SetReady(ctx, true); err != nil {
-				slog.Warn("readiness gate patch failed", "err", err)
+				slog.Warn("readiness: patching the broker's own Pod readiness gate failed (Pod won't transition to Ready and so won't join the headless service; clients can't reach this broker through DNS until the gate is set; check RBAC: the broker ServiceAccount needs patch on pods/status)",
+					"err", err)
 			}
 		}
 
@@ -630,7 +633,8 @@ func startTopicWatcher(
 			// (gh #75 cleanup).
 			for p := int32(0); p < ev.Partitions; p++ {
 				if err := engine.CreatePartition(ev.Name, p); err != nil {
-					slog.Warn("topic watcher: create partition", "topic", ev.Name, "partition", p, "err", err)
+					slog.Warn("topic watcher: creating partition directory on the PVC failed (subsequent Produce to this partition will hit the open-handles path on a missing dir and return UNKNOWN_SERVER_ERROR; mkdir is idempotent and will be retried on next CR reconcile)",
+						"topic", ev.Name, "partition", p, "err", err)
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
@@ -650,7 +654,8 @@ func startTopicWatcher(
 			slog.Info("kafkatopic modified", "topic", ev.Name, "oldPartitions", ev.OldPartitions, "newPartitions", ev.Partitions, "cleanupPolicy", ev.CleanupPolicy)
 			for p := ev.OldPartitions; p < ev.Partitions; p++ {
 				if err := engine.CreatePartition(ev.Name, p); err != nil {
-					slog.Warn("topic watcher: create partition", "topic", ev.Name, "partition", p, "err", err)
+					slog.Warn("topic watcher: creating partition directory on the PVC failed (subsequent Produce to this partition will hit the open-handles path on a missing dir and return UNKNOWN_SERVER_ERROR; mkdir is idempotent and will be retried on next CR reconcile)",
+						"topic", ev.Name, "partition", p, "err", err)
 				}
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
@@ -670,7 +675,8 @@ func startTopicWatcher(
 			// we close ahead of the operator's finalizer reconcile.
 			for p := int32(0); p < ev.Partitions; p++ {
 				if err := engine.ClosePartition(ev.Name, p); err != nil {
-					slog.Warn("topic watcher: close partition", "topic", ev.Name, "partition", p, "err", err)
+					slog.Warn("topic watcher: closing partition fds on the leader broker failed before the operator's unlinkat (NFS may silly-rename the open files to .nfsXXXX entries that EBUSY the operator's directory removal forever — gh #76); the operator's reconcile will retry but may stall until this broker's fds are forced closed",
+						"topic", ev.Name, "partition", p, "err", err)
 				}
 				_ = lm.Release(ev.Name, p)
 			}
@@ -681,7 +687,8 @@ func startTopicWatcher(
 
 	w, err := k8spkg.NewTopicWatcher(mustRestConfig(), namespace, onEvent)
 	if err != nil {
-		slog.Warn("topic watcher: init failed", "err", err)
+		slog.Warn("topic watcher: initialization failed (broker proceeds with topics it knows about from the startup CR list, but will not see new-topic-creation, modification, or delete events — operator-driven CR changes won't propagate until the broker restarts)",
+			"err", err)
 		return
 	}
 	for _, t := range primed {
@@ -689,7 +696,8 @@ func startTopicWatcher(
 	}
 	go func() {
 		if err := w.Run(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("topic watcher stopped", "err", err)
+			slog.Error("topic watcher: stopped before ctx cancellation (same impact as init-failed: broker is blind to subsequent KafkaTopic CR changes; the running broker keeps serving but operator-driven changes — new topics, partition expansion, deletes — won't be honoured until restart)",
+				"err", err)
 		}
 	}()
 }

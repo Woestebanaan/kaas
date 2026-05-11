@@ -117,7 +117,7 @@ func (m *K8sMirror) Mirror(ctx context.Context, a *kafkaapi.Assignment) {
 	if err := observability.RecordK8sCall(ctx, "Update", "KafkaClusterAssignments", func() error {
 		return m.client.Status().Update(ctx, &cr)
 	}); err != nil {
-		slog.Warn("crmirror: status update failed",
+		slog.Warn("crmirror: updating the KafkaClusterAssignments CR Status failed (kubectl-side view of the assignment lags until next mirror cycle; brokers are unaffected since they read assignment.json directly; usually a conflict because two brokers raced the mirror — controller will retry on the next change)",
 			"namespace", m.namespace, "name", m.clusterName,
 			"controllerEpoch", a.ControllerEpoch,
 			"assignmentVersion", a.AssignmentVersion,
