@@ -48,6 +48,67 @@ func TestMetricsProduceBytes(t *testing.T) {
 	}
 }
 
+// TestProduceErrorsCounter pins the gh #132 contract: the
+// ProduceErrors counter is labelled by (topic, error_code) so the
+// dashboard can distinguish 'NAS stalled' from 'leader fenced'
+// without inspecting logs. Failures stay visible as the success
+// counter goes flat.
+func TestProduceErrorsCounter(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	ctx := context.Background()
+
+	m.ProduceErrors.Add(ctx, 3, metric.WithAttributes(
+		attribute.String("topic", "t1"),
+		attribute.String("error_code", "storage_stalled"),
+	))
+	m.ProduceErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("topic", "t1"),
+		attribute.String("error_code", "not_leader"),
+	))
+	m.FetchErrors.Add(ctx, 2, metric.WithAttributes(
+		attribute.String("topic", "t2"),
+		attribute.String("error_code", "read_failed"),
+	))
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatal(err)
+	}
+
+	got := collectErrorByCode(t, rm, "skafka.produce.errors")
+	if got["t1/storage_stalled"] != 3 {
+		t.Errorf("t1/storage_stalled=%d, want 3", got["t1/storage_stalled"])
+	}
+	if got["t1/not_leader"] != 1 {
+		t.Errorf("t1/not_leader=%d, want 1", got["t1/not_leader"])
+	}
+	got2 := collectErrorByCode(t, rm, "skafka.fetch.errors")
+	if got2["t2/read_failed"] != 2 {
+		t.Errorf("t2/read_failed=%d, want 2", got2["t2/read_failed"])
+	}
+}
+
+// collectErrorByCode reads the (topic, error_code) Sum[int64] keyed by "topic/error_code".
+func collectErrorByCode(t *testing.T, rm metricdata.ResourceMetrics, name string) map[string]int64 {
+	t.Helper()
+	out := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, inst := range sm.Metrics {
+			if inst.Name != name {
+				continue
+			}
+			if s, ok := inst.Data.(metricdata.Sum[int64]); ok {
+				for _, dp := range s.DataPoints {
+					topic, _ := dp.Attributes.Value(attribute.Key("topic"))
+					code, _ := dp.Attributes.Value(attribute.Key("error_code"))
+					out[topic.AsString()+"/"+code.AsString()] = dp.Value
+				}
+			}
+		}
+	}
+	return out
+}
+
 // TestTopicTrafficIdleEmit pins the gh #115 contract: a topic that
 // has been Touched but never received traffic STILL emits a
 // cumulative observation (= 0) at every scrape. Pre-fix the

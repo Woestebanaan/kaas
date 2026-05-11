@@ -88,6 +88,7 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 					Index: pd.Index, ErrorCode: int16(codec.ErrTopicAuthorizationFailed),
 					BaseOffset: -1, LogAppendTime: -1, LogStartOffset: -1,
 				})
+				recordProduceError(mx, td.Name, "topic_auth_failed")
 			}
 			resp.Responses = append(resp.Responses, topicResp)
 			continue
@@ -102,6 +103,7 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 			if !ok {
 				pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
 				pr.BaseOffset = -1
+				recordProduceError(mx, td.Name, "not_leader")
 				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
 				continue
 			}
@@ -109,6 +111,7 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 			if !validateProduceBatches(pd.Records) {
 				pr.ErrorCode = int16(codec.ErrCorruptMessage)
 				pr.BaseOffset = -1
+				recordProduceError(mx, td.Name, "corrupt_message")
 				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
 				continue
 			}
@@ -120,6 +123,12 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 			if err != nil {
 				pr.ErrorCode = errCodeForAppendError(err)
 				pr.BaseOffset = -1
+				// gh #132: bump the per-topic produce-errors counter so
+				// the dashboard sees the failure rate rise even when the
+				// success counter has gone flat (NAS stalled, leader
+				// fenced, etc.). errorClassForAppendError maps the
+				// storage sentinel onto a short label for cardinality.
+				recordProduceError(mx, td.Name, errorClassForAppendError(err))
 			} else {
 				// gh #115 / gh #121 PR1: bump per-topic atomic
 				// accumulators. ObservableCounter callback emits
@@ -207,6 +216,38 @@ func errCodeForAppendError(err error) int16 {
 	default:
 		return int16(codec.ErrUnknownServerError)
 	}
+}
+
+// errorClassForAppendError is the metric-label sibling of
+// errCodeForAppendError. Different output type because metric labels
+// are strings, not wire ints. The label set is deliberately bounded
+// — no raw error.Error() strings, which would explode cardinality.
+// gh #132.
+func errorClassForAppendError(err error) string {
+	switch {
+	case errors.Is(err, storage.ErrOutOfOrderSequence):
+		return "out_of_order_sequence"
+	case errors.Is(err, storage.ErrInvalidProducerEpoch):
+		return "invalid_producer_epoch"
+	case errors.Is(err, storage.ErrStorageStalled):
+		return "storage_stalled"
+	default:
+		return "unknown"
+	}
+}
+
+// recordProduceError is the per-error-site helper that keeps the
+// ProduceErrors counter call DRY. Pulled into a helper because the
+// produce path has four distinct error exits (auth, not-leader,
+// corrupt-message, append-error) and inlining the
+// observability.Global().ProduceErrors.Add(...) boilerplate at each
+// would obscure the actual logic.
+func recordProduceError(mx *observability.Metrics, topic, errorCode string) {
+	mx.ProduceErrors.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("error_code", errorCode),
+		))
 }
 
 // produceHeartbeatTimeout mirrors broker.DefaultHeartbeatTimeout (3s).

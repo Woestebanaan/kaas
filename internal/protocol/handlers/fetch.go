@@ -56,6 +56,7 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 					LogStartOffset:      -1,
 					PreferredReadReplica: -1,
 				})
+				recordFetchError(mx, topic.Name, "topic_auth_failed")
 			}
 			resp.Responses = append(resp.Responses, topicResp)
 			continue
@@ -78,6 +79,7 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 			if err != nil {
 				pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
 				pr.HighWatermark = -1
+				recordFetchError(mx, topic.Name, "not_leader")
 				topicResp.Partitions = append(topicResp.Partitions, pr)
 				continue
 			}
@@ -101,6 +103,13 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 					cnt = int64(c)
 				}
 				mx.TopicTraffic.RecordFetch(topic.Name, cnt, int64(len(raw)))
+			} else {
+				// gh #132: failures stay visible. The success counter
+				// going flat on its own looked indistinguishable from
+				// "no traffic"; this counter rises so the dashboard
+				// shows "broker is asked but failing" during NAS
+				// stalls or partition-leader race windows.
+				recordFetchError(mx, topic.Name, "read_failed")
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 		}
@@ -121,4 +130,15 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 	w := codec.NewWriter()
 	api.EncodeFetchResponse(w, resp, version)
 	return w.Bytes(), nil
+}
+
+// recordFetchError is the fetch-side sibling of recordProduceError
+// (see produce.go). gh #132 — bumped on every Fetch error path so the
+// fetch error rate stays visible when the success counter goes flat.
+func recordFetchError(mx *observability.Metrics, topic, errorCode string) {
+	mx.FetchErrors.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("error_code", errorCode),
+		))
 }

@@ -130,6 +130,20 @@ type Metrics struct {
 	Connections     metric.Int64Counter
 	ConnectionsOpen metric.Int64UpDownCounter
 
+	// gh #132: per-topic produce/fetch ERROR counters. Pre-gh #132
+	// the TopicTraffic success counters were the only signal — when
+	// the NAS stalled and every Append() returned ErrStorageStalled,
+	// produce_records_total went flat and the dashboard panel
+	// effectively went silent. Failures still mean something; the
+	// broker should *keep reporting* them so on-call sees the failure
+	// rate rise instead of "no data".
+	//
+	// Cardinality: ~6 error_code values per topic (storage_stalled,
+	// not_leader, corrupt_message, topic_auth_failed,
+	// out_of_order_sequence, invalid_producer_epoch). Bounded.
+	ProduceErrors metric.Int64Counter // (topic, error_code)
+	FetchErrors   metric.Int64Counter // (topic, error_code)
+
 	// gh #121 PR3: cleaner + compactor instrumentation. Pre-PR3 the
 	// retention and log-compaction paths were completely unobserved —
 	// the only way to know whether they ran was to grep slog output.
@@ -311,6 +325,19 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.ConnectionsOpen, err = m.Int64UpDownCounter("skafka.connections.open",
 		metric.WithDescription("Currently open client connections")); err != nil {
+		return nil, err
+	}
+	// gh #132: per-topic Produce/Fetch error counters. Distinct from
+	// the TopicTraffic success counters so dashboards can show "X is
+	// failing" while the success counter has gone flat.
+	if mx.ProduceErrors, err = m.Int64Counter("skafka.produce.errors",
+		metric.WithDescription("Per-partition Produce failures (labels: topic, error_code). Bumped on every error path — storage stalled, not leader, corrupt batch, auth denied, out-of-order sequence, fenced producer epoch."),
+		metric.WithUnit("{error}")); err != nil {
+		return nil, err
+	}
+	if mx.FetchErrors, err = m.Int64Counter("skafka.fetch.errors",
+		metric.WithDescription("Per-partition Fetch failures (labels: topic, error_code). Bumped on every error path — not leader, read failure, auth denied."),
+		metric.WithUnit("{error}")); err != nil {
 		return nil, err
 	}
 	// gh #121 PR3: cleaner + compactor instruments. Pre-PR3 nothing
