@@ -36,7 +36,7 @@ func NewKafkaTopicReconciler(c client.Client, dataDir string) *KafkaTopicReconci
 func (r *KafkaTopicReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.KafkaTopic{}).
-		Complete(r)
+		Complete(Observed("KafkaTopic", r))
 }
 
 func (r *KafkaTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

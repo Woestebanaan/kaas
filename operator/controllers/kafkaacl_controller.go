@@ -26,7 +26,7 @@ func NewKafkaAclReconciler(c client.Client, dataDir, namespace string) *KafkaAcl
 func (r *KafkaAclReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.KafkaAcl{}).
-		Complete(r)
+		Complete(Observed("KafkaAcl", r))
 }
 
 func (r *KafkaAclReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

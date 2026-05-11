@@ -158,6 +158,15 @@ type Metrics struct {
 	OTLPPushSuccess  metric.Int64Counter
 	OTLPPushFailure  metric.Int64Counter // labelled by err class (timeout|refused|other)
 	OTLPPushDuration metric.Float64Histogram
+
+	// gh #121 PR5: operator-side reconciler observability. Each
+	// reconciler is wrapped in an Observed() decorator at SetupWithManager
+	// so dashboards can show "is the operator keeping up, per CR kind."
+	// Pre-PR5 the operator inherited controller-runtime's built-in
+	// Prometheus client_golang metrics — which don't flow through OTLP
+	// and therefore never reach our Grafana, so visibility was zero.
+	OperatorReconciles        metric.Int64Counter     // (kind=KafkaTopic|..., result=ok|requeue|error)
+	OperatorReconcileDuration metric.Float64Histogram // (kind=...)
 }
 
 // NewMetrics creates all instruments on the given meter. Errors from individual
@@ -363,6 +372,20 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.OTLPPushDuration, err = m.Float64Histogram("skafka.otlp.push.duration",
 		metric.WithDescription("Time spent in Exporter.Export — high values suggest backend pressure"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
+		return nil, err
+	}
+	// gh #121 PR5: operator reconciler observability. Lives on the
+	// shared Metrics struct so a broker-built test binary or the
+	// broker bootstrap also has the instruments available (no-op
+	// when the broker doesn't actually wrap reconcilers).
+	if mx.OperatorReconciles, err = m.Int64Counter("skafka.operator.reconciles",
+		metric.WithDescription("Operator reconcile completions (kind=CR kind, result=ok|requeue|error)")); err != nil {
+		return nil, err
+	}
+	if mx.OperatorReconcileDuration, err = m.Float64Histogram("skafka.operator.reconcile.duration",
+		metric.WithDescription("Operator Reconcile() wall-clock per call (kind=...)"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err

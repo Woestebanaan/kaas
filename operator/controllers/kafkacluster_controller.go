@@ -54,7 +54,7 @@ func NewKafkaClusterReconciler(c client.Client, namespace string) *KafkaClusterR
 func (r *KafkaClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.KafkaCluster{}).
-		Complete(r)
+		Complete(Observed("KafkaCluster", r))
 }
 
 func (r *KafkaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

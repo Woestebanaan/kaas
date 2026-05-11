@@ -26,7 +26,7 @@ func NewKafkaUserGroupReconciler(c client.Client, dataDir, namespace string) *Ka
 func (r *KafkaUserGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.KafkaUserGroup{}).
-		Complete(r)
+		Complete(Observed("KafkaUserGroup", r))
 }
 
 func (r *KafkaUserGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

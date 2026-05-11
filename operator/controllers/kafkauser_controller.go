@@ -29,7 +29,7 @@ func NewKafkaUserReconciler(c client.Client, dataDir, namespace string) *KafkaUs
 func (r *KafkaUserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.KafkaUser{}).
-		Complete(r)
+		Complete(Observed("KafkaUser", r))
 }
 
 func (r *KafkaUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
