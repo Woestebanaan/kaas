@@ -112,7 +112,8 @@ func (w *TopicWatcher) Run(ctx context.Context) error {
 	for {
 		rv, err := w.reconcile(ctx)
 		if err != nil {
-			slog.Error("topic watcher: list failed", "err", err)
+			slog.Error("topic watcher: listing KafkaTopic CRs from the API server failed (broker won't see new-topic-creation or delete events until reconcile succeeds; retries after backoff)",
+				"backoff", w.backoff, "err", err)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

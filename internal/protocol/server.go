@@ -127,7 +127,8 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			slog.Error("accept error", "err", err)
+			slog.Error("listener: accepting a new client connection failed (server backs off 10ms then retries; sustained errors typically mean the listener fd is unhealthy and the broker should be restarted)",
+				"addr", ln.Addr().String(), "err", err)
 			// Brief back-off to avoid spinning on persistent errors.
 			select {
 			case <-ctx.Done():
@@ -169,7 +170,8 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 		if err := tlsConn.Handshake(); err != nil {
 			mx.TLSHandshakes.Add(context.Background(), 1,
 				metric.WithAttributes(attribute.String("result", "error")))
-			slog.Warn("tls handshake failed", "err", err)
+			slog.Warn("tls: handshake with new client failed (client cert untrusted, protocol mismatch, or non-TLS bytes hitting the TLS port; connection dropped)",
+				"remote", c.RemoteAddr().String(), "err", err)
 			return
 		}
 		mx.TLSHandshakes.Add(context.Background(), 1,
@@ -188,7 +190,8 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 						attribute.String("mechanism", "mtls"),
 						attribute.String("reason", "cert_rejected"),
 					))
-				slog.Warn("tls: rejected peer cert", "cn", cn, "err", err)
+				slog.Warn("tls: peer presented a valid cert but no KafkaUser CR matches the CN (or the auth engine rejected the principal); connection downgrades to SASL-required",
+					"cn", cn, "err", err)
 			}
 		}
 	}

@@ -98,7 +98,7 @@ func (m *K8sMirror) Mirror(ctx context.Context, a *kafkaapi.Assignment) {
 			mx.CRMirrorWrites.Add(ctx, 1, resultLabel("not_found"))
 			return
 		}
-		slog.Warn("crmirror: get failed",
+		slog.Warn("crmirror: fetching the KafkaClusterAssignments CR for status mirror failed (kubectl-side observability of the assignment is stale until next mirror cycle; brokers themselves are unaffected — they read assignment.json directly)",
 			"namespace", m.namespace, "name", m.clusterName, "err", err)
 		mx.CRMirrorWrites.Add(ctx, 1, resultLabel("error"))
 		return

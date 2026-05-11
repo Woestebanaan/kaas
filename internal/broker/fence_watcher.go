@@ -92,7 +92,8 @@ func (w *FenceWatcher) Tick() {
 		if errors.Is(err, fs.ErrNotExist) {
 			return // dir doesn't exist yet — no fences emitted anywhere
 		}
-		slog.Warn("fence watcher: read dir", "dir", w.dir, "err", err)
+		slog.Warn("fence watcher: scanning the cross-broker fence directory failed (peer producer-epoch bumps will not propagate this cycle; retries on next 2s tick)",
+			"dir", w.dir, "err", err)
 		return
 	}
 	for _, e := range entries {
@@ -115,7 +116,8 @@ func (w *FenceWatcher) applyPeer(name string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("fence watcher: read peer", "file", path, "err", err)
+			slog.Warn("fence watcher: reading peer broker's fence file failed (this broker may miss a producer-epoch bump and accept zombie batches until the next 2s tick)",
+				"file", path, "err", err)
 		}
 		return
 	}
@@ -124,7 +126,8 @@ func (w *FenceWatcher) applyPeer(name string) {
 	}
 	var state map[string]int16
 	if err := json.Unmarshal(data, &state); err != nil {
-		slog.Warn("fence watcher: decode peer", "file", path, "err", err)
+		slog.Warn("fence watcher: decoding peer broker's fence-state JSON failed (file likely mid-write or corrupted; skipping this cycle, peer's next atomic-rename will be picked up)",
+			"file", path, "err", err)
 		return
 	}
 
