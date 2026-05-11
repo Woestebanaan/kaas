@@ -27,9 +27,12 @@ func TestMetricsProduceBytes(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	ctx := context.Background()
 
-	m.ProduceBytes.Add(ctx, 100, metric.WithAttributes(attribute.String("topic", "t1")))
-	m.ProduceBytes.Add(ctx, 50, metric.WithAttributes(attribute.String("topic", "t2")))
-	m.ProduceBytes.Add(ctx, 25, metric.WithAttributes(attribute.String("topic", "t1")))
+	// gh #115 / gh #121 PR1: per-topic produce bytes is now an
+	// ObservableCounter fed by an atomic accumulator. RecordProduce
+	// is the hot-path API; the OTel callback emits cumulative.
+	m.TopicTraffic.RecordProduce("t1", 0, 100)
+	m.TopicTraffic.RecordProduce("t2", 0, 50)
+	m.TopicTraffic.RecordProduce("t1", 0, 25)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -42,6 +45,57 @@ func TestMetricsProduceBytes(t *testing.T) {
 	}
 	if counts["t2"] != 50 {
 		t.Errorf("t2=%d, want 50", counts["t2"])
+	}
+}
+
+// TestTopicTrafficIdleEmit pins the gh #115 contract: a topic that
+// has been Touched but never received traffic STILL emits a
+// cumulative observation (= 0) at every scrape. Pre-fix the
+// timeseries was absent entirely; Grafana panels showed a gap
+// indistinguishable from a crashed cluster.
+func TestTopicTrafficIdleEmit(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	ctx := context.Background()
+
+	// Topic exists in the registry, but no traffic has flowed.
+	m.TopicTraffic.Touch("idle-topic")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, suffix := range []string{"skafka.produce.records", "skafka.produce.bytes", "skafka.fetch.records", "skafka.fetch.bytes"} {
+		counts := collectSumCounts(t, rm, suffix)
+		v, ok := counts["idle-topic"]
+		if !ok {
+			t.Errorf("%s: idle topic absent from observation (gh #115 regression)", suffix)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("%s: idle topic cumulative=%d, want 0", suffix, v)
+		}
+	}
+}
+
+// TestTopicTrafficAutoTouch verifies the hot-path API auto-creates
+// the accumulator on first traffic, so callers never have to
+// invoke Touch() defensively.
+func TestTopicTrafficAutoTouch(t *testing.T) {
+	m, reader := newTestMetrics(t)
+	ctx := context.Background()
+
+	m.TopicTraffic.RecordFetch("fresh-topic", 7, 1024)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatal(err)
+	}
+	if got := collectSumCounts(t, rm, "skafka.fetch.records")["fresh-topic"]; got != 7 {
+		t.Errorf("fetch.records['fresh-topic']=%d, want 7", got)
+	}
+	if got := collectSumCounts(t, rm, "skafka.fetch.bytes")["fresh-topic"]; got != 1024 {
+		t.Errorf("fetch.bytes['fresh-topic']=%d, want 1024", got)
 	}
 }
 
@@ -144,7 +198,7 @@ func TestGlobalReturnsNoopWhenUnset(t *testing.T) {
 		t.Fatal("Global() returned nil — expected no-op singleton")
 	}
 	// Operations on no-op metrics must not panic.
-	m.ProduceBytes.Add(context.Background(), 1)
+	m.TopicTraffic.RecordProduce("any", 0, 1)
 	m.RequestLatency.Record(context.Background(), 0.1)
 }
 

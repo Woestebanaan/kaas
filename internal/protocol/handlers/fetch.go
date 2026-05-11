@@ -96,11 +96,15 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 				metric.WithAttributes(attribute.String("topic", topic.Name)))
 			if err == nil {
 				pr.Records = raw
-				topicAttr := metric.WithAttributes(attribute.String("topic", topic.Name))
-				mx.FetchBytes.Add(context.Background(), int64(len(raw)), topicAttr)
-				if cnt := recordCountFromBatch(raw); cnt > 0 {
-					mx.FetchRecords.Add(context.Background(), int64(cnt), topicAttr)
+				// gh #115 / gh #121 PR1: bump per-topic atomic
+				// accumulators. ObservableCounter callback emits
+				// the cumulative at every scrape — idle topics
+				// (and empty Fetch responses) still show up.
+				var cnt int64
+				if c := recordCountFromBatch(raw); c > 0 {
+					cnt = int64(c)
 				}
+				mx.TopicTraffic.RecordFetch(topic.Name, cnt, int64(len(raw)))
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 		}

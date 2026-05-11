@@ -124,12 +124,14 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 				pr.ErrorCode = errCodeForAppendError(err)
 				pr.BaseOffset = -1
 			} else {
-				topicAttr := metric.WithAttributes(attribute.String("topic", td.Name))
-				mx.ProduceBytes.Add(context.Background(), int64(len(pd.Records)), topicAttr)
-				// Best-effort record count from batch header.
-				if cnt := recordCountFromBatch(pd.Records); cnt > 0 {
-					mx.ProduceRecords.Add(context.Background(), int64(cnt), topicAttr)
+				// gh #115 / gh #121 PR1: bump per-topic atomic
+				// accumulators. ObservableCounter callback emits
+				// the cumulative at every scrape interval.
+				var cnt int64
+				if c := recordCountFromBatch(pd.Records); c > 0 {
+					cnt = int64(c)
 				}
+				mx.TopicTraffic.RecordProduce(td.Name, cnt, int64(len(pd.Records)))
 				pr.BaseOffset = baseOffset
 			}
 			topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)

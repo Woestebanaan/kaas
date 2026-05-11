@@ -57,11 +57,12 @@ var latencySecondsBoundaries = []float64{
 // Passed by pointer to every component that reports metrics. A nil *Metrics is
 // safe to use — helper methods check for nil before recording.
 type Metrics struct {
-	// Throughput counters.
-	ProduceRecords metric.Int64Counter
-	ProduceBytes   metric.Int64Counter
-	FetchRecords   metric.Int64Counter
-	FetchBytes     metric.Int64Counter
+	// Throughput meter (gh #115 + gh #121 PR1). Hot-path Produce/Fetch
+	// handlers call RecordProduce / RecordFetch to bump per-topic
+	// atomic accumulators; the OTel SDK reads them at every scrape
+	// via an ObservableCounter callback so idle topics always emit
+	// a current-cumulative datapoint (no Grafana gaps).
+	TopicTraffic *TopicTrafficMeter
 
 	// Request-level latency. Topic label is intentionally omitted to cap cardinality;
 	// topic lives in traces instead.
@@ -136,24 +137,10 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	mx := &Metrics{}
 	var err error
 
-	if mx.ProduceRecords, err = m.Int64Counter("skafka.produce.records",
-		metric.WithDescription("Total records produced"),
-		metric.WithUnit("{record}")); err != nil {
-		return nil, err
-	}
-	if mx.ProduceBytes, err = m.Int64Counter("skafka.produce.bytes",
-		metric.WithDescription("Total bytes produced"),
-		metric.WithUnit("By")); err != nil {
-		return nil, err
-	}
-	if mx.FetchRecords, err = m.Int64Counter("skafka.fetch.records",
-		metric.WithDescription("Total records fetched"),
-		metric.WithUnit("{record}")); err != nil {
-		return nil, err
-	}
-	if mx.FetchBytes, err = m.Int64Counter("skafka.fetch.bytes",
-		metric.WithDescription("Total bytes fetched"),
-		metric.WithUnit("By")); err != nil {
+	// gh #115 + gh #121 PR1: per-topic produce/fetch are ObservableCounters
+	// (always emit at scrape), not fire-and-forget Int64Counters.
+	mx.TopicTraffic = NewTopicTrafficMeter()
+	if err := registerTopicTrafficInstruments(m, mx.TopicTraffic); err != nil {
 		return nil, err
 	}
 	if mx.RequestLatency, err = m.Float64Histogram("skafka.request.latency",

@@ -4,6 +4,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 )
 
@@ -65,12 +66,17 @@ func NewTopicRegistry() *TopicRegistry {
 // from the TopicWatcher's CR observation.
 func (r *TopicRegistry) Add(name string, partitions int32) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	existing := r.topics[name]
 	existing.Partitions = partitions
 	// Don't overwrite Cleanup if a watcher set it before Add fired
 	// (CR-driven config can arrive ahead of the per-handler Add hint).
 	r.topics[name] = existing
+	r.mu.Unlock()
+	// gh #115 / gh #121 PR1: baseline a zero observation as soon as
+	// the broker knows the topic exists, so Grafana panels show it
+	// even before the first Produce/Fetch. Apache parity — the MBean
+	// meter registers on topic creation, not first traffic.
+	observability.Global().TopicTraffic.Touch(name)
 }
 
 // SetCleanupPolicy is the gh #48 hook: TopicWatcher pushes the
@@ -130,8 +136,11 @@ func (r *TopicRegistry) TopicConfig(name string) (handlers.TopicConfig, bool) {
 
 func (r *TopicRegistry) Remove(name string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	delete(r.topics, name)
+	r.mu.Unlock()
+	// Drop the per-topic accumulator so the deleted topic stops
+	// contributing a stale zero timeseries on every scrape.
+	observability.Global().TopicTraffic.Forget(name)
 }
 
 // Get satisfies handlers.TopicSource.
