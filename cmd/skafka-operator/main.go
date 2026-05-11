@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -52,10 +53,28 @@ func main() {
 	dataDir := envOr("SKAFKA_DATA_DIR", "/data")
 	namespace := envOr("SKAFKA_NAMESPACE", "default")
 
+	// gh #117: restrict controller-runtime's cache to the operator's own
+	// namespace. Without this, the cache starts cluster-scope Reflectors
+	// for every type any reconciler touches (corev1.Secret, corev1.Service,
+	// the CRDs) which fail RBAC because the operator's Role is
+	// namespace-scoped by design. The reflectors then retry every ~30s
+	// and spam the log with "Failed to watch *v1.Secret ... forbidden".
+	//
+	// Every resource the reconcilers touch lives in the operator's own
+	// namespace: KafkaUser/Topic/ACL/UserGroup CRs (skafka namespace),
+	// the credential Secrets they emit (same namespace as the owning
+	// KafkaUser CR), and the per-broker Services KafkaClusterReconciler
+	// creates (same namespace as the KafkaCluster CR). So a single-
+	// namespace cache is correct AND minimal-privilege.
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				namespace: {},
+			},
+		},
 	})
 	if err != nil {
 		ctrl.Log.Error(err, "unable to create manager")
