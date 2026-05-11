@@ -12,6 +12,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
@@ -186,7 +187,12 @@ func (e *Election) runOnce(ctx context.Context) error {
 // leaseTransitions field as an int64. The leaderelection library doesn't
 // expose this through the callbacks, so we Get the Lease directly.
 func (e *Election) fetchLeaseTransitions(ctx context.Context) (int64, error) {
-	lease, err := e.client.CoordinationV1().Leases(e.namespace).Get(ctx, LeaseName, metav1.GetOptions{})
+	var lease *coordinationv1.Lease
+	err := observability.RecordK8sCall(ctx, "Get", "Lease", func() error {
+		var gerr error
+		lease, gerr = e.client.CoordinationV1().Leases(e.namespace).Get(ctx, LeaseName, metav1.GetOptions{})
+		return gerr
+	})
 	if err != nil {
 		return 0, err
 	}

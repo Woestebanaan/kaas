@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
@@ -85,7 +86,9 @@ func (w *TopicCRWriter) CreateTopic(ctx context.Context, name string, partitions
 			Config:     translateConfigs(configs),
 		},
 	}
-	if err := w.client.Create(ctx, t); err != nil {
+	if err := observability.RecordK8sCall(ctx, "Create", "KafkaTopic", func() error {
+		return w.client.Create(ctx, t)
+	}); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("%w: %s", handlers.ErrTopicAlreadyExists, name)
 		}

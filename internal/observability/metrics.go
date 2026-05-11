@@ -167,6 +167,16 @@ type Metrics struct {
 	// and therefore never reach our Grafana, so visibility was zero.
 	OperatorReconciles        metric.Int64Counter     // (kind=KafkaTopic|..., result=ok|requeue|error)
 	OperatorReconcileDuration metric.Float64Histogram // (kind=...)
+
+	// gh #121 PR4.5: broker-side K8s API call observability. The
+	// broker hits the apiserver from a few cold-path goroutines —
+	// TopicWatcher (List + Watch), election (Lease Get), readiness
+	// updater (Pod Patch), endpoints watcher, CR mirror (Get + Update).
+	// Pre-PR4.5 none of these were tracked, so 'apiserver is slow' had
+	// no dashboard signal — the symptom was that watchers fell behind.
+	// Wired via the RecordK8sCall helper below.
+	K8sAPICalls   metric.Int64Counter     // (operation, resource, result=ok|error)
+	K8sAPILatency metric.Float64Histogram // (operation, resource)
 }
 
 // NewMetrics creates all instruments on the given meter. Errors from individual
@@ -386,6 +396,17 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	if mx.OperatorReconcileDuration, err = m.Float64Histogram("skafka.operator.reconcile.duration",
 		metric.WithDescription("Operator Reconcile() wall-clock per call (kind=...)"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
+		return nil, err
+	}
+	// gh #121 PR4.5: broker-side K8s API call observability.
+	if mx.K8sAPICalls, err = m.Int64Counter("skafka.k8s.api.calls",
+		metric.WithDescription("Apiserver calls from the broker (operation=Get|List|Watch|Patch|Update|Create, resource=KafkaTopic|EndpointSlice|Lease|Pod|KafkaClusterAssignments, result=ok|error)")); err != nil {
+		return nil, err
+	}
+	if mx.K8sAPILatency, err = m.Float64Histogram("skafka.k8s.api.latency",
+		metric.WithDescription("Apiserver call wall-clock per (operation, resource)"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err

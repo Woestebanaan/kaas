@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/rest"
 	sigs_client "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/woestebanaan/skafka/internal/observability"
 	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 	operatorv1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
@@ -124,7 +125,12 @@ func (w *TopicWatcher) Run(ctx context.Context) error {
 
 		var list operatorv1.KafkaTopicList
 		opts := &sigs_client.ListOptions{Namespace: w.namespace, Raw: &metav1.ListOptions{ResourceVersion: rv}}
-		watcher, err := w.client.Watch(ctx, &list, opts)
+		var watcher watch.Interface
+		err = observability.RecordK8sCall(ctx, "Watch", "KafkaTopic", func() error {
+			var werr error
+			watcher, werr = w.client.Watch(ctx, &list, opts)
+			return werr
+		})
 		if err != nil {
 			slog.Error("topic watcher: start watch failed", "err", err)
 			select {
@@ -150,7 +156,9 @@ func (w *TopicWatcher) Run(ctx context.Context) error {
 // against the cache. Returns the list's resourceVersion for the next Watch.
 func (w *TopicWatcher) reconcile(ctx context.Context) (string, error) {
 	var list operatorv1.KafkaTopicList
-	if err := w.client.List(ctx, &list, &sigs_client.ListOptions{Namespace: w.namespace}); err != nil {
+	if err := observability.RecordK8sCall(ctx, "List", "KafkaTopic", func() error {
+		return w.client.List(ctx, &list, &sigs_client.ListOptions{Namespace: w.namespace})
+	}); err != nil {
 		return "", err
 	}
 	seen := make(map[string]struct{}, len(list.Items))

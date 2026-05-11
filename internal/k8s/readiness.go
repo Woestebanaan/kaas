@@ -10,6 +10,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/woestebanaan/skafka/internal/observability"
 )
 
 // ReadinessCondition is the custom pod condition type that gates headless-service membership.
@@ -52,10 +54,12 @@ func (r *ReadinessUpdater) SetReady(ctx context.Context, ready bool) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.client.CoreV1().Pods(r.namespace).Patch(
-		ctx, r.podName, types.MergePatchType, data, metav1.PatchOptions{}, "status",
-	)
-	return err
+	return observability.RecordK8sCall(ctx, "Patch", "Pod", func() error {
+		_, perr := r.client.CoreV1().Pods(r.namespace).Patch(
+			ctx, r.podName, types.MergePatchType, data, metav1.PatchOptions{}, "status",
+		)
+		return perr
+	})
 }
 
 // WatchAndSetReady watches the LeaderChange channel and calls SetReady(true) once all

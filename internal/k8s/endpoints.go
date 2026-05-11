@@ -10,6 +10,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/woestebanaan/skafka/internal/observability"
 )
 
 // BrokerEndpoint describes one broker pod.
@@ -85,8 +87,13 @@ func (r *BrokerRegistry) Upsert(ep BrokerEndpoint) {
 func (r *BrokerRegistry) Watch(ctx context.Context, client kubernetes.Interface, namespace, headlessSvc string) error {
 	labelSel := "kubernetes.io/service-name=" + headlessSvc
 	for {
-		watcher, err := client.DiscoveryV1().EndpointSlices(namespace).Watch(ctx, metav1.ListOptions{
-			LabelSelector: labelSel,
+		var watcher watch.Interface
+		err := observability.RecordK8sCall(ctx, "Watch", "EndpointSlice", func() error {
+			var werr error
+			watcher, werr = client.DiscoveryV1().EndpointSlices(namespace).Watch(ctx, metav1.ListOptions{
+				LabelSelector: labelSel,
+			})
+			return werr
 		})
 		if err != nil {
 			slog.Error("endpoints watcher: failed to start watch", "err", err)

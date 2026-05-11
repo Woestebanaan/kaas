@@ -91,7 +91,9 @@ func (m *K8sMirror) Mirror(ctx context.Context, a *kafkaapi.Assignment) {
 
 	key := types.NamespacedName{Namespace: m.namespace, Name: m.clusterName}
 	var cr v1alpha1.KafkaClusterAssignments
-	if err := m.client.Get(ctx, key, &cr); err != nil {
+	if err := observability.RecordK8sCall(ctx, "Get", "KafkaClusterAssignments", func() error {
+		return m.client.Get(ctx, key, &cr)
+	}); err != nil {
 		if apierrors.IsNotFound(err) {
 			slog.Debug("crmirror: assignments CR not found; operator should create it",
 				"namespace", m.namespace, "name", m.clusterName)
@@ -112,7 +114,9 @@ func (m *K8sMirror) Mirror(ctx context.Context, a *kafkaapi.Assignment) {
 	}
 
 	cr.Status = buildStatusTruncated(a, prevEpochs, m.maxPartitions)
-	if err := m.client.Status().Update(ctx, &cr); err != nil {
+	if err := observability.RecordK8sCall(ctx, "Update", "KafkaClusterAssignments", func() error {
+		return m.client.Status().Update(ctx, &cr)
+	}); err != nil {
 		slog.Warn("crmirror: status update failed",
 			"namespace", m.namespace, "name", m.clusterName,
 			"controllerEpoch", a.ControllerEpoch,
