@@ -47,22 +47,24 @@ func TestNewBrokerIdentityParsesOrdinal(t *testing.T) {
 
 func TestNewBrokerIdentityBuildsFQDN(t *testing.T) {
 	os.Setenv("MY_POD_NAME", "skafka-3")
-	os.Setenv("SKAFKA_BROKER_SERVICE_PATTERN", "skafka-broker-%d")
 	defer os.Unsetenv("MY_POD_NAME")
-	defer os.Unsetenv("SKAFKA_BROKER_SERVICE_PATTERN")
 
 	id, err := NewBrokerIdentity("kafka", "skafka-headless", 9092)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "skafka-broker-3.kafka.svc.cluster.local"
+	// gh #128: Strimzi-style headless-per-pod DNS, no per-broker Service.
+	want := "skafka-3.skafka-headless.kafka.svc.cluster.local"
 	if id.Host != want {
 		t.Errorf("Host=%q, want %q", id.Host, want)
 	}
 	// DNS sub-struct must be populated so BrokerRegistry can reuse
-	// the same shape for peer FQDNs (gh #97).
-	if id.DNS.BrokerServicePattern != "skafka-broker-%d" {
-		t.Errorf("DNS.BrokerServicePattern=%q, want skafka-broker-%%d", id.DNS.BrokerServicePattern)
+	// the same shape for peer FQDNs.
+	if id.DNS.PodNamePattern != "skafka-%d" {
+		t.Errorf("DNS.PodNamePattern=%q, want skafka-%%d", id.DNS.PodNamePattern)
+	}
+	if id.DNS.HeadlessService != "skafka-headless" {
+		t.Errorf("DNS.HeadlessService=%q, want skafka-headless", id.DNS.HeadlessService)
 	}
 	if id.DNS.Namespace != "kafka" {
 		t.Errorf("DNS.Namespace=%q, want kafka", id.DNS.Namespace)
@@ -72,22 +74,20 @@ func TestNewBrokerIdentityBuildsFQDN(t *testing.T) {
 	}
 }
 
-// TestNewBrokerIdentityHonorsClusterDomainEnv: gh #97. SKAFKA_CLUSTER_DOMAIN
+// TestNewBrokerIdentityHonorsClusterDomainEnv: SKAFKA_CLUSTER_DOMAIN
 // overrides the default "cluster.local" — required for clusters whose
 // CoreDNS uses a non-default suffix.
 func TestNewBrokerIdentityHonorsClusterDomainEnv(t *testing.T) {
 	os.Setenv("MY_POD_NAME", "skafka-1")
 	os.Setenv("SKAFKA_CLUSTER_DOMAIN", "cluster.dev")
-	os.Setenv("SKAFKA_BROKER_SERVICE_PATTERN", "skafka-broker-%d")
 	defer os.Unsetenv("MY_POD_NAME")
 	defer os.Unsetenv("SKAFKA_CLUSTER_DOMAIN")
-	defer os.Unsetenv("SKAFKA_BROKER_SERVICE_PATTERN")
 
 	id, err := NewBrokerIdentity("skafka", "skafka-headless", 9092)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "skafka-broker-1.skafka.svc.cluster.dev"
+	want := "skafka-1.skafka-headless.skafka.svc.cluster.dev"
 	if id.Host != want {
 		t.Errorf("Host=%q, want %q", id.Host, want)
 	}
@@ -96,20 +96,21 @@ func TestNewBrokerIdentityHonorsClusterDomainEnv(t *testing.T) {
 	}
 }
 
-// TestNewBrokerIdentityHonorsServicePatternEnv: SKAFKA_BROKER_SERVICE_PATTERN
-// overrides the default service-name pattern — required for non-default
-// chart fullnames (e.g. multiple skafka clusters in one namespace).
-func TestNewBrokerIdentityHonorsServicePatternEnv(t *testing.T) {
+// TestNewBrokerIdentityHonorsPodNamePatternEnv: SKAFKA_POD_NAME_PATTERN
+// overrides the default StatefulSet pod-name pattern — required for
+// non-default chart fullnames (e.g. multiple skafka clusters in one
+// namespace via two Helm releases with distinct release names).
+func TestNewBrokerIdentityHonorsPodNamePatternEnv(t *testing.T) {
 	os.Setenv("MY_POD_NAME", "skafka-stage-2")
-	os.Setenv("SKAFKA_BROKER_SERVICE_PATTERN", "skafka-stage-broker-%d")
+	os.Setenv("SKAFKA_POD_NAME_PATTERN", "skafka-stage-%d")
 	defer os.Unsetenv("MY_POD_NAME")
-	defer os.Unsetenv("SKAFKA_BROKER_SERVICE_PATTERN")
+	defer os.Unsetenv("SKAFKA_POD_NAME_PATTERN")
 
 	id, err := NewBrokerIdentity("skafka", "skafka-stage-headless", 9092)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "skafka-stage-broker-2.skafka.svc.cluster.local"
+	want := "skafka-stage-2.skafka-stage-headless.skafka.svc.cluster.local"
 	if id.Host != want {
 		t.Errorf("Host=%q, want %q", id.Host, want)
 	}
@@ -121,17 +122,18 @@ func TestNewBrokerIdentityHonorsServicePatternEnv(t *testing.T) {
 // hosts disagree on the DNS suffix — clients hit DNS NXDOMAIN.
 func TestDNSConfigFQDN(t *testing.T) {
 	d := DNSConfig{
-		Namespace:            "skafka",
-		BrokerServicePattern: "skafka-broker-%d",
-		ClusterDomain:        "cluster.local",
+		Namespace:       "skafka",
+		HeadlessService: "skafka",
+		PodNamePattern:  "skafka-%d",
+		ClusterDomain:   "cluster.local",
 	}
 	cases := []struct {
 		ord  int32
 		want string
 	}{
-		{0, "skafka-broker-0.skafka.svc.cluster.local"},
-		{1, "skafka-broker-1.skafka.svc.cluster.local"},
-		{12, "skafka-broker-12.skafka.svc.cluster.local"},
+		{0, "skafka-0.skafka.skafka.svc.cluster.local"},
+		{1, "skafka-1.skafka.skafka.svc.cluster.local"},
+		{12, "skafka-12.skafka.skafka.svc.cluster.local"},
 	}
 	for _, tc := range cases {
 		got := d.FQDN(tc.ord)

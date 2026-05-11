@@ -15,9 +15,10 @@ import (
 // cached metadata stays valid.
 func TestBrokerRegistryAdvertisesFQDNNotIP(t *testing.T) {
 	dns := DNSConfig{
-		Namespace:            "skafka",
-		BrokerServicePattern: "skafka-broker-%d",
-		ClusterDomain:        "cluster.local",
+		Namespace:       "skafka",
+		HeadlessService: "skafka",
+		PodNamePattern:  "skafka-%d",
+		ClusterDomain:   "cluster.local",
 	}
 	self := BrokerEndpoint{
 		NodeID: 0,
@@ -39,13 +40,13 @@ func TestBrokerRegistryAdvertisesFQDNNotIP(t *testing.T) {
 	}
 	for _, b := range all {
 		if strings.Contains(b.Host, "10.42.") {
-			t.Errorf("broker %d advertised raw pod IP %q — gh #97 contract broken", b.NodeID, b.Host)
+			t.Errorf("broker %d advertised raw pod IP %q — gh #128 contract broken", b.NodeID, b.Host)
 		}
-		if !strings.HasSuffix(b.Host, ".skafka.svc.cluster.local") {
-			t.Errorf("broker %d host=%q doesn't match expected FQDN suffix", b.NodeID, b.Host)
+		if !strings.HasSuffix(b.Host, ".skafka.skafka.svc.cluster.local") {
+			t.Errorf("broker %d host=%q doesn't match expected headless-DNS suffix", b.NodeID, b.Host)
 		}
-		if !strings.HasPrefix(b.Host, "skafka-broker-") {
-			t.Errorf("broker %d host=%q doesn't start with the per-broker Service name", b.NodeID, b.Host)
+		if !strings.HasPrefix(b.Host, "skafka-") {
+			t.Errorf("broker %d host=%q doesn't start with the pod name", b.NodeID, b.Host)
 		}
 	}
 }
@@ -75,9 +76,10 @@ func TestBrokerRegistryFallsBackToIPWhenDNSEmpty(t *testing.T) {
 // SKAFKA_CLUSTER_DOMAIN plumbing).
 func TestBrokerRegistryClusterDomainOverride(t *testing.T) {
 	dns := DNSConfig{
-		Namespace:            "kafka",
-		BrokerServicePattern: "skafka-broker-%d",
-		ClusterDomain:        "cluster.dev",
+		Namespace:       "kafka",
+		HeadlessService: "skafka",
+		PodNamePattern:  "skafka-%d",
+		ClusterDomain:   "cluster.dev",
 	}
 	self := BrokerEndpoint{NodeID: 0, Host: dns.FQDN(0), Port: 9092, Ready: true}
 	r := NewBrokerRegistry(self, dns, nil)
@@ -87,7 +89,7 @@ func TestBrokerRegistryClusterDomainOverride(t *testing.T) {
 	})
 	r.applySlice(es)
 
-	want := "skafka-broker-3.kafka.svc.cluster.dev"
+	want := "skafka-3.skafka.kafka.svc.cluster.dev"
 	if got := r.brokers[3].Host; got != want {
 		t.Errorf("peer host=%q, want %q (custom clusterDomain didn't propagate)", got, want)
 	}
@@ -97,7 +99,7 @@ func TestBrokerRegistryClusterDomainOverride(t *testing.T) {
 // land in the registry. Existing behaviour, regression-pinned in
 // the gh #97 context.
 func TestBrokerRegistrySkipsUnreadyPeer(t *testing.T) {
-	dns := DNSConfig{Namespace: "skafka", BrokerServicePattern: "skafka-broker-%d", ClusterDomain: "cluster.local"}
+	dns := DNSConfig{Namespace: "skafka", HeadlessService: "skafka", PodNamePattern: "skafka-%d", ClusterDomain: "cluster.local"}
 	self := BrokerEndpoint{NodeID: 0, Host: dns.FQDN(0), Port: 9092, Ready: true}
 	r := NewBrokerRegistry(self, dns, nil)
 
@@ -111,15 +113,16 @@ func TestBrokerRegistrySkipsUnreadyPeer(t *testing.T) {
 	}
 }
 
-// TestBrokerRegistryCustomServicePattern: the BrokerServicePattern
-// in DNSConfig flows through to peer hosts. Required for
-// non-default chart fullnames (e.g. multiple skafka clusters in
-// one namespace via two Helm releases).
-func TestBrokerRegistryCustomServicePattern(t *testing.T) {
+// TestBrokerRegistryCustomPodNamePattern: the PodNamePattern in
+// DNSConfig flows through to peer hosts. Required for non-default
+// chart fullnames (e.g. multiple skafka clusters in one namespace
+// via two Helm releases — each with a distinct release name).
+func TestBrokerRegistryCustomPodNamePattern(t *testing.T) {
 	dns := DNSConfig{
-		Namespace:            "skafka",
-		BrokerServicePattern: "skafka-stage-broker-%d",
-		ClusterDomain:        "cluster.local",
+		Namespace:       "skafka",
+		HeadlessService: "skafka-stage",
+		PodNamePattern:  "skafka-stage-%d",
+		ClusterDomain:   "cluster.local",
 	}
 	self := BrokerEndpoint{NodeID: 0, Host: dns.FQDN(0), Port: 9092, Ready: true}
 	r := NewBrokerRegistry(self, dns, nil)
@@ -129,9 +132,9 @@ func TestBrokerRegistryCustomServicePattern(t *testing.T) {
 	})
 	r.applySlice(es)
 
-	want := "skafka-stage-broker-2.skafka.svc.cluster.local"
+	want := "skafka-stage-2.skafka-stage.skafka.svc.cluster.local"
 	if got := r.brokers[2].Host; got != want {
-		t.Errorf("peer host=%q, want %q (custom service pattern didn't propagate)", got, want)
+		t.Errorf("peer host=%q, want %q (custom pod-name pattern didn't propagate)", got, want)
 	}
 }
 

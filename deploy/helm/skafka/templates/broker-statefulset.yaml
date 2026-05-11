@@ -83,15 +83,19 @@ spec:
                   fieldPath: metadata.namespace
             - name: SKAFKA_HEADLESS_SVC
               value: {{ include "skafka.headlessName" . }}
-            # gh #97: per-broker ClusterIP Service name pattern (one
-            # Service per broker, see broker-per-pod-services.yaml).
-            # The broker advertises `<pattern>.<ns>.svc.<domain>` as
-            # its host in MetadataResponse, so cached metadata
-            # survives pod restarts (Service VIP stays stable; only
-            # the underlying pod IP changes). %d is replaced with
-            # the broker ordinal at runtime.
-            - name: SKAFKA_BROKER_SERVICE_PATTERN
-              value: "{{ include "skafka.fullname" . }}-broker-%d"
+            # gh #128: pod-name pattern for the StatefulSet's pods —
+            # used together with SKAFKA_HEADLESS_SVC to build the
+            # Strimzi-style headless per-pod DNS name (e.g.
+            # `skafka-0.skafka.<ns>.svc.<domain>`) that the broker
+            # advertises in MetadataResponse. Pre-gh #128 a per-broker
+            # ClusterIP Service backed each advertised FQDN; that
+            # collided with the operator's external-listener reconciler
+            # and caused an ArgoCD drift loop. K8s synthesizes the
+            # per-pod A record from the StatefulSet + headless Service
+            # pair, so no extra Service object is needed for internal
+            # traffic.
+            - name: SKAFKA_POD_NAME_PATTERN
+              value: "{{ include "skafka.fullname" . }}-%d"
             - name: SKAFKA_CLUSTER_DOMAIN
               value: {{ .Values.listeners.internal.clusterDomain | default "cluster.local" }}
             - name: SKAFKA_DATA_DIR

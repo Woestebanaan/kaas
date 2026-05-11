@@ -164,12 +164,19 @@ func (r *BrokerRegistry) applySlice(es *discoveryv1.EndpointSlice) {
 		}
 		ready := ep.Conditions.Ready != nil && *ep.Conditions.Ready
 		if ready {
-			// gh #97: prefer the per-broker Service FQDN over
-			// the pod IP so clients survive pod restarts. Fall
-			// back to the raw address only when DNS isn't
-			// configured (tests that pass a zero DNSConfig).
+			// gh #128: advertise the StatefulSet's headless per-pod
+			// DNS so clients survive pod restarts (Strimzi pattern).
+			// Pre-gh #128 we used a per-broker ClusterIP Service VIP
+			// instead, but that required maintaining N Service
+			// objects and caused an ArgoCD drift loop where the
+			// chart and the operator both wrote `<cluster>-broker-N`
+			// with different specs. The headless-DNS form needs no
+			// extra K8s objects — K8s synthesizes the A record from
+			// the StatefulSet + headless Service pair. Fall back to
+			// the raw address only when DNS isn't configured (tests
+			// that pass a zero DNSConfig).
 			host := ep.Addresses[0]
-			if r.dns.BrokerServicePattern != "" {
+			if r.dns.HeadlessService != "" && r.dns.PodNamePattern != "" {
 				host = r.dns.FQDN(ordinal)
 			}
 			r.brokers[ordinal] = BrokerEndpoint{NodeID: ordinal, Host: host, Port: port, Ready: true}
