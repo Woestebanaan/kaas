@@ -316,7 +316,7 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 	if mx.CertReloads, err = m.Int64Counter("skafka.cert.reloads",
-		metric.WithDescription("TLS certificate hot-reloads")); err != nil {
+		metric.WithDescription("TLS certificate hot-reloads (result=ok|error). gh #132: failures stay visible — cert-manager mid-rotation or stale Secret mounts surface as result=error and don't go silent.")); err != nil {
 		return nil, err
 	}
 	if mx.Connections, err = m.Int64Counter("skafka.connections",

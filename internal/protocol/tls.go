@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/woestebanaan/skafka/internal/observability"
 )
@@ -124,11 +126,19 @@ func watchLoop(w *fsnotify.Watcher, certFile, keyFile string, current *atomic.Po
 	reload := func() {
 		kp, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
-			slog.Warn("tls: reload failed", "err", err)
+			// gh #132: bump the counter on failure too so cert-rotation
+			// problems stay visible on the dashboard instead of going
+			// silent. cert-manager rotation failures or stale Secret
+			// mounts both surface here.
+			observability.Global().CertReloads.Add(context.Background(), 1,
+				metric.WithAttributes(attribute.String("result", "error")))
+			slog.Warn("tls: cert reload failed (likely cert-manager mid-rotation or a stale secret mount; existing cert in memory stays in use)",
+				"cert", certFile, "err", err)
 			return
 		}
 		current.Store(&kp)
-		observability.Global().CertReloads.Add(context.Background(), 1)
+		observability.Global().CertReloads.Add(context.Background(), 1,
+			metric.WithAttributes(attribute.String("result", "ok")))
 		slog.Info("tls: certificate reloaded", "cert", certFile)
 	}
 

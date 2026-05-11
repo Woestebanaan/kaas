@@ -223,6 +223,11 @@ func errCodeForAppendError(err error) int16 {
 // are strings, not wire ints. The label set is deliberately bounded
 // — no raw error.Error() strings, which would explode cardinality.
 // gh #132.
+//
+// Every Append() error path SHOULD map onto one of these classes; if
+// the metric shows error_code=unknown rising, it means the storage
+// engine grew a new error path that isn't classified here. Add a case
+// rather than letting it collapse into the catch-all.
 func errorClassForAppendError(err error) string {
 	switch {
 	case errors.Is(err, storage.ErrOutOfOrderSequence):
@@ -231,6 +236,14 @@ func errorClassForAppendError(err error) string {
 		return "invalid_producer_epoch"
 	case errors.Is(err, storage.ErrStorageStalled):
 		return "storage_stalled"
+	case errors.Is(err, storage.ErrEpochMismatch):
+		return "epoch_mismatch"
+	case errors.Is(err, storage.ErrNotLeader):
+		return "not_leader"
+	case errors.Is(err, storage.ErrUnknownPartition):
+		return "unknown_partition"
+	case errors.Is(err, storage.ErrPartitionClosing):
+		return "partition_closing"
 	default:
 		return "unknown"
 	}

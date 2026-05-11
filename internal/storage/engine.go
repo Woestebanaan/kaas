@@ -56,6 +56,19 @@ var (
 	// gives the Java client's idempotent retry loop something
 	// recoverable to chew on instead of dropping the connection.
 	ErrStorageStalled = errors.New("storage: fsync exceeded FsyncMaxLatency")
+
+	// ErrUnknownPartition fires when Append/Read is called for a
+	// partition this broker hasn't opened (TakeOver never ran for it).
+	// Pre-gh #132 this was an unstructured fmt.Errorf, so handler-side
+	// errors.Is() couldn't classify it and the produce-errors metric
+	// dumped these into 'unknown'. Promoted to a sentinel so the
+	// dashboard can call out "wrong-broker traffic" by its proper name.
+	ErrUnknownPartition = errors.New("storage: unknown partition")
+	// ErrPartitionClosing fires when Append blocks waiting on a flush
+	// and the partition is relinquished underneath it. Same motivation
+	// as ErrUnknownPartition — classify cleanly instead of collapsing
+	// to 'unknown'.
+	ErrPartitionClosing = errors.New("storage: partition closing")
 )
 
 // StorageEngine is the interface for reading and writing topic partition data.
@@ -674,7 +687,7 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	// per-partition Lease (which gh #75 stopped acquiring).
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
-		return -1, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+		return -1, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
 	}
 
 	ps.mu.Lock()
@@ -779,7 +792,7 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 			return -1, ps.flushErr
 		}
 		if ps.closing && ps.completedFlushSeq < mySeq {
-			return -1, fmt.Errorf("storage: partition closing")
+			return -1, ErrPartitionClosing
 		}
 	}
 
@@ -870,7 +883,7 @@ func (e *DiskStorageEngine) rollSegment(ctx context.Context, ps *partitionState)
 func (e *DiskStorageEngine) Read(_ context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]byte, error) {
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
-		return nil, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+		return nil, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
 	}
 
 	ps.mu.Lock()

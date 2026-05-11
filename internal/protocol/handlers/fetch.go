@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -109,7 +110,7 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 				// "no traffic"; this counter rises so the dashboard
 				// shows "broker is asked but failing" during NAS
 				// stalls or partition-leader race windows.
-				recordFetchError(mx, topic.Name, "read_failed")
+				recordFetchError(mx, topic.Name, errorClassForReadError(err))
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 		}
@@ -141,4 +142,22 @@ func recordFetchError(mx *observability.Metrics, topic, errorCode string) {
 			attribute.String("topic", topic),
 			attribute.String("error_code", errorCode),
 		))
+}
+
+// errorClassForReadError maps storage.Read() error sentinels onto
+// bounded metric-label strings. Mirrors errorClassForAppendError on
+// the produce side. Every Read() error path should have a case here;
+// error_code=unknown rising on the dashboard means a new error type
+// in the storage engine needs classification.
+func errorClassForReadError(err error) string {
+	switch {
+	case errors.Is(err, storage.ErrStorageStalled):
+		return "storage_stalled"
+	case errors.Is(err, storage.ErrUnknownPartition):
+		return "unknown_partition"
+	case errors.Is(err, storage.ErrOffsetOutOfRange):
+		return "offset_out_of_range"
+	default:
+		return "unknown"
+	}
 }
