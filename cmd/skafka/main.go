@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -160,6 +162,20 @@ func runBroker(ctx context.Context) {
 		reaper := storage.NewPartitionReaper(storage.ReaperConfig{
 			RatePerSec: reaperRate,
 		})
+		// gh #119 observability: attach OTel instruments so reaper
+		// activity shows up in Grafana alongside Produce/Fetch.
+		// observability.Bootstrap (run earlier in main) already called
+		// otel.SetMeterProvider — pull a named meter off the global.
+		reaperMeter := otel.Meter("skafka-reaper")
+		enq, comp, abrt, rtry, gup, dur, merr := observability.NewReaperMetrics(reaperMeter)
+		if merr == nil {
+			reaper.WithMetrics(&storage.ReaperMetrics{
+				Enqueued: enq, Completed: comp, Aborted: abrt,
+				Retried: rtry, GivenUp: gup, Duration: dur,
+			})
+		} else {
+			slog.Warn("reaper metrics disabled", "err", merr)
+		}
 		engine.WithReaper(reaper)
 		go reaper.Run(ctx)
 
@@ -487,9 +503,9 @@ func runBroker(ctx context.Context) {
 	// until the queue drains. The TCP listener stays up; livenessProbe
 	// (on port 9092) still passes; only /readyz flips.
 	const reaperBacklogReadyThreshold = 50
-	readyFn := func() bool {
+	readinessFn := func() readinessStatus {
 		if srv.Addr() == "" {
-			return false
+			return readinessStatus{Ready: false, Reason: "tcp_listener_not_bound"}
 		}
 		// Storage engine may not expose a reaper (memory storage /
 		// dev mode); only apply backpressure when one is wired.
@@ -497,11 +513,19 @@ func runBroker(ctx context.Context) {
 			Reaper() *storage.PartitionReaper
 		}
 		if rh, ok := store.(reaperHolder); ok {
-			if r := rh.Reaper(); r != nil && r.QueueDepth() > reaperBacklogReadyThreshold {
-				return false
+			if r := rh.Reaper(); r != nil {
+				depth := r.QueueDepth()
+				if depth > reaperBacklogReadyThreshold {
+					return readinessStatus{
+						Ready:            false,
+						Reason:           "reaper_saturated",
+						ReaperBacklog:    depth,
+						BacklogThreshold: reaperBacklogReadyThreshold,
+					}
+				}
 			}
 		}
-		return true
+		return readinessStatus{Ready: true}
 	}
 	startHealthServer(ctx, healthServerConfig{
 		addr:      healthAddr,
@@ -509,7 +533,7 @@ func runBroker(ctx context.Context) {
 		listeners: listeners,
 		tls:       tlsInfo,
 		source:    healthSource,
-		ready:     readyFn,
+		readiness: readinessFn,
 	})
 
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
@@ -781,14 +805,25 @@ func mustRestConfig() *rest.Config {
 
 // healthServerConfig is the inputs to startHealthServer. brokerID and
 // listeners label the response; tls is the external-listener summary;
-// source is the v3 RuntimeState (nil in local-dev). ready gates /readyz.
+// source is the v3 RuntimeState (nil in local-dev). readiness returns
+// the structured "why am I unready" state for /readyz.
 type healthServerConfig struct {
 	addr      string
 	brokerID  string
 	listeners []string
 	tls       *observability.TLSInfo
 	source    observability.RuntimeState
-	ready     func() bool
+	readiness func() readinessStatus
+}
+
+// readinessStatus is the gh #118 structured /readyz response so
+// operators see WHY the broker is unready (not just a 503 with empty
+// body). Marshaled to JSON either way (200 or 503).
+type readinessStatus struct {
+	Ready          bool   `json:"ready"`
+	Reason         string `json:"reason,omitempty"`
+	ReaperBacklog  int    `json:"reaper_backlog,omitempty"`
+	BacklogThreshold int  `json:"backlog_threshold,omitempty"`
 }
 
 // startHealthServer runs an HTTP server with the plan's /healthz JSON
@@ -799,11 +834,15 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", observability.HealthHandler(cfg.brokerID, cfg.listeners, cfg.tls, cfg.source))
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !cfg.ready() {
+		st := cfg.readiness()
+		w.Header().Set("Content-Type", "application/json")
+		if !st.Ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			return
+		} else {
+			w.WriteHeader(http.StatusOK)
 		}
-		w.WriteHeader(http.StatusOK)
+		body, _ := json.Marshal(st)
+		_, _ = w.Write(body)
 	})
 	srv := &http.Server{Addr: cfg.addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

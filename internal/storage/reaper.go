@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/time/rate"
 )
 
@@ -43,9 +44,33 @@ type PartitionReaper struct {
 	rateLimiter  *rate.Limiter
 	topicExists  func(topic string) bool // CR-existence recheck before reap
 
+	// metrics is the optional OTel instrument bundle. Wired from
+	// observability bootstrap so the reaper goroutine doesn't import
+	// the observability package directly. Nil → metrics disabled (tests).
+	metrics *ReaperMetrics
+
 	once sync.Once
 	wg   sync.WaitGroup
 	stop chan struct{}
+}
+
+// ReaperMetrics is the gh #119 instrument bundle the reaper emits.
+// Lives here (not in observability) so the reaper goroutine can
+// reach it without an import cycle. Wired by
+// observability.NewReaperMetrics() in production.
+type ReaperMetrics struct {
+	Enqueued  metric.Int64Counter   // total partitions enqueued for reap
+	Completed metric.Int64Counter   // successful reaps
+	Aborted   metric.Int64Counter   // CR-recheck aborts (topic reappeared)
+	Retried   metric.Int64Counter   // transient-error retries
+	GivenUp   metric.Int64Counter   // exhausted MaxRetries — rely on next startup sweep
+	Duration  metric.Float64Histogram // reap-work wall-clock per partition
+}
+
+// WithMetrics attaches an OTel instrument bundle. Nil-safe: passing
+// nil disables emission (tests).
+func (r *PartitionReaper) WithMetrics(m *ReaperMetrics) {
+	r.metrics = m
 }
 
 // ReaperConfig holds the tunables. Zero values pick sensible defaults.
@@ -132,6 +157,15 @@ func (r *PartitionReaper) Enqueue(topic string, partition int32, ps *partitionSt
 	}
 	select {
 	case r.queue <- reapJob{topic: topic, partition: partition, ps: ps, partDir: partDir}:
+		// Observability (gh #119): one INFO line per enqueue.
+		// During a mass-delete cascade the log shows the queue
+		// growing then draining as the worker processes each entry.
+		slog.Info("reaper: enqueued partition for reap",
+			"topic", topic, "partition", partition,
+			"queue_depth", len(r.queue))
+		if r.metrics != nil {
+			r.metrics.Enqueued.Add(context.Background(), 1)
+		}
 		return nil
 	case <-r.stop:
 		return fmt.Errorf("reaper stopped while enqueueing %s/%d", topic, partition)
@@ -180,34 +214,64 @@ func (r *PartitionReaper) reapOne(ctx context.Context, job reapJob) {
 	// delete the new topic's data.
 	if r.topicExists(job.topic) {
 		slog.Warn("reaper: topic reappeared during reap; aborting",
-			"topic", job.topic, "partition", job.partition)
+			"topic", job.topic, "partition", job.partition,
+			"queue_depth", len(r.queue))
+		if r.metrics != nil {
+			r.metrics.Aborted.Add(ctx, 1)
+		}
 		return
 	}
 
-	if err := r.reapWork(job); err != nil {
-		job.attempts++
-		if job.attempts >= r.cfg.MaxRetries {
-			slog.Error("reaper: giving up after MaxRetries; relying on next startup SweepTopics",
-				"topic", job.topic, "partition", job.partition,
-				"attempts", job.attempts, "err", err)
+	slog.Info("reaper: starting reap",
+		"topic", job.topic, "partition", job.partition,
+		"queue_depth", len(r.queue), "attempts", job.attempts)
+
+	start := time.Now()
+	err := r.reapWork(job)
+	elapsed := time.Since(start)
+	if r.metrics != nil {
+		r.metrics.Duration.Record(ctx, elapsed.Seconds())
+	}
+
+	if err == nil {
+		slog.Info("reaper: reap complete",
+			"topic", job.topic, "partition", job.partition,
+			"duration_ms", elapsed.Milliseconds(),
+			"queue_depth", len(r.queue))
+		if r.metrics != nil {
+			r.metrics.Completed.Add(ctx, 1)
+		}
+		return
+	}
+
+	job.attempts++
+	if job.attempts >= r.cfg.MaxRetries {
+		slog.Error("reaper: giving up after MaxRetries; relying on next startup SweepTopics",
+			"topic", job.topic, "partition", job.partition,
+			"attempts", job.attempts, "err", err)
+		if r.metrics != nil {
+			r.metrics.GivenUp.Add(ctx, 1)
+		}
+		return
+	}
+	backoff := r.cfg.RetryBackoff * time.Duration(job.attempts)
+	slog.Warn("reaper: transient error, will retry",
+		"topic", job.topic, "partition", job.partition,
+		"attempts", job.attempts, "backoff", backoff, "err", err)
+	if r.metrics != nil {
+		r.metrics.Retried.Add(ctx, 1)
+	}
+
+	// Re-enqueue after backoff via a goroutine so we don't
+	// block the worker's main loop.
+	go func() {
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
 			return
 		}
-		backoff := r.cfg.RetryBackoff * time.Duration(job.attempts)
-		slog.Warn("reaper: transient error, will retry",
-			"topic", job.topic, "partition", job.partition,
-			"attempts", job.attempts, "backoff", backoff, "err", err)
-
-		// Re-enqueue after backoff via a goroutine so we don't
-		// block the worker's main loop.
-		go func() {
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return
-			}
-			_ = r.Enqueue(job.topic, job.partition, job.ps, job.partDir)
-		}()
-	}
+		_ = r.Enqueue(job.topic, job.partition, job.ps, job.partDir)
+	}()
 }
 
 // reapWork does the actual close + remove. Returns nil on full

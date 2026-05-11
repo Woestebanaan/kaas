@@ -280,3 +280,45 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	}
 	return mx, nil
 }
+
+// NewReaperMetrics constructs the gh #119 partition-reaper instrument
+// bundle on the given meter. Returns nil on any error (caller's
+// reaper falls back to log-only). Each instrument's lifecycle is the
+// same as the meter — typically the process lifetime.
+//
+// Lives in observability (not storage) so storage doesn't import the
+// observability package; storage exposes the bundle type and the
+// observability bootstrap fills it in.
+func NewReaperMetrics(m metric.Meter) (enqueued, completed, aborted, retried, givenUp metric.Int64Counter, duration metric.Float64Histogram, err error) {
+	if enqueued, err = m.Int64Counter("skafka.reaper.enqueued",
+		metric.WithDescription("Partitions enqueued for background reap"),
+		metric.WithUnit("{partition}")); err != nil {
+		return
+	}
+	if completed, err = m.Int64Counter("skafka.reaper.completed",
+		metric.WithDescription("Partitions successfully reaped"),
+		metric.WithUnit("{partition}")); err != nil {
+		return
+	}
+	if aborted, err = m.Int64Counter("skafka.reaper.aborted",
+		metric.WithDescription("Reaps aborted because the topic CR reappeared during the reap window"),
+		metric.WithUnit("{partition}")); err != nil {
+		return
+	}
+	if retried, err = m.Int64Counter("skafka.reaper.retried",
+		metric.WithDescription("Reap operations re-enqueued after a transient I/O error"),
+		metric.WithUnit("{operation}")); err != nil {
+		return
+	}
+	if givenUp, err = m.Int64Counter("skafka.reaper.given_up",
+		metric.WithDescription("Reaps that exhausted MaxRetries; recovered on next startup SweepTopics"),
+		metric.WithUnit("{partition}")); err != nil {
+		return
+	}
+	if duration, err = m.Float64Histogram("skafka.reaper.duration",
+		metric.WithDescription("Reap-work wall-clock per partition (closeHandles + os.RemoveAll)"),
+		metric.WithUnit("s")); err != nil {
+		return
+	}
+	return
+}

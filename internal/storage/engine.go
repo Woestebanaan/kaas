@@ -1219,6 +1219,8 @@ func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error 
 	// pre-#119 synchronous path so tests and dev mode keep their
 	// existing semantics.
 	if e.reaper != nil {
+		slog.Info("storage: partition close requested (handing off to reaper)",
+			"topic", topic, "partition", partition, "dir", partDir)
 		return e.reaper.Enqueue(topic, partition, ps, partDir)
 	}
 
