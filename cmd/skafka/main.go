@@ -142,6 +142,27 @@ func runBroker(ctx context.Context) {
 			os.Exit(1)
 		}
 
+		// gh #119: attach the partition reaper. ClosePartition then
+		// enqueues the slow close+os.RemoveAll work to a single
+		// rate-limited background goroutine so deletion can't compete
+		// with active Produce/Fetch for NFS metadata throughput. The
+		// CR-existence recheck is wired from cmd/skafka/cluster_runtime
+		// once the topic-watcher has booted (the registry it watches
+		// is the source of truth). Until then, the recheck defaults to
+		// "always false" — safe because the reaper only runs on
+		// partitions whose CR has already been observed deleted.
+		reaperRate := 5.0
+		if v := os.Getenv("SKAFKA_DELETION_RATE_PER_SEC"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+				reaperRate = f
+			}
+		}
+		reaper := storage.NewPartitionReaper(storage.ReaperConfig{
+			RatePerSec: reaperRate,
+		})
+		engine.WithReaper(reaper)
+		go reaper.Run(ctx)
+
 		// Wire storage callbacks into the k8s lease manager now that the engine exists.
 		if km, ok := leaseManager.(*lease.KubernetesLeaseManager); ok {
 			km.SetOnStartedLeading(func(topic string, partition int32, epoch int64) {
@@ -245,6 +266,12 @@ func runBroker(ctx context.Context) {
 		brokerSource,
 		coordMgr,
 	)
+
+	// gh #119: wire the partition reaper's CR-existence recheck so
+	// it consults the broker's TopicRegistry (the live view the
+	// topic-watcher maintains) before each reap. Idempotent — no-op
+	// when the engine has no reaper (memory-storage / dev mode).
+	b.WireReaperCRCheck()
 
 	// Register topics discovered during k8s startup so Metadata responses and
 	// produce/fetch dispatch resolve them.
@@ -453,13 +480,36 @@ func runBroker(ctx context.Context) {
 	if k8sMode {
 		healthBrokerID = fmt.Sprintf("skafka-%d", brokerID)
 	}
+	// gh #118: /readyz returns 503 when the broker is saturated
+	// behind a deletion drain (reaper queue depth > threshold).
+	// kube-proxy then removes this broker's pod IP from the skafka
+	// Service's endpoints so clients route to less-saturated peers
+	// until the queue drains. The TCP listener stays up; livenessProbe
+	// (on port 9092) still passes; only /readyz flips.
+	const reaperBacklogReadyThreshold = 50
+	readyFn := func() bool {
+		if srv.Addr() == "" {
+			return false
+		}
+		// Storage engine may not expose a reaper (memory storage /
+		// dev mode); only apply backpressure when one is wired.
+		type reaperHolder interface {
+			Reaper() *storage.PartitionReaper
+		}
+		if rh, ok := store.(reaperHolder); ok {
+			if r := rh.Reaper(); r != nil && r.QueueDepth() > reaperBacklogReadyThreshold {
+				return false
+			}
+		}
+		return true
+	}
 	startHealthServer(ctx, healthServerConfig{
 		addr:      healthAddr,
 		brokerID:  healthBrokerID,
 		listeners: listeners,
 		tls:       tlsInfo,
 		source:    healthSource,
-		ready:     func() bool { return srv.Addr() != "" },
+		ready:     readyFn,
 	})
 
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)

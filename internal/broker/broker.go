@@ -186,6 +186,33 @@ func NewWithBrokerSource(
 	}
 }
 
+// WireReaperCRCheck installs the gh #119 CR-existence callback on
+// the storage engine's PartitionReaper. The reaper consults this
+// before doing each reap; if the topic CR has come back during the
+// reap window (recreate-with-same-name), the reap is aborted and
+// the partition data is preserved.
+//
+// Wired from cmd/skafka after both the broker AND the engine (with
+// its reaper) are up. Idempotent — no-op when the engine doesn't
+// have a reaper attached (memory storage / dev mode).
+func (b *Broker) WireReaperCRCheck() {
+	type reaperHolder interface {
+		Reaper() *storage.PartitionReaper
+	}
+	rh, ok := b.store.(reaperHolder)
+	if !ok || rh.Reaper() == nil {
+		return
+	}
+	// The topic registry IS the broker's view of the
+	// "currently-valid topics" — a topic missing from it has been
+	// deleted (or is being deleted; the TopicWatcher already
+	// removes it on deletionTimestamp != nil).
+	rh.Reaper().WithTopicExists(func(topic string) bool {
+		_, ok := b.topics.Get(topic)
+		return ok
+	})
+}
+
 // AddTopic registers a topic in the local registry so Metadata and produce/fetch work immediately.
 func (b *Broker) AddTopic(name string, partitions int32) {
 	b.topics.Add(name, partitions)

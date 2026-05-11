@@ -161,6 +161,11 @@ type DiskStorageEngine struct {
 
 	mu         sync.RWMutex
 	partitions map[string]*partitionState
+
+	// reaper drains the slow phase of ClosePartition off the request
+	// path. gh #119. Nil in tests / dev mode unless WithReaper is set;
+	// when nil, ClosePartition falls back to the synchronous close.
+	reaper *PartitionReaper
 }
 
 type partitionState struct {
@@ -1193,6 +1198,9 @@ func (e *DiskStorageEngine) Relinquish(topic string, partition int32) error {
 // logs them but doesn't retry, since the operator's finalizer will
 // retry the unlink on its own reconcile cadence.
 func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error {
+	// Phase 1 (gh #119): detach from the in-memory map. This is the
+	// instant, hot-path-friendly part. After this returns, Produce/
+	// Fetch see UNKNOWN_TOPIC_OR_PARTITION immediately.
 	e.mu.Lock()
 	key := e.partKey(topic, partition)
 	ps, ok := e.partitions[key]
@@ -1203,11 +1211,19 @@ func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error 
 	delete(e.partitions, key)
 	e.mu.Unlock()
 
-	// Stop the group-commit goroutine first — it'll run a final
-	// drainAndExit fsync so any pending Appends complete (or surface
-	// the closing-error path) before we close file handles.
-	ps.stopCommitter()
+	partDir := filepath.Join(e.dataDir, topic, fmt.Sprintf("%d", partition))
 
+	// Phase 2 (gh #119): if a reaper is wired, hand off the slow
+	// work (stop-committer + close-handles + os.RemoveAll) to a
+	// rate-limited background goroutine. Otherwise fall back to the
+	// pre-#119 synchronous path so tests and dev mode keep their
+	// existing semantics.
+	if e.reaper != nil {
+		return e.reaper.Enqueue(topic, partition, ps, partDir)
+	}
+
+	// Synchronous fallback (no reaper wired).
+	ps.stopCommitter()
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	if ps.active == nil {
@@ -1217,6 +1233,19 @@ func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error 
 	ps.active = nil
 	return err
 }
+
+// WithReaper attaches the background partition reaper. The caller is
+// responsible for starting the reaper's Run goroutine and Stop'ing
+// it on shutdown. Wired by `broker.New` in production; tests can
+// skip this to keep ClosePartition synchronous. gh #119.
+func (e *DiskStorageEngine) WithReaper(r *PartitionReaper) *DiskStorageEngine {
+	e.reaper = r
+	return e
+}
+
+// Reaper returns the attached reaper (or nil). Used by /readyz to
+// peek queue depth for the gh #118 backpressure surface.
+func (e *DiskStorageEngine) Reaper() *PartitionReaper { return e.reaper }
 
 // AllPartitions returns all known partitions — used by the retention cleaner.
 // FenceProducerEpoch advances every partition's view of (PID, epoch)
