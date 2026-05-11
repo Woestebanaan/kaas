@@ -146,6 +146,18 @@ type Metrics struct {
 	CompactionRecordsDropped metric.Int64Counter     // records superseded by later writes (deduplication win)
 	CompactionBytesIn        metric.Int64Counter     // total source-segment bytes scanned
 	CompactionBytesOut       metric.Int64Counter     // bytes written to the replacement segment
+
+	// gh #121 PR4: OTLP push observability. The OTel SDK's
+	// PeriodicReader silently drops samples when the exporter's
+	// Export call fails (e.g. controller broker starves the push
+	// goroutine during alive-set churn — the "context deadline
+	// exceeded" symptom that triggered the broader gh #121 rewrite).
+	// Pre-PR4 the failure was invisible from a dashboard; you'd notice
+	// it only by an unexplained drop in series count. These counters
+	// make the OTLP push itself observable.
+	OTLPPushSuccess  metric.Int64Counter
+	OTLPPushFailure  metric.Int64Counter // labelled by err class (timeout|refused|other)
+	OTLPPushDuration metric.Float64Histogram
 }
 
 // NewMetrics creates all instruments on the given meter. Errors from individual
@@ -332,6 +344,27 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	if mx.CompactionBytesOut, err = m.Int64Counter("skafka.compaction.bytes.out",
 		metric.WithDescription("Replacement-segment bytes written by the compactor (after dedup). bytes.in - bytes.out is the size savings."),
 		metric.WithUnit("By")); err != nil {
+		return nil, err
+	}
+	// gh #121 PR4: OTLP push observability. Wired via the exporter
+	// wrapper in bootstrap.go — these instruments are filled by the
+	// wrapper, not by application code. Note the self-referential
+	// loop: an OTLP push failure increments OTLPPushFailure, which
+	// is itself exported on the next push attempt. That's fine —
+	// dashboards see the failure on a one-period lag, which is the
+	// best you can do without an out-of-band channel.
+	if mx.OTLPPushSuccess, err = m.Int64Counter("skafka.otlp.push.success",
+		metric.WithDescription("OTLP metric exports that succeeded")); err != nil {
+		return nil, err
+	}
+	if mx.OTLPPushFailure, err = m.Int64Counter("skafka.otlp.push.failure",
+		metric.WithDescription("OTLP metric exports that failed (err_class=timeout|refused|other)")); err != nil {
+		return nil, err
+	}
+	if mx.OTLPPushDuration, err = m.Float64Histogram("skafka.otlp.push.duration",
+		metric.WithDescription("Time spent in Exporter.Export — high values suggest backend pressure"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
 		return nil, err
 	}
 	return mx, nil

@@ -443,6 +443,12 @@ func runBroker(ctx context.Context) {
 	// handlers that happened to remember the boilerplate. Must Use()
 	// before RegisterHandlers — the chain is applied at Register time.
 	d.Use(protocol.RequestObservability())
+	// gh #121 PR4: per-request OTel span around every handler. Sampled
+	// by the global tracer provider (default 10% via Bootstrap).
+	// Tracing is the inner ring — RequestObservability wraps around
+	// it so the latency histogram captures the tracing-middleware
+	// overhead too, giving an honest "wall-clock to serve" number.
+	d.Use(protocol.RequestTracing())
 	b.RegisterHandlers(d)
 	// gh #108 phase 2: cross-broker producer-fence broadcast. Started
 	// after handlers register so the watcher's storage engine and

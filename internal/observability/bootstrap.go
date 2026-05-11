@@ -66,7 +66,11 @@ func Bootstrap(ctx context.Context, service string) (*Providers, error) {
 		if err != nil {
 			return nil, fmt.Errorf("observability: otlp metric exporter: %w", err)
 		}
-		mpOpts = append(mpOpts, metric.WithReader(metric.NewPeriodicReader(metricExporter)))
+		// gh #121 PR4: wrap so every Export call lands on the
+		// OTLPPush* instruments. Pre-PR4 a failing push was invisible
+		// from a dashboard.
+		wrapped := newObservedExporter(metricExporter)
+		mpOpts = append(mpOpts, metric.WithReader(metric.NewPeriodicReader(wrapped)))
 		p.shutdowns = append(p.shutdowns, metricExporter.Shutdown)
 	}
 	p.MeterProvider = metric.NewMeterProvider(mpOpts...)
