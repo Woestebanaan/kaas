@@ -206,7 +206,15 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 		hdr, body, err := readFrame(br)
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) && !isEOF(err) {
-				slog.Warn("read frame error", "client", state.ClientID, "err", err)
+				// Failed to read a request frame from the client's
+				// TCP stream — typically a malformed frame (corrupted
+				// length prefix, client sending a non-Kafka protocol
+				// to port 9092) or a mid-frame disconnect that wasn't
+				// clean enough to return EOF. Clean disconnects
+				// (EOF / net.ErrClosed) are silently swallowed above.
+				slog.Warn("connection: reading next request frame failed",
+					"client", state.ClientID,
+					"err", err)
 			}
 			return
 		}
@@ -225,11 +233,34 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 		}
 
 		if err := writeFrame(bw, response); err != nil {
-			slog.Warn("write frame error", "client", state.ClientID, "err", err)
+			// The framed response couldn't be written into the
+			// per-connection bufio.Writer. In practice this fires
+			// when the TCP send buffer is full AND the client has
+			// already dropped the connection (broken pipe / RST).
+			// The request handler already ran to completion; the
+			// only consequence is the client doesn't see the
+			// response it was waiting for and will retry per the
+			// Kafka protocol's idempotent-retry contract.
+			slog.Warn("connection: writing response frame failed (client likely disconnected mid-response)",
+				"client", state.ClientID,
+				"api_key", hdr.APIKey,
+				"api_version", hdr.APIVersion,
+				"response_bytes", len(response),
+				"err", err)
 			return
 		}
 		if err := bw.Flush(); err != nil {
-			slog.Warn("flush error", "client", state.ClientID, "err", err)
+			// The response was queued into the bufio.Writer but
+			// flushing it onto the TCP socket failed. Same root
+			// cause as writeFrame above: the client disconnected
+			// between request receipt and response send. Logged
+			// as WARN, not ERROR, because the broker did its job —
+			// nothing actionable on this side.
+			slog.Warn("connection: flushing response to socket failed (client likely disconnected; response built but not delivered)",
+				"client", state.ClientID,
+				"api_key", hdr.APIKey,
+				"api_version", hdr.APIVersion,
+				"err", err)
 			return
 		}
 	}
