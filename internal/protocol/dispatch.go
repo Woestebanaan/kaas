@@ -33,7 +33,8 @@ type registration struct {
 // Dispatcher routes incoming requests to the correct handler by API key.
 type Dispatcher struct {
 	handlers    map[int16]registration
-	RequireSASL bool // when true, reject non-SASL requests from unauthenticated connections
+	middleware  []Middleware // applied to handlers at Register time (see middleware.go)
+	RequireSASL bool         // when true, reject non-SASL requests from unauthenticated connections
 }
 
 // preSASLKeys are API keys permitted before SASL authentication completes.
@@ -44,8 +45,11 @@ func NewDispatcher() *Dispatcher {
 }
 
 // Register adds a handler for the given API key and version range.
+// The handler is wrapped by every middleware registered via Use(),
+// so the hot path sees a pre-chained Handler — no closure rebuild
+// per Dispatch call.
 func (d *Dispatcher) Register(apiKey int16, min, max int16, h Handler) {
-	d.handlers[apiKey] = registration{handler: h, versions: versionRange{min, max}}
+	d.handlers[apiKey] = registration{handler: d.chain(apiKey, h), versions: versionRange{min, max}}
 }
 
 // Dispatch decodes the request header, checks version support, calls the handler,

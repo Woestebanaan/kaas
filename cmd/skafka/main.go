@@ -438,6 +438,11 @@ func runBroker(ctx context.Context) {
 
 	d := protocol.NewDispatcher()
 	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
+	// gh #121 PR2.5: request-level observability is a uniform middleware
+	// so every API key gets a latency histogram, not just the two
+	// handlers that happened to remember the boilerplate. Must Use()
+	// before RegisterHandlers — the chain is applied at Register time.
+	d.Use(protocol.RequestObservability())
 	b.RegisterHandlers(d)
 	// gh #108 phase 2: cross-broker producer-fence broadcast. Started
 	// after handlers register so the watcher's storage engine and

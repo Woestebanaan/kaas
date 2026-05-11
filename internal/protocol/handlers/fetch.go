@@ -28,15 +28,11 @@ func NewFetchHandler(store storage.StorageEngine, leases lease.LeaseManager, aut
 }
 
 func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
-	start := time.Now()
+	// Request latency now lives in the protocol.RequestObservability
+	// middleware (gh #121 PR2.5). Per-call ReadLatency below is still
+	// inline because it carries the topic label which the request-level
+	// middleware deliberately doesn't.
 	mx := observability.Global()
-	defer func() {
-		mx.RequestLatency.Record(context.Background(), time.Since(start).Seconds(),
-			metric.WithAttributes(
-				attribute.Int("api_key", 1),
-				attribute.Int("version", int(version)),
-			))
-	}()
 
 	r := codec.NewReader(body)
 	req, err := api.DecodeFetchRequest(r, version)

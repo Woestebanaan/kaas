@@ -52,15 +52,12 @@ func (h *ProduceHandler) WithCoordinator(coord kafkaapi.BrokerCoordinator) *Prod
 }
 
 func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
-	start := time.Now()
+	// Request latency is recorded uniformly by the
+	// protocol.RequestObservability middleware (gh #121 PR2.5) — this
+	// handler used to carry the histogram defer block inline, but the
+	// other ~28 handlers didn't, so latency was only visible for
+	// Produce/Fetch. Middleware covers all of them.
 	mx := observability.Global()
-	defer func() {
-		mx.RequestLatency.Record(context.Background(), time.Since(start).Seconds(),
-			metric.WithAttributes(
-				attribute.Int("api_key", 0),
-				attribute.Int("version", int(version)),
-			))
-	}()
 
 	r := codec.NewReader(body)
 	req, err := api.DecodeProduceRequest(r, version)
