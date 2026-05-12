@@ -7,7 +7,9 @@ package handlers
 // TopicWatcher fires `Added` on every broker. Without a CRWriter
 // (kafka-compat tests / dev mode) the handler still updates the local
 // TopicRegistry so Metadata reflects the change on this broker.
-// ACL write operations return NOT_CONTROLLER — ACLs are managed via KafkaAcl CRDs.
+// ACL write operations return NOT_CONTROLLER — ACLs are managed on the
+// KafkaUser CR's spec.authorization.acls list (gh #135), not via the
+// admin wire protocol.
 
 import (
 	"context"
@@ -185,7 +187,7 @@ func (h *DeleteTopicsHandler) Handle(_ *connstate.ConnState, version int16, body
 	return w.Bytes(), nil
 }
 
-// ---- ACL handlers — NOT_CONTROLLER; managed via KafkaAcl CRD ----
+// ---- ACL handlers — NOT_CONTROLLER; managed via KafkaUser.spec.authorization (gh #135) ----
 
 type DescribeAclsHandler struct{}
 

@@ -16,9 +16,10 @@ rules:
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]
     verbs: [get, list, watch]
-  # CRD watches — read-only
+  # CRD watches — read-only. gh #135: kafkaacls + kafkausergroups removed;
+  # ACLs live inline on KafkaUser.spec.authorization.
   - apiGroups: [skafka.io]
-    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls]
+    resources: [kafkatopics, kafkausers]
     verbs: [get, list, watch]
   # KafkaClusterAssignments — the controller broker writes this CR as a
   # best-effort fire-and-forget debug mirror of /data/__cluster/assignment.json.

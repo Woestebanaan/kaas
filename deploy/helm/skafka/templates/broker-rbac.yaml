@@ -20,10 +20,11 @@ rules:
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]
     verbs: [get, list, watch]
-  # CRD watches — read-only for users / groups / acls (operator
-  # writes them from KafkaUser/KafkaACL CRs; brokers only consume).
+  # CRD watches — read-only for KafkaUser (operator translates spec.authorization
+  # inline into acls.json under /data/__cluster/; brokers only consume the file).
+  # gh #135: kafkaacls + kafkausergroups removed.
   - apiGroups: [skafka.io]
-    resources: [kafkausers, kafkausergroups, kafkaacls]
+    resources: [kafkausers]
     verbs: [get, list, watch]
   # KafkaTopic: brokers watch + manage. The watch covers the
   # operator-driven path (kubectl apply -f); create/delete cover

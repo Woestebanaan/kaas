@@ -85,6 +85,80 @@ spec:
                 required:
                 - type
                 type: object
+              authorization:
+                description: |-
+                  Authorization carries the user's ACL rules inline (Strimzi-style).
+                  Pre-gh #135 ACLs lived in a separate KafkaAcl CR (and could also be
+                  attached to a KafkaUserGroup that listed multiple members). Both
+                  secondary CRs are removed in v0.1.117 — every rule that applies to
+                  a principal is authored on the principal's own KafkaUser CR.
+                properties:
+                  acls:
+                    items:
+                      description: |-
+                        KafkaUserACL is one access-control rule attached to this principal.
+                        Field naming matches Strimzi exactly: `type: allow|deny` (lowercase),
+                        optional `host` (defaults to "*"). Operations are validated against
+                        Apache Kafka's standard set.
+                      properties:
+                        host:
+                          default: '*'
+                          description: |-
+                            Source-IP filter. Defaults to "*" (any host). Reserved for
+                            forward-compat with the Apache Kafka authorizer's host field;
+                            skafka 0.1.117 enforces only "*" — other values are accepted at
+                            the CR level but treated as "*" at the broker.
+                          type: string
+                        operations:
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        resource:
+                          description: |-
+                            KafkaUserACLResource identifies the Kafka resource the ACL applies to.
+                            Same shape as the prior AclResource type; renamed for namespace
+                            hygiene now that ACLs live inside KafkaUser.
+                          properties:
+                            name:
+                              type: string
+                            patternType:
+                              default: literal
+                              enum:
+                              - literal
+                              - prefix
+                              type: string
+                            type:
+                              enum:
+                              - topic
+                              - group
+                              - cluster
+                              - transactionalId
+                              type: string
+                          required:
+                          - name
+                          - type
+                          type: object
+                        type:
+                          default: allow
+                          enum:
+                          - allow
+                          - deny
+                          type: string
+                      required:
+                      - operations
+                      - resource
+                      type: object
+                    type: array
+                  type:
+                    default: simple
+                    enum:
+                    - simple
+                    type: string
+                required:
+                - acls
+                - type
+                type: object
               quotas:
                 properties:
                   consumerByteRate:

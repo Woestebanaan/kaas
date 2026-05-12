@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -12,6 +13,14 @@ import (
 )
 
 // ACLFile is the in-memory representation of __cluster/acls.json.
+// Schema is deliberately UNCHANGED by gh #135 — the broker still reads
+// this exact layout from disk. Only the CR-side authoring story changed:
+// pre-gh #135 the operator merged a separate KafkaAcl CR + a
+// KafkaUserGroup expansion into entries; post-gh #135 it iterates
+// KafkaUser CRs and pulls the inline `spec.authorization.acls` slice.
+// The on-disk format ("Allow"/"Deny" capitalisation, principal prefix)
+// matches what the broker's loader already expects, so no broker-side
+// code or data migration is needed.
 type ACLFile struct {
 	Version int        `json:"version"`
 	ACLs    []ACLEntry `json:"acls"`
@@ -25,7 +34,7 @@ type ACLEntry struct {
 	Permission string      `json:"permission"`
 }
 
-// ACLResource mirrors the CRD's AclResource for JSON output.
+// ACLResource mirrors the in-CR resource shape for JSON output.
 type ACLResource struct {
 	Type        string `json:"type"`
 	Name        string `json:"name"`
@@ -36,43 +45,31 @@ func aclsPath(dataDir string) string {
 	return filepath.Join(dataDir, "__cluster", "acls.json")
 }
 
-// reconcileACLs lists all KafkaAcl + KafkaUserGroup objects in namespace, merges them
-// into a single ACLFile, and atomically writes it to dataDir/__cluster/acls.json.
-// It is safe to call from multiple controllers concurrently — the atomic rename ensures
-// the file is always complete.
+// reconcileACLs lists all KafkaUser objects in namespace, collects their
+// inline `spec.authorization.acls` rules, and atomically writes the
+// merged set to dataDir/__cluster/acls.json.
+//
+// Called from KafkaUserReconciler on every KafkaUser change so a single
+// user-level edit is reflected on disk within one reconcile cycle. Safe
+// to call from concurrent reconciles — the atomic rename guarantees the
+// broker only ever sees a complete file.
 func reconcileACLs(ctx context.Context, c client.Client, namespace, dataDir string) error {
-	var aclList v1alpha1.KafkaAclList
-	if err := c.List(ctx, &aclList, client.InNamespace(namespace)); err != nil {
-		return err
-	}
-
-	var groupList v1alpha1.KafkaUserGroupList
-	if err := c.List(ctx, &groupList, client.InNamespace(namespace)); err != nil {
+	var userList v1alpha1.KafkaUserList
+	if err := c.List(ctx, &userList, client.InNamespace(namespace)); err != nil {
 		return err
 	}
 
 	var entries []ACLEntry
-
-	// Entries from KafkaAcl objects.
-	for _, acl := range aclList.Items {
-		if acl.DeletionTimestamp != nil {
+	for _, u := range userList.Items {
+		if u.DeletionTimestamp != nil {
 			continue
 		}
-		principal := formatPrincipal(acl.Spec.Principal)
-		for _, rule := range acl.Spec.Rules {
-			entries = append(entries, ruleToEntry(principal, rule))
-		}
-	}
-
-	// Entries from KafkaUserGroup objects — expand each member individually.
-	for _, group := range groupList.Items {
-		if group.DeletionTimestamp != nil {
+		if u.Spec.Authorization == nil || len(u.Spec.Authorization.ACLs) == 0 {
 			continue
 		}
-		for _, member := range group.Spec.Members {
-			for _, rule := range group.Spec.Rules {
-				entries = append(entries, ruleToEntry("User:"+member, rule))
-			}
+		principal := "User:" + u.Name
+		for _, acl := range u.Spec.Authorization.ACLs {
+			entries = append(entries, aclToEntry(principal, acl))
 		}
 	}
 
@@ -82,27 +79,36 @@ func reconcileACLs(ctx context.Context, c client.Client, namespace, dataDir stri
 	return writeAtomic(aclsPath(dataDir), &ACLFile{Version: 1, ACLs: entries})
 }
 
-func formatPrincipal(p v1alpha1.AclPrincipal) string {
-	switch p.Kind {
-	case "KafkaUser":
-		return "User:" + p.Name
-	case "KafkaUserGroup":
-		return "Group:" + p.Name
-	default:
-		return p.Name
+// aclToEntry projects one KafkaUserACL (Strimzi-style, with
+// `type: allow|deny` lowercased) onto the on-disk ACLEntry format
+// (`permission: Allow|Deny` capitalised). Defaults the pattern type
+// to "literal" when the CR didn't set one and the type to "allow"
+// when omitted — both mirror Strimzi defaults.
+func aclToEntry(principal string, acl v1alpha1.KafkaUserACL) ACLEntry {
+	patternType := acl.Resource.PatternType
+	if patternType == "" {
+		patternType = "literal"
 	}
-}
-
-func ruleToEntry(principal string, rule v1alpha1.AclRule) ACLEntry {
+	aclType := acl.Type
+	if aclType == "" {
+		aclType = "allow"
+	}
+	// On-disk format is the historical "Allow" / "Deny" capitalisation
+	// (broker AclEngine matches case-sensitively). Translate at the
+	// boundary so the public CR stays Strimzi-faithful.
+	permission := "Allow"
+	if strings.EqualFold(aclType, "deny") {
+		permission = "Deny"
+	}
 	return ACLEntry{
 		Principal: principal,
 		Resource: ACLResource{
-			Type:        rule.Resource.Type,
-			Name:        rule.Resource.Name,
-			PatternType: rule.Resource.PatternType,
+			Type:        acl.Resource.Type,
+			Name:        acl.Resource.Name,
+			PatternType: patternType,
 		},
-		Operations: rule.Operations,
-		Permission: rule.Permission,
+		Operations: acl.Operations,
+		Permission: permission,
 	}
 }
 

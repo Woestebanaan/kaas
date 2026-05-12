@@ -36,9 +36,15 @@ func (r *KafkaUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	var user v1alpha1.KafkaUser
 	err := r.Get(ctx, req.NamespacedName, &user)
 	if apierrors.IsNotFound(err) {
-		// CR is gone — drop the credential entry. If the operator was down
-		// during the delete, the startup credentials rebuild catches it.
+		// CR is gone — drop the credential entry and rebuild acls.json
+		// without any rules that belonged to this user. If the operator
+		// was down during the delete, the startup credentials sweep
+		// catches the orphan credential; acls.json gets rebuilt from
+		// the live KafkaUser set on next reconcile.
 		if e := r.removeUser(req.Name); e != nil {
+			return ctrl.Result{}, e
+		}
+		if e := reconcileACLs(ctx, r.Client, r.Namespace, r.DataDir); e != nil {
 			return ctrl.Result{}, e
 		}
 		return ctrl.Result{}, nil
@@ -70,6 +76,15 @@ func (r *KafkaUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	cf.upsertUser(*cred)
 	if err := writeCredentials(r.DataDir, cf); err != nil {
 		return ctrl.Result{}, fmt.Errorf("write credentials: %w", err)
+	}
+
+	// gh #135: ACLs now live inline on the KafkaUser CR. Rebuild acls.json
+	// from every user's spec.authorization.acls on each reconcile so a
+	// single-user edit propagates within one cycle. Cheap — the file is
+	// small (<1MB) and atomic-rename means the broker never sees a
+	// partial write.
+	if err := reconcileACLs(ctx, r.Client, r.Namespace, r.DataDir); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile acls: %w", err)
 	}
 
 	// Update status.

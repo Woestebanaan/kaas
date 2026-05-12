@@ -19,25 +19,32 @@ func newACLScheme() *runtime.Scheme {
 	return s
 }
 
-func TestReconcileACLs_FromKafkaAcl(t *testing.T) {
+// TestReconcileACLs_FromInlineSpec pins the gh #135 contract: ACLs are
+// authored on the KafkaUser CR via spec.authorization.acls (Strimzi-
+// style) and merged into acls.json with the on-disk capitalised
+// permission ("Allow"/"Deny").
+func TestReconcileACLs_FromInlineSpec(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	acl := v1alpha1.KafkaAcl{
-		ObjectMeta: metav1.ObjectMeta{Name: "payments-acl", Namespace: "default"},
-		Spec: v1alpha1.KafkaAclSpec{
-			Principal: v1alpha1.AclPrincipal{Kind: "KafkaUser", Name: "alice"},
-			Rules: []v1alpha1.AclRule{
-				{
-					Resource:   v1alpha1.AclResource{Type: "topic", Name: "payments", PatternType: "literal"},
-					Operations: []string{"Write"},
-					Permission: "Allow",
+	user := v1alpha1.KafkaUser{
+		ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: "default"},
+		Spec: v1alpha1.KafkaUserSpec{
+			Authentication: v1alpha1.KafkaUserAuthentication{Type: "scram-sha-512"},
+			Authorization: &v1alpha1.KafkaUserAuthorization{
+				Type: "simple",
+				ACLs: []v1alpha1.KafkaUserACL{
+					{
+						Resource:   v1alpha1.KafkaUserACLResource{Type: "topic", Name: "payments", PatternType: "literal"},
+						Operations: []string{"Write"},
+						Type:       "allow",
+					},
 				},
 			},
 		},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&acl).Build()
+	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&user).Build()
 	if err := reconcileACLs(ctx, c, "default", dir); err != nil {
 		t.Fatalf("reconcileACLs: %v", err)
 	}
@@ -58,116 +65,128 @@ func TestReconcileACLs_FromKafkaAcl(t *testing.T) {
 	if af.ACLs[0].Resource.Name != "payments" {
 		t.Errorf("resource name=%q, want payments", af.ACLs[0].Resource.Name)
 	}
+	// "allow" (CR) → "Allow" (on-disk). Boundary translation pinned.
+	if af.ACLs[0].Permission != "Allow" {
+		t.Errorf("permission=%q, want Allow (CR 'allow' should capitalise on disk)", af.ACLs[0].Permission)
+	}
 }
 
-func TestReconcileACLs_FromKafkaUserGroup(t *testing.T) {
+// TestReconcileACLs_DenyLowercase asserts the lowercase-to-capitalised
+// translation works for deny too — the broker AclEngine matches
+// case-sensitively, so the boundary translation in aclToEntry MUST run.
+func TestReconcileACLs_DenyLowercase(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	group := v1alpha1.KafkaUserGroup{
-		ObjectMeta: metav1.ObjectMeta{Name: "analytics-team", Namespace: "default"},
-		Spec: v1alpha1.KafkaUserGroupSpec{
-			Members: []string{"alice", "bob"},
-			Rules: []v1alpha1.AclRule{
-				{
-					Resource:   v1alpha1.AclResource{Type: "topic", Name: "analytics-", PatternType: "prefix"},
-					Operations: []string{"Read", "Describe"},
-					Permission: "Allow",
+	user := v1alpha1.KafkaUser{
+		ObjectMeta: metav1.ObjectMeta{Name: "bob", Namespace: "default"},
+		Spec: v1alpha1.KafkaUserSpec{
+			Authentication: v1alpha1.KafkaUserAuthentication{Type: "tls"},
+			Authorization: &v1alpha1.KafkaUserAuthorization{
+				Type: "simple",
+				ACLs: []v1alpha1.KafkaUserACL{
+					{
+						Resource:   v1alpha1.KafkaUserACLResource{Type: "topic", Name: "secret", PatternType: "literal"},
+						Operations: []string{"Read"},
+						Type:       "deny",
+					},
 				},
 			},
 		},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&group).Build()
+	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&user).Build()
 	if err := reconcileACLs(ctx, c, "default", dir); err != nil {
 		t.Fatalf("reconcileACLs: %v", err)
 	}
-
 	data, _ := os.ReadFile(aclsPath(dir))
 	var af ACLFile
 	_ = json.Unmarshal(data, &af)
 
-	// Each member gets one entry → 2 total.
-	if len(af.ACLs) != 2 {
-		t.Fatalf("expected 2 ACL entries (one per member), got %d", len(af.ACLs))
-	}
-	principals := map[string]bool{}
-	for _, e := range af.ACLs {
-		principals[e.Principal] = true
-	}
-	if !principals["User:alice"] || !principals["User:bob"] {
-		t.Errorf("missing expected principals: %v", principals)
+	if af.ACLs[0].Permission != "Deny" {
+		t.Errorf("permission=%q, want Deny", af.ACLs[0].Permission)
 	}
 }
 
-func TestReconcileACLs_DeletedObjectsSkipped(t *testing.T) {
+// TestReconcileACLs_DeletedUserSkipped verifies that ACLs from a CR
+// mid-deletion (DeletionTimestamp set) are not emitted. Mirrors the
+// pre-gh #135 deleted-skip behaviour now that the source is KafkaUser.
+func TestReconcileACLs_DeletedUserSkipped(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
 	now := metav1.Now()
-	acl := v1alpha1.KafkaAcl{
+	user := v1alpha1.KafkaUser{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:              "deleted-acl",
+			Name:              "carol",
 			Namespace:         "default",
 			DeletionTimestamp: &now,
 			Finalizers:        []string{"some-finalizer"},
 		},
-		Spec: v1alpha1.KafkaAclSpec{
-			Principal: v1alpha1.AclPrincipal{Kind: "KafkaUser", Name: "carol"},
-			Rules: []v1alpha1.AclRule{
-				{
-					Resource:   v1alpha1.AclResource{Type: "topic", Name: "*", PatternType: "literal"},
-					Operations: []string{"Read"},
-					Permission: "Allow",
+		Spec: v1alpha1.KafkaUserSpec{
+			Authentication: v1alpha1.KafkaUserAuthentication{Type: "tls"},
+			Authorization: &v1alpha1.KafkaUserAuthorization{
+				Type: "simple",
+				ACLs: []v1alpha1.KafkaUserACL{
+					{
+						Resource:   v1alpha1.KafkaUserACLResource{Type: "topic", Name: "*", PatternType: "literal"},
+						Operations: []string{"Read"},
+						Type:       "allow",
+					},
 				},
 			},
 		},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&acl).Build()
+	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&user).Build()
 	if err := reconcileACLs(ctx, c, "default", dir); err != nil {
 		t.Fatalf("reconcileACLs: %v", err)
 	}
-
 	data, _ := os.ReadFile(aclsPath(dir))
 	var af ACLFile
 	_ = json.Unmarshal(data, &af)
 
 	if len(af.ACLs) != 0 {
-		t.Errorf("expected 0 ACL entries for deleted object, got %d", len(af.ACLs))
+		t.Errorf("expected 0 ACL entries for deleted user, got %d", len(af.ACLs))
 	}
 }
 
-func TestReconcileACLs_MergesBothSources(t *testing.T) {
+// TestReconcileACLs_DefaultsApplied: defaults are at the CR level
+// (kubebuilder), but reconcileACLs must also default missing fields at
+// the boundary because the fake client doesn't apply defaulting and
+// gh #135's KafkaUserACL marks PatternType + Type + Host as omitempty.
+func TestReconcileACLs_DefaultsApplied(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	acl := v1alpha1.KafkaAcl{
-		ObjectMeta: metav1.ObjectMeta{Name: "acl1", Namespace: "default"},
-		Spec: v1alpha1.KafkaAclSpec{
-			Principal: v1alpha1.AclPrincipal{Kind: "KafkaUser", Name: "alice"},
-			Rules:     []v1alpha1.AclRule{{Resource: v1alpha1.AclResource{Type: "topic", Name: "t1", PatternType: "literal"}, Operations: []string{"Write"}, Permission: "Allow"}},
+	user := v1alpha1.KafkaUser{
+		ObjectMeta: metav1.ObjectMeta{Name: "default-test", Namespace: "default"},
+		Spec: v1alpha1.KafkaUserSpec{
+			Authentication: v1alpha1.KafkaUserAuthentication{Type: "tls"},
+			Authorization: &v1alpha1.KafkaUserAuthorization{
+				ACLs: []v1alpha1.KafkaUserACL{
+					{
+						// PatternType + Type omitted entirely.
+						Resource:   v1alpha1.KafkaUserACLResource{Type: "topic", Name: "events"},
+						Operations: []string{"Read"},
+					},
+				},
+			},
 		},
 	}
-	group := v1alpha1.KafkaUserGroup{
-		ObjectMeta: metav1.ObjectMeta{Name: "grp1", Namespace: "default"},
-		Spec: v1alpha1.KafkaUserGroupSpec{
-			Members: []string{"bob"},
-			Rules:   []v1alpha1.AclRule{{Resource: v1alpha1.AclResource{Type: "topic", Name: "t2", PatternType: "literal"}, Operations: []string{"Read"}, Permission: "Allow"}},
-		},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&acl, &group).Build()
+	c := fake.NewClientBuilder().WithScheme(newACLScheme()).WithObjects(&user).Build()
 	if err := reconcileACLs(ctx, c, "default", dir); err != nil {
-		t.Fatalf("reconcileACLs: %v", err)
+		t.Fatal(err)
 	}
-
 	data, _ := os.ReadFile(aclsPath(dir))
 	var af ACLFile
 	_ = json.Unmarshal(data, &af)
 
-	if len(af.ACLs) != 2 {
-		t.Fatalf("expected 2 merged entries, got %d", len(af.ACLs))
+	if af.ACLs[0].Resource.PatternType != "literal" {
+		t.Errorf("PatternType default not applied: got %q, want literal", af.ACLs[0].Resource.PatternType)
+	}
+	if af.ACLs[0].Permission != "Allow" {
+		t.Errorf("Permission default not applied: got %q, want Allow", af.ACLs[0].Permission)
 	}
 }
 

@@ -13,21 +13,19 @@ metadata:
   name: {{ include "skafka.fullname" . }}-operator
   labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
 rules:
+  # gh #135: kafkaacls + kafkausergroups CRs removed. ACLs now live
+  # inline on KafkaUser.spec.authorization (Strimzi-style).
   - apiGroups: [skafka.io]
-    resources: [kafkatopics, kafkausers, kafkausergroups, kafkaacls, kafkaclusters, kafkaclusterassignments]
+    resources: [kafkatopics, kafkausers, kafkaclusters, kafkaclusterassignments]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [skafka.io]
     resources:
       - kafkatopics/status
       - kafkausers/status
-      - kafkausergroups/status
-      - kafkaacls/status
       - kafkaclusters/status
       - kafkaclusterassignments/status
       - kafkatopics/finalizers
       - kafkausers/finalizers
-      - kafkausergroups/finalizers
-      - kafkaacls/finalizers
       - kafkaclusters/finalizers
     verbs: [get, update, patch]
   - apiGroups: [coordination.k8s.io]

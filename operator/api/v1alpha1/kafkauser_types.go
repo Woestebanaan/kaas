@@ -19,8 +19,56 @@ type KafkaUser struct {
 }
 
 type KafkaUserSpec struct {
-	Authentication KafkaUserAuthentication `json:"authentication"`
-	Quotas         *KafkaUserQuotas        `json:"quotas,omitempty"`
+	Authentication KafkaUserAuthentication  `json:"authentication"`
+	// Authorization carries the user's ACL rules inline (Strimzi-style).
+	// Pre-gh #135 ACLs lived in a separate KafkaAcl CR (and could also be
+	// attached to a KafkaUserGroup that listed multiple members). Both
+	// secondary CRs are removed in v0.1.117 — every rule that applies to
+	// a principal is authored on the principal's own KafkaUser CR.
+	Authorization *KafkaUserAuthorization `json:"authorization,omitempty"`
+	Quotas        *KafkaUserQuotas        `json:"quotas,omitempty"`
+}
+
+// KafkaUserAuthorization wraps the ACL list, mirroring Strimzi's
+// spec.authorization shape so paste-from-Strimzi works verbatim. The
+// `type` discriminator is set to "simple" today; reserved for forward
+// compatibility with future authorization backends (e.g. OPA, OIDC).
+type KafkaUserAuthorization struct {
+	// +kubebuilder:validation:Enum=simple
+	// +kubebuilder:default=simple
+	Type string         `json:"type"`
+	ACLs []KafkaUserACL `json:"acls"`
+}
+
+// KafkaUserACL is one access-control rule attached to this principal.
+// Field naming matches Strimzi exactly: `type: allow|deny` (lowercase),
+// optional `host` (defaults to "*"). Operations are validated against
+// Apache Kafka's standard set.
+type KafkaUserACL struct {
+	Resource   KafkaUserACLResource `json:"resource"`
+	// +kubebuilder:validation:MinItems=1
+	Operations []string `json:"operations"`
+	// +kubebuilder:validation:Enum=allow;deny
+	// +kubebuilder:default=allow
+	Type string `json:"type,omitempty"`
+	// Source-IP filter. Defaults to "*" (any host). Reserved for
+	// forward-compat with the Apache Kafka authorizer's host field;
+	// skafka 0.1.117 enforces only "*" — other values are accepted at
+	// the CR level but treated as "*" at the broker.
+	// +kubebuilder:default="*"
+	Host string `json:"host,omitempty"`
+}
+
+// KafkaUserACLResource identifies the Kafka resource the ACL applies to.
+// Same shape as the prior AclResource type; renamed for namespace
+// hygiene now that ACLs live inside KafkaUser.
+type KafkaUserACLResource struct {
+	// +kubebuilder:validation:Enum=topic;group;cluster;transactionalId
+	Type string `json:"type"`
+	Name string `json:"name"`
+	// +kubebuilder:validation:Enum=literal;prefix
+	// +kubebuilder:default=literal
+	PatternType string `json:"patternType,omitempty"`
 }
 
 type KafkaUserAuthentication struct {

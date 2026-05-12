@@ -34,7 +34,7 @@ Releases are tag-driven; see `RELEASING.md`. **Always bump the patch (`v0.1.N-pr
 skafka is a from-scratch Kafka-protocol-compatible broker that runs on Kubernetes. Two binaries ship in this repo:
 
 - **`cmd/skafka`** — the broker (port 9092 plaintext, 9093 TLS, 8080 health, 9094 inter-broker heartbeat gRPC).
-- **`cmd/skafka-operator`** — a controller-runtime operator that reconciles 6 CRDs into on-disk config files (auth/topics) and Kubernetes plumbing (TLS routes, etc.).
+- **`cmd/skafka-operator`** — a controller-runtime operator that reconciles 4 CRDs into on-disk config files (auth/topics) and Kubernetes plumbing (TLS routes, etc.).
 
 There are also two helper binaries for tests/diagnostics: `cmd/skafka-failover-probe` and `cmd/skafka-fsync-check`.
 
@@ -42,7 +42,7 @@ There are also two helper binaries for tests/diagnostics: `cmd/skafka-failover-p
 
 This is the most important architectural fact and is easy to misread from the directory layout. The operator is a **startup/admission** component, not a hot-path dependency:
 
-- Operator manages 6 CRDs in `operator/api/v1alpha1/`: `KafkaCluster` (external listener plumbing), `KafkaTopic` (partition dir creation), `KafkaUser` / `KafkaACL` / `KafkaUserGroup` (auth — materialized to files under `/data/__cluster/`), and `KafkaClusterAssignments` (read-only debug mirror, written fire-and-forget by the controller broker; brokers never read it).
+- Operator manages 4 CRDs in `operator/api/v1alpha1/`: `KafkaCluster` (external listener plumbing), `KafkaTopic` (partition dir creation), `KafkaUser` (auth + ACLs + quotas — `spec.authentication` / `spec.authorization` / `spec.quotas` mirror Strimzi 1:1 since gh #135; materialized to `credentials.json` + `acls.json` under `/data/__cluster/`), and `KafkaClusterAssignments` (read-only debug mirror, written fire-and-forget by the controller broker; brokers never read it). The pre-gh #135 `KafkaACL` and `KafkaUserGroup` CRs are gone — ACLs are authored inline on each KafkaUser's `spec.authorization.acls` list. To grant the same rule to N principals, repeat the ACL on each of their KafkaUser CRs (no group abstraction; the Strimzi-pattern trade).
 - Brokers read `KafkaTopic` CRs at startup (and watch them for new topics / partition expansion), but the read is non-fatal — a missing/unreachable API server only blocks new topic creation, never serving of existing topics.
 - The Produce/Fetch hot path makes **zero K8s API calls**. Ownership lookups are in-memory.
 
