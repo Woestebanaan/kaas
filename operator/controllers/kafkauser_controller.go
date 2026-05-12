@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -113,12 +114,24 @@ func (r *KafkaUserReconciler) buildCredential(ctx context.Context, user *v1alpha
 
 	switch auth.Type {
 	case "scram-sha-512":
-		if auth.Password == nil {
-			return nil, "", fmt.Errorf("spec.authentication.password required for scram-sha-512")
-		}
-		password, err := r.readSecret(ctx, user.Namespace, auth.Password.Name, auth.Password.Key)
+		// gh #136: password Secret is now optional. Behaviour:
+		//   - auth.Password != nil → read from the user-supplied input
+		//     Secret (current behaviour; useful when an external
+		//     password manager / SealedSecrets / ExternalSecrets owns
+		//     the credential).
+		//   - auth.Password == nil → generate a 32-char alphanumeric
+		//     password on first reconcile and write it to the operator-
+		//     owned output Secret (<user>-kafka-credentials). On
+		//     subsequent reconciles we read the password back from
+		//     that Secret so it stays stable across operator restarts.
+		//     Mirrors Strimzi: "When KafkaUser.spec.authentication.type
+		//     is configured with scram-sha-512 the User Operator will
+		//     generate a random 32-character password consisting of
+		//     upper and lowercase ASCII letters and numbers."
+		outSecretName := user.Name + "-kafka-credentials"
+		password, err := r.resolveSCRAMPassword(ctx, user, outSecretName)
 		if err != nil {
-			return nil, "", fmt.Errorf("read password secret: %w", err)
+			return nil, "", err
 		}
 		scram, err := computeScram(password)
 		if err != nil {
@@ -126,8 +139,6 @@ func (r *KafkaUserReconciler) buildCredential(ctx context.Context, user *v1alpha
 		}
 		cred.Scram = scram
 
-		// Create/update an output Secret for the client application.
-		outSecretName := user.Name + "-kafka-credentials"
 		if err := r.ensureClientSecret(ctx, user, outSecretName, user.Name, password); err != nil {
 			return nil, "", fmt.Errorf("create client secret: %w", err)
 		}
@@ -166,6 +177,61 @@ func (r *KafkaUserReconciler) readSecret(ctx context.Context, namespace, name, k
 		return "", fmt.Errorf("key %q not found in secret %s", key, name)
 	}
 	return string(val), nil
+}
+
+// resolveSCRAMPassword returns the password for a scram-sha-512 user.
+//
+// If the CR specifies spec.authentication.password, the input Secret
+// is the source of truth (external-secrets / SealedSecrets pattern).
+// Otherwise the operator generates a 32-char alphanumeric password
+// on first reconcile and persists it to the output Secret; subsequent
+// reconciles read it back from there so the password stays stable
+// across operator restarts. Mirrors Strimzi's User Operator behaviour.
+// gh #136.
+func (r *KafkaUserReconciler) resolveSCRAMPassword(ctx context.Context, user *v1alpha1.KafkaUser, outSecretName string) (string, error) {
+	if user.Spec.Authentication.Password != nil {
+		ref := user.Spec.Authentication.Password
+		password, err := r.readSecret(ctx, user.Namespace, ref.Name, ref.Key)
+		if err != nil {
+			return "", fmt.Errorf("read password secret: %w", err)
+		}
+		return password, nil
+	}
+
+	// Auto-generate path. Try to read the existing output Secret first
+	// so we don't churn the password (and the downstream credentials.json
+	// scram hash) on every reconcile.
+	var outSecret corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Namespace: user.Namespace, Name: outSecretName}, &outSecret)
+	if err == nil {
+		if pw, ok := outSecret.Data["password"]; ok && len(pw) > 0 {
+			return string(pw), nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("read existing output secret: %w", err)
+	}
+
+	password, err := generateAlphaNumPassword(32)
+	if err != nil {
+		return "", fmt.Errorf("generate password: %w", err)
+	}
+	return password, nil
+}
+
+// generateAlphaNumPassword returns a string of n characters drawn
+// uniformly (with negligible modulo bias for 32×62≈190 bits of
+// entropy) from [A-Za-z0-9]. Matches Strimzi's password alphabet.
+func generateAlphaNumPassword(n int) (string, error) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	out := make([]byte, n)
+	for i, b := range raw {
+		out[i] = alphabet[int(b)%len(alphabet)]
+	}
+	return string(out), nil
 }
 
 func (r *KafkaUserReconciler) ensureClientSecret(ctx context.Context, owner *v1alpha1.KafkaUser, secretName, username, password string) error {
