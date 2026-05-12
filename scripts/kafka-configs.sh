@@ -61,14 +61,21 @@ echo ">> Scenario 5: --describe specific broker config"
 
 QUOTA_USER="skafka-quota-test-$$"
 
-echo ">> Scenario 6 (XFAIL, gap #122): --alter user quota (producer_byte_rate)"
-# 1 MiB/s producer quota on a synthetic user. Once #122 lands, the broker
-# must (a) accept the alter, (b) persist it (file or in-memory), (c) return
-# it on describe.
+# Producer quota target for the scenarios below: 10 MB/s
+# (10 * 1024 * 1024 = 10_485_760 B/s). The probe in scenario 10 pushes
+# substantially more than the quota's worth of bytes in <1s of wall clock
+# so the throttle has to engage; if the broker is uncapped, the perf tool
+# reports MB/sec well above the limit.
+QUOTA_PRODUCER_BPS=10485760
+QUOTA_CONSUMER_BPS=20971520
+
+echo ">> Scenario 6 (XFAIL, gap #122): --alter user quota (producer_byte_rate=10 MB/s)"
+# Once #122 lands, the broker must (a) accept the alter, (b) persist it
+# (file or in-memory), (c) return it on describe.
 if "$KAFKA_BIN/kafka-configs.sh" --bootstrap-server "$BOOTSTRAP" \
      --entity-type users --entity-name "$QUOTA_USER" \
-     --alter --add-config 'producer_byte_rate=1048576' 2>&1; then
-  echo "UNEXPECTED PASS — quota engine may be live; verify scenario 7 + 9 pass too, then close #122."
+     --alter --add-config "producer_byte_rate=$QUOTA_PRODUCER_BPS" 2>&1; then
+  echo "UNEXPECTED PASS — quota engine may be live; verify scenario 7 + 10 pass too, then close #122."
 else
   echo "(expected) alter rejected — quota engine not implemented yet (#122)"
 fi
@@ -80,7 +87,7 @@ echo ">> Scenario 7 (XFAIL, gap #122): --describe user quota round-trip"
 out=$("$KAFKA_BIN/kafka-configs.sh" --bootstrap-server "$BOOTSTRAP" \
   --entity-type users --entity-name "$QUOTA_USER" --describe 2>&1 || true)
 echo "$out" | head -5
-if echo "$out" | grep -q 'producer_byte_rate=1048576'; then
+if echo "$out" | grep -q "producer_byte_rate=$QUOTA_PRODUCER_BPS"; then
   echo "UNEXPECTED PASS — describe returned the alter we just made; #122 ready to close."
 else
   echo "(expected) describe didn't round-trip producer_byte_rate (#122)"
@@ -94,7 +101,7 @@ echo ">> Scenario 8 (XFAIL, gap #122): --alter all 4 Apache quota keys"
 # single-field edit shouldn't break.
 if "$KAFKA_BIN/kafka-configs.sh" --bootstrap-server "$BOOTSTRAP" \
      --entity-type users --entity-name "$QUOTA_USER" \
-     --alter --add-config 'producer_byte_rate=1048576,consumer_byte_rate=2097152,request_percentage=50,controller_mutation_rate=10' 2>&1; then
+     --alter --add-config "producer_byte_rate=$QUOTA_PRODUCER_BPS,consumer_byte_rate=$QUOTA_CONSUMER_BPS,request_percentage=50,controller_mutation_rate=10" 2>&1; then
   echo "UNEXPECTED PASS — 4-key alter accepted; verify --describe round-trip on all four."
 else
   echo "(expected) 4-key alter rejected (#122)"
@@ -109,30 +116,33 @@ out=$("$KAFKA_BIN/kafka-configs.sh" --bootstrap-server "$BOOTSTRAP" \
 echo "$out" | head -5
 echo "(observed default-user quota config above; should round-trip an alter)"
 
-echo ">> Scenario 10 (XFAIL, gap #122): live throttle probe"
+echo ">> Scenario 10 (XFAIL, gap #122): live throttle probe at 10 MB/s cap"
 # End-to-end check that the throttle is server-enforced (KIP-219 ordering:
-# server sends response with throttle_time_ms then mutes). We pin the user
-# at 1 MiB/s producer quota and try to push 10 MiB in 1s. Expected outcome
-# (post-#122): the producer-perf tool reports an effective throughput
-# bounded near the quota and a non-zero average request latency reflecting
-# the throttle. Pre-#122 the test passes the broker uncapped, so this is
-# observable as 'the throttle never fires'.
+# server sends response with throttle_time_ms then mutes). User is pinned
+# at producer_byte_rate=10 MB/s (set in scenarios 6 + 8 above); the probe
+# tries to push 100 MB (100k * 1KB records) with --throughput -1 (unbounded
+# offered rate). Expected outcomes:
+#   - Pre-#122: broker uncapped, perf tool reports MB/sec well above 10
+#     (single-broker NFS-backed setups peak ~30-60 MB/sec for this shape).
+#   - Post-#122: rate plateaus near 10 MB/sec and the run takes ~10s+
+#     instead of ~1-3s. Heuristic threshold below picks 15 MB/sec as the
+#     pass/fail line (50% margin above the cap).
 PROBE_TOPIC="quota-probe-$$"
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" \
   --create --topic "$PROBE_TOPIC" --partitions 1 --replication-factor 1 \
   >/dev/null 2>&1 || true
 probe_out=$("$KAFKA_BIN/kafka-producer-perf-test.sh" \
   --topic "$PROBE_TOPIC" \
-  --num-records 10000 --record-size 1024 --throughput -1 \
+  --num-records 100000 --record-size 1024 --throughput -1 \
   --producer-props bootstrap.servers="$BOOTSTRAP" client.id="$QUOTA_USER" 2>&1 || true)
 echo "$probe_out" | tail -3
-# Heuristic: if the perf tool reports MB/sec well above 1.0 the throttle
-# isn't firing. Once #122 ships, expect the rate to plateau near 1 MB/s.
-if echo "$probe_out" | grep -Eq '(\([0-9]+\.[0-9]+) MB/sec\)' && \
-   echo "$probe_out" | awk '/records\/sec/ { for(i=1;i<=NF;i++) if($i=="MB/sec)") { gsub(/\(/,"",$(i-1)); if($(i-1)+0 < 1.5) exit 0; else exit 1; } } END { exit 1 }'; then
-  echo "UNEXPECTED PASS — observed throttled throughput, #122 may be live."
+# Threshold: 15 MB/sec. Below = throttle is plausibly engaged. Above =
+# broker is uncapped (pre-#122 expected behavior).
+if echo "$probe_out" | grep -Eq '\([0-9]+\.[0-9]+ MB/sec\)' && \
+   echo "$probe_out" | awk '/records\/sec/ { for(i=1;i<=NF;i++) if($i=="MB/sec)") { gsub(/\(/,"",$(i-1)); if($(i-1)+0 < 15.0) exit 0; else exit 1; } } END { exit 1 }'; then
+  echo "UNEXPECTED PASS — observed rate <15 MB/sec under a 10 MB/sec quota; throttle is firing. Verify request latency reflects throttle_time_ms before closing #122."
 else
-  echo "(expected) producer ran uncapped at >1 MB/s — quota not enforced (#122)"
+  echo "(expected) producer ran uncapped at >15 MB/s — quota not enforced (#122)"
 fi
 
 "$KAFKA_BIN/kafka-configs.sh" --bootstrap-server "$BOOTSTRAP" \
