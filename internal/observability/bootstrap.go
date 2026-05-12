@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -70,7 +71,20 @@ func Bootstrap(ctx context.Context, service string) (*Providers, error) {
 		// OTLPPush* instruments. Pre-PR4 a failing push was invisible
 		// from a dashboard.
 		wrapped := newObservedExporter(metricExporter)
-		mpOpts = append(mpOpts, metric.WithReader(metric.NewPeriodicReader(wrapped)))
+		// gh #133: explicit 30s push interval (SDK default is 60s).
+		// With 60s pushes the dashboard's rate([1m]) windows often
+		// contain only one sample, so `rate()` silently returns empty
+		// and stat panels look like 'no data' even when traffic is
+		// flowing. 30s ensures rate([60s]) always sees 2+ samples.
+		pushInterval := 30 * time.Second
+		if v := os.Getenv("OTEL_METRIC_EXPORT_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				pushInterval = d
+			}
+		}
+		mpOpts = append(mpOpts, metric.WithReader(metric.NewPeriodicReader(wrapped,
+			metric.WithInterval(pushInterval),
+		)))
 		p.shutdowns = append(p.shutdowns, metricExporter.Shutdown)
 	}
 	p.MeterProvider = metric.NewMeterProvider(mpOpts...)
