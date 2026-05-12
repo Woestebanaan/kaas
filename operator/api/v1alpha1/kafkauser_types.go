@@ -33,41 +33,47 @@ type KafkaUserSpec struct {
 // spec.authorization shape so paste-from-Strimzi works verbatim. The
 // `type` discriminator is set to "simple" today; reserved for forward
 // compatibility with future authorization backends (e.g. OPA, OIDC).
+//
+// gh #137: defaults are deliberately NOT declared via
+// +kubebuilder:default. Apiserver-side defaulting collides with
+// GitOps tooling (ArgoCD reports permanent drift because the stored
+// object has fields the git source omits). The operator is the
+// canonical defaulter — empty `type` is treated as "simple", same
+// pattern as the ACL fields below.
 type KafkaUserAuthorization struct {
 	// +kubebuilder:validation:Enum=simple
-	// +kubebuilder:default=simple
-	Type string         `json:"type"`
+	Type string         `json:"type,omitempty"`
 	ACLs []KafkaUserACL `json:"acls"`
 }
 
 // KafkaUserACL is one access-control rule attached to this principal.
 // Field naming matches Strimzi exactly: `type: allow|deny` (lowercase),
-// optional `host` (defaults to "*"). Operations are validated against
-// Apache Kafka's standard set.
+// optional `host`. Operations are validated against Apache Kafka's
+// standard set. Defaults applied at the operator boundary (acls.go
+// aclToEntry), not via apiserver +kubebuilder:default — see gh #137.
 type KafkaUserACL struct {
 	Resource   KafkaUserACLResource `json:"resource"`
 	// +kubebuilder:validation:MinItems=1
 	Operations []string `json:"operations"`
 	// +kubebuilder:validation:Enum=allow;deny
-	// +kubebuilder:default=allow
 	Type string `json:"type,omitempty"`
-	// Source-IP filter. Defaults to "*" (any host). Reserved for
-	// forward-compat with the Apache Kafka authorizer's host field;
-	// skafka 0.1.117 enforces only "*" — other values are accepted at
-	// the CR level but treated as "*" at the broker.
-	// +kubebuilder:default="*"
+	// Source-IP filter. Empty means "any host" (the Apache Kafka
+	// authorizer's "*" wildcard). Reserved for forward-compat with the
+	// host filter; skafka enforces "any" only — non-empty values are
+	// stored in the CR for round-trip but ignored at the broker today.
 	Host string `json:"host,omitempty"`
 }
 
 // KafkaUserACLResource identifies the Kafka resource the ACL applies to.
 // Same shape as the prior AclResource type; renamed for namespace
-// hygiene now that ACLs live inside KafkaUser.
+// hygiene now that ACLs live inside KafkaUser. PatternType defaulting
+// happens operator-side (acls.go), not via apiserver defaulting — see
+// gh #137.
 type KafkaUserACLResource struct {
 	// +kubebuilder:validation:Enum=topic;group;cluster;transactionalId
 	Type string `json:"type"`
 	Name string `json:"name"`
 	// +kubebuilder:validation:Enum=literal;prefix
-	// +kubebuilder:default=literal
 	PatternType string `json:"patternType,omitempty"`
 }
 

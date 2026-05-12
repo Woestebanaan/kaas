@@ -98,16 +98,16 @@ spec:
                       description: |-
                         KafkaUserACL is one access-control rule attached to this principal.
                         Field naming matches Strimzi exactly: `type: allow|deny` (lowercase),
-                        optional `host` (defaults to "*"). Operations are validated against
-                        Apache Kafka's standard set.
+                        optional `host`. Operations are validated against Apache Kafka's
+                        standard set. Defaults applied at the operator boundary (acls.go
+                        aclToEntry), not via apiserver +kubebuilder:default — see gh #137.
                       properties:
                         host:
-                          default: '*'
                           description: |-
-                            Source-IP filter. Defaults to "*" (any host). Reserved for
-                            forward-compat with the Apache Kafka authorizer's host field;
-                            skafka 0.1.117 enforces only "*" — other values are accepted at
-                            the CR level but treated as "*" at the broker.
+                            Source-IP filter. Empty means "any host" (the Apache Kafka
+                            authorizer's "*" wildcard). Reserved for forward-compat with the
+                            host filter; skafka enforces "any" only — non-empty values are
+                            stored in the CR for round-trip but ignored at the broker today.
                           type: string
                         operations:
                           items:
@@ -118,12 +118,13 @@ spec:
                           description: |-
                             KafkaUserACLResource identifies the Kafka resource the ACL applies to.
                             Same shape as the prior AclResource type; renamed for namespace
-                            hygiene now that ACLs live inside KafkaUser.
+                            hygiene now that ACLs live inside KafkaUser. PatternType defaulting
+                            happens operator-side (acls.go), not via apiserver defaulting — see
+                            gh #137.
                           properties:
                             name:
                               type: string
                             patternType:
-                              default: literal
                               enum:
                               - literal
                               - prefix
@@ -140,7 +141,6 @@ spec:
                           - type
                           type: object
                         type:
-                          default: allow
                           enum:
                           - allow
                           - deny
@@ -151,13 +151,11 @@ spec:
                       type: object
                     type: array
                   type:
-                    default: simple
                     enum:
                     - simple
                     type: string
                 required:
                 - acls
-                - type
                 type: object
               quotas:
                 properties:
