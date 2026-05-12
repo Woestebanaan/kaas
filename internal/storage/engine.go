@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -188,6 +189,19 @@ type partitionState struct {
 	segments []segmentMeta // closed segments, sorted by baseOffset
 	logStart int64
 	highWater int64
+	// gh #134: lock-free atomic mirrors of the above. Written under
+	// ps.mu alongside the canonical fields; readable without taking
+	// ps.mu. Used by HighWatermark() / LogStartOffset() so the OTel
+	// gauge callback (which iterates all owned partitions) never
+	// blocks on the storage mutex. Pre-gh #134 a stuck NAS fsync
+	// held ps.mu for the watchdog deadline, the gauge callback
+	// stalled, the PeriodicReader's Export deadline elapsed, and
+	// ALL skafka metrics vanished from Prometheus until the stall
+	// cleared. Canonical reads inside Append/Read/etc. still use
+	// the int64 fields under the lock — atomics are the read-only
+	// observation channel.
+	highWaterAtomic atomic.Int64
+	logStartAtomic  atomic.Int64
 	epoch    int64 // current leader epoch, persisted in manifest.json
 	// pendingFlushRecords counts records appended since the last
 	// flush request. Reset when a flush is requested (not when it
@@ -597,6 +611,11 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 			ps.logStart = manifest.LogStartOffset
 		}
 	}
+	// gh #134: seed the atomic mirrors with the values we just settled
+	// on. Subsequent reads via HighWatermark()/LogStartOffset() will
+	// pick them up lock-free.
+	ps.highWaterAtomic.Store(ps.highWater)
+	ps.logStartAtomic.Store(ps.logStart)
 
 	// Stage B2 of gh #12: restore the idempotent-producer dedupe
 	// window. Missing or unreadable snapshot is non-fatal — fall
@@ -742,6 +761,7 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 		recordIdempotenceOutcome(ps.producerStates, prodInfo, baseOffset)
 	}
 	ps.highWater = baseOffset + int64(lastOffsetDelta) + 1
+	ps.highWaterAtomic.Store(ps.highWater) // gh #134: mirror for lock-free reads
 	ps.pendingFlushRecords += int64(lastOffsetDelta) + 1
 
 	if ps.active.logSize >= e.cfg.SegmentBytes {
@@ -966,6 +986,7 @@ func (e *DiskStorageEngine) DeleteRecords(topic string, partition int32, targetO
 	// the reclamation block is a no-op.
 	if target > ps.logStart {
 		ps.logStart = target
+		ps.logStartAtomic.Store(ps.logStart) // gh #134: mirror for lock-free reads
 	}
 
 	// Drop closed segments entirely below the new logStart. A segment
@@ -1028,12 +1049,13 @@ func (e *DiskStorageEngine) DeleteRecords(topic string, partition int32, targetO
 func (e *DiskStorageEngine) HighWatermark(topic string, partition int32) (int64, error) {
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
-		return 0, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+		return 0, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
 	}
-	ps.mu.Lock()
-	hwm := ps.highWater
-	ps.mu.Unlock()
-	return hwm, nil
+	// gh #134: lock-free read via atomic mirror. Pre-gh #134 this took
+	// ps.mu, which blocked the OTel gauge callback whenever an Append
+	// was stuck on a stalled NAS fsync — propagating the storage stall
+	// up into the metrics pipeline and silencing ALL skafka metrics.
+	return ps.highWaterAtomic.Load(), nil
 }
 
 // PartitionSize sums the sizes of all files in the partition directory
@@ -1068,12 +1090,12 @@ func (e *DiskStorageEngine) DataDir() string { return e.dataDir }
 func (e *DiskStorageEngine) LogStartOffset(topic string, partition int32) (int64, error) {
 	ps, ok := e.getPartition(topic, partition)
 	if !ok {
-		return 0, fmt.Errorf("storage: unknown partition %s/%d", topic, partition)
+		return 0, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
 	}
-	ps.mu.Lock()
-	ls := ps.logStart
-	ps.mu.Unlock()
-	return ls, nil
+	// gh #134: lock-free read via atomic mirror. Same motivation as
+	// HighWatermark — the fetch hot path and gauge callbacks both
+	// call this; neither should block on the storage mutex.
+	return ps.logStartAtomic.Load(), nil
 }
 
 // RelinquishPartition is now a no-op kept for v2.6 caller compatibility.
@@ -1153,6 +1175,7 @@ func (e *DiskStorageEngine) takeoverInternal(ctx context.Context, topic string, 
 			return 0, fmt.Errorf("storage: rebuild index: %w", err)
 		}
 		ps.highWater = hwm
+		ps.highWaterAtomic.Store(hwm) // gh #134: mirror for lock-free reads
 		span.SetAttributes(attribute.Bool("recovered", true))
 	}
 
@@ -1346,6 +1369,7 @@ func (ps *partitionState) deleteSegment(idx int) {
 	} else if ps.active != nil {
 		ps.logStart = ps.active.baseOffset
 	}
+	ps.logStartAtomic.Store(ps.logStart) // gh #134: mirror for lock-free reads
 }
 
 // parseBatchOffsets extracts baseOffset and lastOffsetDelta from raw RecordBatch bytes.
