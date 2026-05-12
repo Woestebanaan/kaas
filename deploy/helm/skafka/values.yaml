@@ -237,6 +237,14 @@ observability:
       # Full URL to Prometheus's OTLP receiver (requires
       # --web.enable-otlp-receiver). Path must end in /v1/metrics.
       endpoint: "http://prometheus.observability.svc.cluster.local:9090/api/v1/otlp/v1/metrics"
+      # gh #133: how often the broker pushes metrics to the OTLP endpoint.
+      # The SDK default is 60s, which means typical Grafana stat panels
+      # using rate([1m]) get only one sample per window and show
+      # "no data" — rate() needs ≥2 samples. 30s ensures rate([60s])
+      # always sees 2+ samples. Increase if metric volume is a problem;
+      # decrease (e.g. "15s") for higher-resolution dashboards.
+      # Accepts any Go time.Duration string.
+      exportInterval: "30s"
     traces:
       enabled: false
       # host:port (gRPC); a scheme prefix is stripped automatically.

@@ -161,6 +161,14 @@ spec:
             {{- if .Values.observability.otlp.metrics.enabled }}
             - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
               value: {{ .Values.observability.otlp.metrics.endpoint | quote }}
+            # gh #133: explicit push interval. Defaults to the value
+            # set in values.yaml (30s). Override here without touching
+            # the broker binary — accepts any Go time.Duration string
+            # (e.g. "15s", "1m"). The SDK default would be 60s; at
+            # that cadence rate([1m]) windows often see only one
+            # sample and Grafana stat panels show "no data".
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: {{ .Values.observability.otlp.metrics.exportInterval | quote }}
             {{- end }}
             {{- if .Values.observability.otlp.traces.enabled }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
