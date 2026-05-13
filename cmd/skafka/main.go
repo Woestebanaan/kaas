@@ -482,6 +482,15 @@ func runBroker(ctx context.Context) {
 		srvCfg.TLSConfig = tlsCfg
 		slog.Info("TLS listener configured", "addr", srvCfg.TLSListenAddr, "cert", certFile)
 	}
+	// gh #139: optional SASL-required plaintext listener (e.g. ":9095").
+	// Coexists with the anonymous-OK plain listener — clients picking
+	// this port MUST complete SASL before any non-pre-SASL API is
+	// served. Quotas on KafkaUser.spec.quotas only fire here because
+	// the dispatcher rejects ANONYMOUS principals on this port.
+	if authedAddr := os.Getenv("SKAFKA_AUTHED_LISTEN_ADDR"); authedAddr != "" {
+		srvCfg.AuthedListenAddr = authedAddr
+		slog.Info("authed listener configured (SASL required)", "addr", authedAddr)
+	}
 	srv := protocol.NewServer(srvCfg, d)
 	srv.SetAuthEngine(authEngine)
 	if err := srv.Start(ctx); err != nil {

@@ -9,6 +9,12 @@ type ListenerName string
 const (
 	ListenerInternal ListenerName = "internal" // plaintext, in-cluster clients (headless DNS)
 	ListenerExternal ListenerName = "external" // TLS, external clients (per-broker hostnames)
+	// ListenerAuthed (gh #139) is a plaintext-but-SASL-required listener.
+	// Used by the perf bench Jobs to verify quotas fire — quotas need a
+	// non-ANONYMOUS principal, which means SASL must complete before the
+	// dispatcher accepts non-pre-SASL APIs. The dispatcher consults this
+	// tag at request time to enforce that gate per-listener.
+	ListenerAuthed ListenerName = "authed"
 )
 
 // ConnState holds per-connection mutable state shared between the server and handlers.

@@ -12,6 +12,15 @@ spec:
     - name: kafka
       port: {{ .Values.broker.ports.kafka }}
       targetPort: kafka
+    {{- if .Values.listeners.authed.enabled }}
+    - name: kafka-authed
+      # gh #139: SASL-required plaintext listener. Same headless DNS as
+      # the anonymous listener, just a different port — the per-listener
+      # SASL gate runs broker-side from the listener tag, not from any
+      # DNS routing.
+      port: {{ .Values.listeners.authed.port }}
+      targetPort: kafka-authed
+    {{- end }}
     - name: heartbeat
       # Internal-only: brokers dial each other's heartbeat port to reach
       # the elected cluster controller. Headless DNS gives each pod a
@@ -38,4 +47,9 @@ spec:
     - name: tls
       port: {{ .Values.broker.ports.tls }}
       targetPort: tls
+    {{- end }}
+    {{- if .Values.listeners.authed.enabled }}
+    - name: kafka-authed
+      port: {{ .Values.listeners.authed.port }}
+      targetPort: kafka-authed
     {{- end }}

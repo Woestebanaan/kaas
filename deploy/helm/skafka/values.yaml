@@ -283,10 +283,33 @@ observability:
       # non-zero is the signal a partitioned ex-controller is still alive.
       staleAssignmentsPerMinute: 1
 
+# Per-listener configuration. gh #139 introduces a third "authed"
+# listener so a single broker can host both anonymous (existing perf
+# benches, ops tools) traffic and SASL-authed traffic on different
+# TCP ports simultaneously — needed because skafka quotas only fire
+# for non-ANONYMOUS principals.
+#
+# Each listener carries its own `authentication.type` field, mirroring
+# Strimzi's per-listener auth policy. "none" → ANONYMOUS principal
+# (no quotas, no ACL match on User:bob), "scram-sha-512" → broker
+# rejects every non-pre-SASL API with CLUSTER_AUTHORIZATION_FAILED
+# until SASL completes (`internal/protocol/dispatch.go` consults
+# `connstate.ListenerName` to enforce per-listener; the global
+# `auth.requireSasl` flag still works as a shortcut for "every
+# listener is authed").
 listeners:
   internal:
     # Plaintext in-cluster listener. Always active; clients use headless DNS.
     port: 9092
+
+    # gh #139: Strimzi-style per-listener auth policy. The internal
+    # listener defaults to "none" so existing in-cluster workloads
+    # keep working unchanged. Set to "scram-sha-512" only if you
+    # want to require SASL on the in-cluster headless DNS path —
+    # equivalent to flipping the legacy `auth.requireSasl` for
+    # this listener only.
+    authentication:
+      type: none
 
     # gh #97: cluster DNS suffix used to build the per-broker FQDN
     # the broker advertises in MetadataResponse. Default works for
@@ -352,3 +375,41 @@ listeners:
 
     service:
       annotations: {}
+
+    # gh #139: Strimzi-style per-listener auth on the external port.
+    # Most external clients connecting over the Gateway-API/TLSRoute
+    # path use mTLS (clientCA section above) for principal extraction;
+    # SCRAM is also supported (the per-listener gate just means SASL
+    # *or* mTLS must complete before non-pre-SASL APIs are accepted).
+    # Default "none" preserves the existing opportunistic-mTLS shape
+    # — the broker accepts a TLS handshake without a client cert and
+    # falls back to ANONYMOUS unless `auth.requireSasl` is true.
+    authentication:
+      type: none
+
+  # gh #139: dedicated authed listener on a separate port.
+  # Plaintext-but-SASL-required so the perf bench Jobs can verify
+  # quotas fire (quotas need a non-ANONYMOUS principal, which means
+  # SASL must complete before non-pre-SASL APIs are accepted).
+  # The dispatcher consults the listener tag at request time and
+  # rejects pre-auth traffic on this listener with
+  # CLUSTER_AUTHORIZATION_FAILED until SaslAuthenticate completes,
+  # independent of `auth.requireSasl`. Keeping it disabled by default
+  # means the existing in-cluster anonymous perf path is unaffected.
+  #
+  # Note on composing with the anonymous listeners: to actually
+  # exercise SCRAM here, `auth.enabled` must be true so the broker
+  # wires RealAuthEngine (credentials.json + acls.json) instead of
+  # AllowAllAuthEngine. When that's on, the broker also enforces
+  # ACLs on the anonymous listeners — so to keep existing
+  # User:ANONYMOUS traffic working there, materialise a permissive
+  # ACL via KafkaUser (e.g. `principal: User:ANONYMOUS, host: '*',
+  # operation: All, resource: Topic *`). Skafka does NOT bypass
+  # ACLs per-listener based on `authentication.type: none`; the
+  # listener tag only controls whether SASL is *required* before
+  # non-pre-SASL APIs are accepted, never whether Authorize runs.
+  authed:
+    enabled: false
+    port: 9095
+    authentication:
+      type: scram-sha-512

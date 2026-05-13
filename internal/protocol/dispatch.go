@@ -55,8 +55,15 @@ func (d *Dispatcher) Register(apiKey int16, min, max int16, h Handler) {
 // Dispatch decodes the request header, checks version support, calls the handler,
 // and returns a complete framed response ready to write to the wire.
 func (d *Dispatcher) Dispatch(hdr RequestHeader, body []byte, connState *connstate.ConnState) ([]byte, error) {
-	// Reject pre-auth requests when SASL is required.
-	if d.RequireSASL && !connState.SASLDone && !preSASLKeys[hdr.APIKey] {
+	// Reject pre-auth requests when SASL is required. Two ways SASL becomes
+	// required: the global Dispatcher.RequireSASL flag (set when the broker
+	// is configured to enforce auth on every listener), OR the connection
+	// arrived on the SASL-required authed listener (gh #139). The
+	// connstate.ListenerAuthed tag is set by serveConn for the dedicated
+	// authed-listener accept loop; it lets a single broker safely host
+	// both an anonymous listener and an authed listener side by side.
+	requireSASLForConn := d.RequireSASL || connState.Listener == connstate.ListenerAuthed
+	if requireSASLForConn && !connState.SASLDone && !preSASLKeys[hdr.APIKey] {
 		return errorResponse(hdr, ErrClusterAuthorizationFailed), nil
 	}
 

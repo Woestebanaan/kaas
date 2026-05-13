@@ -68,6 +68,10 @@ spec:
               containerPort: {{ .Values.broker.ports.kafka }}
             - name: kafka-tls
               containerPort: {{ .Values.listeners.external.port | default .Values.broker.ports.tls }}
+            {{- if .Values.listeners.authed.enabled }}
+            - name: kafka-authed
+              containerPort: {{ .Values.listeners.authed.port }}
+            {{- end }}
             - name: health
               containerPort: {{ .Values.broker.ports.health }}
             - name: heartbeat
@@ -203,6 +207,17 @@ spec:
               # topics survive parent Application delete. Set to ""
               # to skip the sync-options annotation entirely.
               value: {{ .Values.admin.argocd.syncOptions | quote }}
+            {{- end }}
+            {{- if .Values.listeners.authed.enabled }}
+            # gh #139: dedicated SASL-required listener on a separate
+            # plaintext port. Activated by the main binary when
+            # SKAFKA_AUTHED_LISTEN_ADDR is set (cmd/skafka/main.go);
+            # the dispatcher tags every conn from this listener with
+            # connstate.ListenerAuthed and rejects pre-auth requests
+            # with CLUSTER_AUTHORIZATION_FAILED, regardless of the
+            # global SKAFKA_REQUIRE_SASL flag.
+            - name: SKAFKA_AUTHED_LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.listeners.authed.port }}"
             {{- end }}
             {{- if .Values.listeners.external.enabled }}
             # TLS listener for external clients. Hostname pattern is fmt-style
