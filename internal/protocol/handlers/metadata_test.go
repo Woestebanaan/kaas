@@ -89,7 +89,7 @@ func TestMetadataHandlerInternalListener(t *testing.T) {
 	}
 	h := NewMetadataHandlerWithSource(src, "test-cluster", stubTopics{}, stubLeaseManager{})
 
-	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerInternal})
+	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerName("internal")})
 	if len(resp.Brokers) != 2 {
 		t.Fatalf("brokers=%d, want 2", len(resp.Brokers))
 	}
@@ -120,7 +120,7 @@ func TestMetadataHandlerExternalListener(t *testing.T) {
 	}
 	h := NewMetadataHandlerWithSource(src, "test-cluster", stubTopics{}, stubLeaseManager{})
 
-	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerExternal, IsTLS: true})
+	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerName("external"), IsTLS: true})
 	if len(resp.Brokers) != 3 {
 		t.Fatalf("brokers=%d, want 3", len(resp.Brokers))
 	}
@@ -147,7 +147,7 @@ func TestMetadataHandlerExternalFallback(t *testing.T) {
 		all:  []BrokerEndpoint{{NodeID: 0, Host: "localhost", Port: 9092}},
 	}
 	h := NewMetadataHandlerWithSource(src, "test", stubTopics{}, stubLeaseManager{})
-	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerExternal})
+	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerName("external")})
 	if resp.Brokers[0].Host != "localhost" {
 		t.Errorf("fallback: Host=%q, want localhost", resp.Brokers[0].Host)
 	}
@@ -173,7 +173,7 @@ func TestMetadataHandlerLeaderFromSource(t *testing.T) {
 	leaders := stubLeaderSource{leaders: map[int32]int32{0: 1, 1: 2, 2: 0}}
 	h := NewMetadataHandlerWithSource(src, "test", topics, leaders)
 
-	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerInternal})
+	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerName("internal")})
 	if len(resp.Topics) != 1 {
 		t.Fatalf("topics=%d, want 1", len(resp.Topics))
 	}
@@ -206,7 +206,7 @@ func TestMetadataHandlerUnknownLeaderFallsBackToSelf(t *testing.T) {
 	leaders := stubLeaderSource{leaders: map[int32]int32{}} // every lookup returns -1
 	h := NewMetadataHandlerWithSource(src, "test", stubTopics{}, leaders)
 
-	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerInternal})
+	resp := decodeMetadata(t, h, &connstate.ConnState{Listener: connstate.ListenerName("internal")})
 	if len(resp.Topics) != 1 || len(resp.Topics[0].Partitions) != 1 {
 		t.Fatalf("unexpected topics shape: %+v", resp.Topics)
 	}
@@ -249,7 +249,7 @@ func TestMetadataHandlerEmitsClusterID(t *testing.T) {
 
 	w := codec.NewWriter()
 	w.WriteArray(0, func() {}) // empty Topics array (non-flexible v2)
-	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerInternal}, 2, w.Bytes())
+	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerName("internal")}, 2, w.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestMetadataHandlerClusterIDFlexible(t *testing.T) {
 	w.WriteInt8(0)
 	w.WriteEmptyTaggedFields()
 
-	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerInternal}, 9, w.Bytes())
+	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerName("internal")}, 9, w.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}

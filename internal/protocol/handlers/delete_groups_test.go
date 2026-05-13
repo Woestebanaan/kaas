@@ -20,6 +20,7 @@ func (allowAuth) Authorize(auth.Principal, auth.Resource, auth.Operation) bool {
 }
 func (allowAuth) CheckProduceQuota(auth.Principal, int) int32 { return 0 }
 func (allowAuth) CheckFetchQuota(auth.Principal, int) int32   { return 0 }
+func (allowAuth) RequiresPreAuth() bool                       { return false }
 
 // denyAuth records every Authorize call and lets the test program a
 // per-(resource.Name, op) decision. Anything not explicitly programmed
@@ -45,6 +46,7 @@ func (d *denyAuth) Authorize(_ auth.Principal, r auth.Resource, _ auth.Operation
 }
 func (d *denyAuth) CheckProduceQuota(auth.Principal, int) int32 { return 0 }
 func (d *denyAuth) CheckFetchQuota(auth.Principal, int) int32   { return 0 }
+func (d *denyAuth) RequiresPreAuth() bool                       { return true }
 
 // encodeDeleteGroupsRequestV2 builds a minimal flexible v2 body for
 // the handler tests. Single compact array of compact strings + tagged
@@ -99,12 +101,12 @@ func decodeDeleteGroupsResponseV2(t *testing.T, body []byte) map[string]int16 {
 // groups — exactly the surface AdminClient exposes via
 // `--delete --group <id>`.
 func TestDeleteGroupsHandlerAuthGateRejectsUnauthorized(t *testing.T) {
-	auth := newDenyAuth() // empty allow map → deny every group
+	denyEng := newDenyAuth() // empty allow map → deny every group
 
 	// nil coord: if the gate failed, the handler would dereference
 	// nil and panic. The test passing means the gate caught the
 	// rejection before the coordinator branch.
-	h := NewDeleteGroupsHandler(nil, auth)
+	h := NewDeleteGroupsHandler(nil, auth.NewSingleAuthEngine(denyEng))
 
 	body := encodeDeleteGroupsRequestV2(t, []string{"orders", "payments"})
 	out, err := h.Handle(&connstate.ConnState{}, 2, body)
@@ -120,12 +122,12 @@ func TestDeleteGroupsHandlerAuthGateRejectsUnauthorized(t *testing.T) {
 		t.Errorf("payments errCode=%d, want %d", got["payments"], codec.ErrGroupAuthorizationFailed)
 	}
 	// Authorize was called once per group with type=group, op=Delete.
-	auth.mu.Lock()
-	defer auth.mu.Unlock()
-	if len(auth.calls) != 2 {
-		t.Errorf("Authorize call count = %d, want 2", len(auth.calls))
+	denyEng.mu.Lock()
+	defer denyEng.mu.Unlock()
+	if len(denyEng.calls) != 2 {
+		t.Errorf("Authorize call count = %d, want 2", len(denyEng.calls))
 	}
-	for _, r := range auth.calls {
+	for _, r := range denyEng.calls {
 		if r.Type != "group" {
 			t.Errorf("Authorize resource.Type=%q, want \"group\"", r.Type)
 		}
@@ -138,13 +140,13 @@ func TestDeleteGroupsHandlerAuthGateRejectsUnauthorized(t *testing.T) {
 // codes (here 16 NOT_COORDINATOR via nil coord fallback) cover
 // the allowed group; the denied one gets 30 directly.
 func TestDeleteGroupsHandlerAuthGatePermitsAllowed(t *testing.T) {
-	auth := newDenyAuth()
-	auth.allow["orders"] = true
+	denyEng := newDenyAuth()
+	denyEng.allow["orders"] = true
 	// "payments" stays denied.
 
 	// nil coord branches into the "no-coordinator wired" fallback,
 	// returning CoordinatorNotAvailable (15) for each allowed group.
-	h := NewDeleteGroupsHandler(nil, auth)
+	h := NewDeleteGroupsHandler(nil, auth.NewSingleAuthEngine(denyEng))
 
 	body := encodeDeleteGroupsRequestV2(t, []string{"orders", "payments"})
 	out, err := h.Handle(&connstate.ConnState{}, 2, body)
@@ -186,7 +188,7 @@ func TestDeleteGroupsHandlerNoAuthEnginePassesThrough(t *testing.T) {
 // auth wired (production default in dev/test), every group reaches
 // the coordinator. Same expected output as the no-auth case.
 func TestDeleteGroupsHandlerAllowAllPassesThrough(t *testing.T) {
-	h := NewDeleteGroupsHandler(nil, allowAuth{})
+	h := NewDeleteGroupsHandler(nil, auth.NewSingleAuthEngine(allowAuth{}))
 	body := encodeDeleteGroupsRequestV2(t, []string{"x", "y"})
 	out, err := h.Handle(&connstate.ConnState{}, 2, body)
 	if err != nil {

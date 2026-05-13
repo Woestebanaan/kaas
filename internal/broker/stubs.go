@@ -216,6 +216,10 @@ func (a *AllowAllAuthEngine) Authorize(_ auth.Principal, _ auth.Resource, _ auth
 func (a *AllowAllAuthEngine) CheckProduceQuota(_ auth.Principal, _ int) int32 { return 0 }
 func (a *AllowAllAuthEngine) CheckFetchQuota(_ auth.Principal, _ int) int32   { return 0 }
 
+// RequiresPreAuth returns false — anonymous-OK listeners must let
+// non-pre-SASL APIs through without first completing SASL.
+func (a *AllowAllAuthEngine) RequiresPreAuth() bool { return false }
+
 // allowAllExchange completes immediately with an ANONYMOUS principal.
 type allowAllExchange struct{}
 
@@ -244,6 +248,11 @@ func (d *DenyAllAuthEngine) Authorize(_ auth.Principal, _ auth.Resource, _ auth.
 }
 func (d *DenyAllAuthEngine) CheckProduceQuota(_ auth.Principal, _ int) int32 { return 0 }
 func (d *DenyAllAuthEngine) CheckFetchQuota(_ auth.Principal, _ int) int32   { return 0 }
+
+// RequiresPreAuth returns true — a deny-all engine treats every
+// connection as authentication-required so non-pre-SASL APIs are
+// rejected before the (already-doomed) authorization call runs.
+func (d *DenyAllAuthEngine) RequiresPreAuth() bool { return true }
 
 type denyAllExchange struct{}
 

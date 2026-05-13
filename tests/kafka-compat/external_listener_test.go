@@ -142,10 +142,10 @@ func startExternalBroker(
 	b.RegisterHandlers(d)
 
 	srv := protocol.NewServer(protocol.Config{
-		// TLS-only — the external listener is the only one the test cares about.
-		ListenAddr:       "127.0.0.1:0",
-		TLSPlainListener: tlsListener,
-		TLSConfig:        tlsCfg,
+		Listeners: []protocol.ListenerConfig{
+			// TLS-only — the external listener is the only one this test cares about.
+			{Name: "external", PreBound: tlsListener, TLSConfig: tlsCfg},
+		},
 	}, d)
 	if err := srv.Start(ctx); err != nil {
 		cancel()

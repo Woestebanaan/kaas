@@ -111,7 +111,12 @@ type Broker struct {
 	cfg     Config
 	store   storage.StorageEngine
 	leases  lease.LeaseManager
-	auth    auth.AuthEngine
+	// auth is the per-listener engine selector (gh #124). The legacy
+	// "single engine wired everywhere" path stays available via
+	// auth.NewSingleAuthEngine wrapping a RealAuthEngine or
+	// AllowAllAuthEngine, so callers (broker.New, tests) keep working
+	// without knowing about the selector.
+	auth    auth.AuthEngineSelector
 	topics  *TopicRegistry
 	brokers handlers.BrokerSource
 	coord   *coordinator.Manager // nil in local-dev mode (consumer-group manager)
@@ -159,7 +164,12 @@ func New(
 		cfg:     cfg,
 		store:   store,
 		leases:  leases,
-		auth:    authEng,
+		// Wrap the single AuthEngine in a SingleAuthEngine selector so
+		// existing callers (tests, dev-mode boot) keep working unchanged
+		// while handler code reads through AuthEngineSelector (gh #124).
+		// Production callers wire a PerListenerAuthEngine directly via
+		// SetAuthEngineSelector below.
+		auth:    auth.NewSingleAuthEngine(authEng),
 		topics:  NewTopicRegistry(),
 		brokers: info,
 	}
@@ -179,12 +189,25 @@ func NewWithBrokerSource(
 		cfg:     cfg,
 		store:   store,
 		leases:  leases,
-		auth:    authEng,
+		// Wrap the single AuthEngine in a SingleAuthEngine selector so
+		// existing callers (tests, dev-mode boot) keep working unchanged
+		// while handler code reads through AuthEngineSelector (gh #124).
+		// Production callers wire a PerListenerAuthEngine directly via
+		// SetAuthEngineSelector below.
+		auth:    auth.NewSingleAuthEngine(authEng),
 		topics:  NewTopicRegistry(),
 		brokers: brokers,
 		coord:   coord,
 	}
 }
+
+// SetAuthEngineSelector replaces the SingleAuthEngine wrapper installed
+// in New/NewWithBrokerSource with a real per-listener selector
+// (gh #124). Production main.go calls this after constructing the
+// PerListenerAuthEngine map from the parsed listener list. Must be
+// called BEFORE RegisterHandlers so the handlers pick up the
+// per-listener engine on the first request.
+func (b *Broker) SetAuthEngineSelector(sel auth.AuthEngineSelector) { b.auth = sel }
 
 // WireReaperCRCheck installs the gh #119 CR-existence callback on
 // the storage engine's PartitionReaper. The reaper consults this

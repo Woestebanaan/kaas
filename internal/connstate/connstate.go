@@ -2,20 +2,16 @@ package connstate
 
 import "github.com/woestebanaan/skafka/internal/auth"
 
-// ListenerName labels which listener a connection arrived on.
-// It determines which advertised hostname the Metadata handler returns.
+// ListenerName labels which listener a connection arrived on. The
+// string value matches the listener's Name field on the protocol
+// Server's ListenerConfig and is used as a key in the per-listener
+// auth engine map (gh #124). Names are user-chosen — the chart's
+// values.yaml `listeners[].name` flows through SKAFKA_LISTENERS env
+// into ListenerConfig.Name into here. The Metadata handler's
+// advertised-host logic and the chart's existing "internal" /
+// "external" naming convention are still in use; they're just no
+// longer pinned by a Go constant.
 type ListenerName string
-
-const (
-	ListenerInternal ListenerName = "internal" // plaintext, in-cluster clients (headless DNS)
-	ListenerExternal ListenerName = "external" // TLS, external clients (per-broker hostnames)
-	// ListenerAuthed (gh #139) is a plaintext-but-SASL-required listener.
-	// Used by the perf bench Jobs to verify quotas fire — quotas need a
-	// non-ANONYMOUS principal, which means SASL must complete before the
-	// dispatcher accepts non-pre-SASL APIs. The dispatcher consults this
-	// tag at request time to enforce that gate per-listener.
-	ListenerAuthed ListenerName = "authed"
-)
 
 // ConnState holds per-connection mutable state shared between the server and handlers.
 type ConnState struct {

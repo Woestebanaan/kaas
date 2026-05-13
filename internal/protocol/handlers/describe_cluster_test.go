@@ -120,7 +120,7 @@ func TestDescribeClusterReturnsAllBrokersAndClusterID(t *testing.T) {
 	h := NewDescribeClusterHandler(src, "skafka-prod")
 
 	body := encodeDescribeClusterRequest(t, false, 1, 1)
-	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerInternal}, 1, body)
+	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerName("internal")}, 1, body)
 	if err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestDescribeClusterPerListenerHostExternal(t *testing.T) {
 	}
 	h := NewDescribeClusterHandler(src, "test")
 
-	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerExternal}, 1,
+	out, err := h.Handle(&connstate.ConnState{Listener: connstate.ListenerName("external")}, 1,
 		encodeDescribeClusterRequest(t, false, 1, 1))
 	if err != nil {
 		t.Fatalf("handle: %v", err)

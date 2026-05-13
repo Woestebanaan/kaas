@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/broker"
+	"github.com/woestebanaan/skafka/internal/connstate"
 	"github.com/woestebanaan/skafka/internal/coordinator"
 	k8spkg "github.com/woestebanaan/skafka/internal/k8s"
 	"github.com/woestebanaan/skafka/internal/lease"
@@ -440,7 +442,44 @@ func runBroker(ctx context.Context) {
 	}
 
 	d := protocol.NewDispatcher()
-	d.RequireSASL = os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
+	// gh #124 part 1: per-listener engine selector replaces the global
+	// SKAFKA_REQUIRE_SASL flag + the hardcoded `Listener == Authed`
+	// branch in dispatch.go. Until part 2 lands the listener list,
+	// build a 3-entry map matching the legacy internal/external/authed
+	// triplet:
+	//   - internal: AllowAll unless SKAFKA_REQUIRE_SASL forces real
+	//   - external: same as internal (TLS is independent of auth here)
+	//   - authed:   always the real engine — SASL-required listener
+	// The `""` fallback uses the broker-wide default so untagged
+	// connections (test harnesses) preserve the pre-#124 behaviour.
+	allowAll := broker.NewAllowAllAuthEngine()
+	globalRequireSASL := os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
+	pickPlain := func() auth.AuthEngine {
+		if globalRequireSASL {
+			return authEngine
+		}
+		return allowAll
+	}
+	pickAuthed := func() auth.AuthEngine {
+		// Authed listener always requires SASL. Falls back to allowAll
+		// only when no real engine is wired (auth.enabled: false), in
+		// which case the listener doesn't carry meaningful policy
+		// anyway — every conn becomes ANONYMOUS regardless.
+		if _, isReal := authEngine.(*auth.RealAuthEngine); isReal {
+			return authEngine
+		}
+		return allowAll
+	}
+	listenerEngines := auth.PerListenerAuthEngine{
+		string(connstate.ListenerName("internal")): pickPlain(),
+		string(connstate.ListenerName("external")): pickPlain(),
+		string(connstate.ListenerName("authed")):   pickAuthed(),
+		"":                                  pickPlain(),
+	}
+	d.SetAuthEngines(listenerEngines)
+	if b != nil {
+		b.SetAuthEngineSelector(listenerEngines)
+	}
 	// gh #121 PR2.5: request-level observability is a uniform middleware
 	// so every API key gets a latency histogram, not just the two
 	// handlers that happened to remember the boilerplate. Must Use()
@@ -458,39 +497,82 @@ func runBroker(ctx context.Context) {
 	// outbound fence log are wired. No-op in dev-mode (memory storage).
 	b.StartFenceWatcher(ctx)
 
-	srvCfg := protocol.Config{ListenAddr: host + ":" + port}
-	if certFile := os.Getenv("SKAFKA_TLS_CERT_FILE"); certFile != "" {
+	// gh #124: assemble the listener list. Preferred path is the
+	// SKAFKA_LISTENERS JSON env emitted by the chart's list-based
+	// values.yaml (task #234); when unset we fall back to the legacy
+	// SKAFKA_PORT / SKAFKA_TLS_* / SKAFKA_AUTHED_LISTEN_ADDR triplet
+	// so pre-v0.1.122 deployments keep working unchanged.
+	var listenerCfgs []protocol.ListenerConfig
+	tlsListenerActive := false
+	var sharedTLSCfg *tls.Config
+	loadTLSCfg := func() *tls.Config {
+		if sharedTLSCfg != nil {
+			return sharedTLSCfg
+		}
+		certFile := os.Getenv("SKAFKA_TLS_CERT_FILE")
+		if certFile == "" {
+			slog.Error("SKAFKA_TLS_CERT_FILE unset but a listener requested tls: true")
+			os.Exit(1)
+		}
 		keyFile := os.Getenv("SKAFKA_TLS_KEY_FILE")
-		tlsPort := envOr("SKAFKA_TLS_PORT", "9093")
-
-		// mTLS: when SKAFKA_TLS_CLIENT_CA_FILE is set, the listener
-		// requires every client to present a cert signed by one of the
-		// CAs in the bundle. Without it, TLS is opportunistic — clients
-		// can connect cert-less and authenticate via SASL.
 		var tlsOpts []protocol.TLSOption
 		if caFile := os.Getenv("SKAFKA_TLS_CLIENT_CA_FILE"); caFile != "" {
 			tlsOpts = append(tlsOpts, protocol.WithRequireClientCert(caFile))
 			slog.Info("TLS: client cert verification enabled", "ca_bundle", caFile)
 		}
-
-		tlsCfg, err := protocol.WatchingCertificate(certFile, keyFile, tlsOpts...)
+		cfg, err := protocol.WatchingCertificate(certFile, keyFile, tlsOpts...)
 		if err != nil {
 			slog.Error("load TLS cert", "err", err)
 			os.Exit(1)
 		}
-		srvCfg.TLSListenAddr = host + ":" + tlsPort
-		srvCfg.TLSConfig = tlsCfg
-		slog.Info("TLS listener configured", "addr", srvCfg.TLSListenAddr, "cert", certFile)
+		sharedTLSCfg = cfg
+		return cfg
 	}
-	// gh #139: optional SASL-required plaintext listener (e.g. ":9095").
-	// Coexists with the anonymous-OK plain listener — clients picking
-	// this port MUST complete SASL before any non-pre-SASL API is
-	// served. Quotas on KafkaUser.spec.quotas only fire here because
-	// the dispatcher rejects ANONYMOUS principals on this port.
-	if authedAddr := os.Getenv("SKAFKA_AUTHED_LISTEN_ADDR"); authedAddr != "" {
-		srvCfg.AuthedListenAddr = authedAddr
-		slog.Info("authed listener configured (SASL required)", "addr", authedAddr)
+
+	specs, err := parseListenersEnv()
+	if err != nil {
+		slog.Error("SKAFKA_LISTENERS", "err", err)
+		os.Exit(1)
 	}
+	if specs != nil {
+		// New path: chart-emitted JSON.
+		logListenerWireup(specs)
+		for _, s := range specs {
+			if s.TLS {
+				_ = loadTLSCfg()
+				break
+			}
+		}
+		wire := buildListenerWireup(specs, host, sharedTLSCfg, authEngine, allowAll)
+		listenerCfgs = wire.Configs
+		listenerEngines = wire.Engines
+		tlsListenerActive = wire.TLSActive
+	} else {
+		// Legacy path: env-var-per-listener.
+		listenerCfgs = []protocol.ListenerConfig{
+			{Name: "internal", Addr: host + ":" + port},
+		}
+		if certFile := os.Getenv("SKAFKA_TLS_CERT_FILE"); certFile != "" {
+			cfg := loadTLSCfg()
+			tlsPort := envOr("SKAFKA_TLS_PORT", "9093")
+			listenerCfgs = append(listenerCfgs, protocol.ListenerConfig{
+				Name:      "external",
+				Addr:      host + ":" + tlsPort,
+				TLSConfig: cfg,
+			})
+			tlsListenerActive = true
+			slog.Info("TLS listener configured", "addr", host+":"+tlsPort, "cert", certFile)
+		}
+		// gh #139: optional SASL-required plaintext listener (e.g. ":9095").
+		if authedAddr := os.Getenv("SKAFKA_AUTHED_LISTEN_ADDR"); authedAddr != "" {
+			listenerCfgs = append(listenerCfgs, protocol.ListenerConfig{
+				Name: "authed",
+				Addr: authedAddr,
+			})
+			slog.Info("authed listener configured (SASL required)", "addr", authedAddr)
+		}
+	}
+	srvCfg := protocol.Config{Listeners: listenerCfgs}
 	srv := protocol.NewServer(srvCfg, d)
 	srv.SetAuthEngine(authEngine)
 	if err := srv.Start(ctx); err != nil {
@@ -502,9 +584,13 @@ func runBroker(ctx context.Context) {
 	// /healthz returns the v3 runtime state (Phase 10 plan schema);
 	// /readyz gates on the listener being bound.
 	healthAddr := envOr("SKAFKA_HEALTH_ADDR", ":8080")
+	// Names array for the /healthz "listeners" field — used by the
+	// dashboard. Mirrors the Server's listener set so a config error
+	// like "TLS listener configured but bind failed" still shows up
+	// in /healthz once Start() returns success.
 	listeners := []string{"internal"}
 	var tlsInfo *observability.TLSInfo
-	if srvCfg.TLSListenAddr != "" {
+	if tlsListenerActive {
 		listeners = append(listeners, "external")
 		tlsInfo = &observability.TLSInfo{
 			Enabled:      true,

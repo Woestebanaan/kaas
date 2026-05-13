@@ -21,9 +21,9 @@ import (
 )
 
 type ProduceHandler struct {
-	store  storage.StorageEngine
-	leases lease.LeaseManager
-	auth   auth.AuthEngine
+	store   storage.StorageEngine
+	leases  lease.LeaseManager
+	engines auth.AuthEngineSelector
 
 	// coord is the v3 BrokerCoordinator. When set, it replaces the
 	// per-partition Lease ownership check on the produce hot path: Owns +
@@ -38,9 +38,9 @@ type ProduceHandler struct {
 func NewProduceHandler(
 	store storage.StorageEngine,
 	leases lease.LeaseManager,
-	authEng auth.AuthEngine,
+	engines auth.AuthEngineSelector,
 ) *ProduceHandler {
-	return &ProduceHandler{store: store, leases: leases, auth: authEng}
+	return &ProduceHandler{store: store, leases: leases, engines: engines}
 }
 
 // WithCoordinator switches the handler over to the v3 BrokerCoordinator path.
@@ -66,6 +66,10 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 	}
 
 	principal := principalFrom(conn)
+	// Per-listener auth: the engine map (gh #124) returns AllowAll for
+	// anonymous listeners, RealAuthEngine for authed listeners. The
+	// connection's listener tag was set at accept time in server.go.
+	eng := h.engines.For(string(conn.Listener))
 	resp := &api.ProduceResponse{}
 
 	// Quota enforcement: total bytes across all partitions/topics in this request.
@@ -75,14 +79,14 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 			totalBytes += len(pd.Records)
 		}
 	}
-	if throttleMs := h.auth.CheckProduceQuota(principal, totalBytes); throttleMs > 0 {
+	if throttleMs := eng.CheckProduceQuota(principal, totalBytes); throttleMs > 0 {
 		resp.ThrottleTime = throttleMs
 	}
 
 	for _, td := range req.TopicData {
 		topicResp := api.ProduceTopicResponse{Name: td.Name}
 
-		if !h.auth.Authorize(principal, auth.Resource{Type: "topic", Name: td.Name, PatternType: "literal"}, auth.OpWrite) {
+		if !eng.Authorize(principal, auth.Resource{Type: "topic", Name: td.Name, PatternType: "literal"}, auth.OpWrite) {
 			for _, pd := range td.PartitionData {
 				topicResp.PartitionResponses = append(topicResp.PartitionResponses, api.ProducePartitionResponse{
 					Index: pd.Index, ErrorCode: int16(codec.ErrTopicAuthorizationFailed),

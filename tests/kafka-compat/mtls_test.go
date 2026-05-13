@@ -116,10 +116,11 @@ func startMTLSBroker(t *testing.T, dataDir string, bundle *tlscerts.Bundle) (str
 	b.RegisterHandlers(d)
 
 	srv := protocol.NewServer(protocol.Config{
-		// No plaintext listener — TLS-only.
-		ListenAddr:    "127.0.0.1:0",
-		TLSListenAddr: addr,
-		TLSConfig:     tlsCfg,
+		Listeners: []protocol.ListenerConfig{
+			// No anonymous plaintext listener — TLS-only on the
+			// external listener tag.
+			{Name: "external", Addr: addr, TLSConfig: tlsCfg},
+		},
 	}, d)
 	srv.SetAuthEngine(authEng)
 	if err := srv.Start(ctx); err != nil {

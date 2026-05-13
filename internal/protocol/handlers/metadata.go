@@ -37,7 +37,7 @@ type BrokerEndpoint struct {
 
 // addressFor returns the host/port to advertise for the given listener.
 func (b BrokerEndpoint) addressFor(listener connstate.ListenerName) (string, int32) {
-	if listener == connstate.ListenerExternal && b.ExternalHost != "" {
+	if listener == connstate.ListenerName("external") && b.ExternalHost != "" {
 		return b.ExternalHost, b.ExternalPort
 	}
 	return b.Host, b.Port
@@ -248,7 +248,7 @@ func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body 
 
 	// Pick per-listener advertised host. External listener uses per-broker
 	// hostnames so clients can route directly to the correct leader on retry.
-	listener := connstate.ListenerInternal
+	listener := connstate.ListenerName("internal")
 	if conn != nil && conn.Listener != "" {
 		listener = conn.Listener
 	}

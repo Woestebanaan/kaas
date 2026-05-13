@@ -113,6 +113,16 @@ spec:
               value: {{ include "skafka.fullname" . }}
             - name: SKAFKA_PORT
               value: "{{ .Values.broker.ports.kafka }}"
+            # gh #124: per-listener config JSON. The broker parses this
+            # into a []ListenerConfig + PerListenerAuthEngine map so each
+            # listener gets its own auth policy (anonymous-OK on internal,
+            # SCRAM on the authed listener, mTLS on external). The legacy
+            # SKAFKA_PORT / SKAFKA_TLS_PORT / SKAFKA_AUTHED_LISTEN_ADDR
+            # envs below stay populated so the back-compat path in
+            # cmd/skafka/main.go is still exercised if SKAFKA_LISTENERS
+            # is ever unset (defensive — chart always sets it).
+            - name: SKAFKA_LISTENERS
+              value: {{ include "skafka.listenersJSON" . | quote }}
             - name: SKAFKA_HEALTH_ADDR
               value: ":{{ .Values.broker.ports.health }}"
             - name: SKAFKA_CONTROLLER_HEARTBEAT_ADDR

@@ -19,33 +19,43 @@ import (
 	"github.com/woestebanaan/skafka/internal/observability"
 )
 
-// Config holds TCP server configuration.
-//
-// Listener / TLSPlainListener are optional pre-bound listeners that
-// take precedence over the corresponding *Addr fields when non-nil.
-// Tests use them to eliminate the address-allocation race when
-// multiple in-process brokers want loopback-OS-assigned ports —
-// allocating with `net.Listen("tcp", "127.0.0.1:0")` and passing
-// the listener directly closes the gap between port assignment and
-// rebind that would otherwise let a parallel test grab the port.
-// In production both are nil and Start binds via *Addr as before.
-//
-// TLSPlainListener is the plaintext TCP listener; Server wraps it
-// with `tls.NewListener(_, TLSConfig)`. (`tls.Listen(addr, cfg)`
-// would re-do the listen step we're trying to skip.)
+// ListenerConfig describes one named TCP listener the Server opens on
+// Start. gh #124: replaces the legacy ListenAddr/TLSListenAddr/
+// AuthedListenAddr triplet, decoupling exposure (Addr), encryption
+// (TLSConfig != nil), and authentication (the AuthEngine selector on
+// the Dispatcher; keyed by ListenerConfig.Name) into three independent
+// axes — exactly the Strimzi listener model. The Name field is the
+// tag stamped onto every connstate.ConnState accepted on this
+// listener; handlers and the dispatcher's pre-SASL gate route off it.
+type ListenerConfig struct {
+	// Name is the listener tag (e.g. "plain", "secure-internal",
+	// "ext-mtls"). Must be non-empty and unique across the list. The
+	// per-listener auth engine map keys on this string.
+	Name string
+
+	// Addr is the host:port the listener binds to. Ignored when
+	// PreBound is non-nil (tests use that to eliminate port-allocation
+	// races by allocating loopback :0 themselves and handing the
+	// listener over).
+	Addr string
+
+	// PreBound, if set, takes precedence over Addr — Server wraps it
+	// (with TLS when TLSConfig is non-nil) and skips net.Listen.
+	PreBound net.Listener
+
+	// TLSConfig, when non-nil, wraps the bound plaintext listener with
+	// tls.NewListener. Independent of authentication: a TLS listener
+	// with no SASL-required auth engine is "opportunistic TLS"
+	// (encrypted but anonymous).
+	TLSConfig *tls.Config
+}
+
+// Config holds TCP server configuration. gh #124: every TCP listener
+// flows through Listeners. The legacy ListenAddr/TLSListenAddr/
+// AuthedListenAddr / TLSConfig fields are gone — callers build
+// ListenerConfig entries directly.
 type Config struct {
-	ListenAddr        string      // default ":9092"
-	Listener          net.Listener // optional pre-bound; takes precedence over ListenAddr
-	TLSListenAddr     string      // optional, e.g. ":9093"; empty = disabled
-	TLSPlainListener  net.Listener // optional pre-bound plaintext listener wrapped with TLSConfig
-	TLSConfig         *tls.Config  // required if TLSListenAddr or TLSPlainListener is set
-	// AuthedListenAddr (gh #139) is the SASL-required plaintext listener.
-	// Optional, e.g. ":9095"; empty = disabled. Connections accepted on
-	// this port get tagged with connstate.ListenerAuthed and the
-	// dispatcher rejects pre-auth requests on them. Coexists with the
-	// anonymous ListenAddr — same broker, two policies.
-	AuthedListenAddr  string
-	AuthedListener    net.Listener // optional pre-bound; takes precedence over AuthedListenAddr
+	Listeners []ListenerConfig
 }
 
 // Server is the Kafka protocol TCP server.
@@ -64,8 +74,11 @@ type Server struct {
 }
 
 func NewServer(cfg Config, d *Dispatcher) *Server {
-	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = ":9092"
+	// Back-compat: an empty Listeners slice synthesises a single
+	// anonymous plaintext listener on :9092 — preserves the default
+	// behaviour for callers that just want a broker on a port.
+	if len(cfg.Listeners) == 0 {
+		cfg.Listeners = []ListenerConfig{{Name: "internal", Addr: ":9092"}}
 	}
 	return &Server{cfg: cfg, dispatcher: d, listenerTag: make(map[net.Listener]connstate.ListenerName)}
 }
@@ -76,59 +89,27 @@ func (s *Server) SetAuthEngine(e auth.AuthEngine) { s.authEngine = e }
 // Start opens the listener(s) and begins accepting connections.
 // It returns once all listeners are bound (or on error).
 func (s *Server) Start(ctx context.Context) error {
-	var ln net.Listener
-	if s.cfg.Listener != nil {
-		ln = s.cfg.Listener
-	} else {
-		var err error
-		ln, err = net.Listen("tcp", s.cfg.ListenAddr)
+	// gh #124: open every configured listener in order. Each entry
+	// owns its own (Name, Addr, PreBound, TLSConfig) tuple. The Name
+	// is stamped onto connstate.ConnState.Listener at accept time so
+	// downstream auth (dispatcher gate + per-handler engine
+	// selector) can route per-listener.
+	for _, lc := range s.cfg.Listeners {
+		if lc.Name == "" {
+			s.closeAll()
+			return fmt.Errorf("server: listener config missing Name")
+		}
+		ln, err := s.openListener(lc)
 		if err != nil {
-			return fmt.Errorf("server: listen %s: %w", s.cfg.ListenAddr, err)
+			s.closeAll()
+			return err
 		}
-	}
-	s.listeners = append(s.listeners, ln)
-	s.listenerTag[ln] = connstate.ListenerInternal
-	slog.Info("skafka listening", "addr", ln.Addr().String(), "listener", connstate.ListenerInternal)
-
-	if s.cfg.TLSConfig != nil && (s.cfg.TLSListenAddr != "" || s.cfg.TLSPlainListener != nil) {
-		var tlsLn net.Listener
-		if s.cfg.TLSPlainListener != nil {
-			tlsLn = tls.NewListener(s.cfg.TLSPlainListener, s.cfg.TLSConfig)
-		} else {
-			var err error
-			tlsLn, err = tls.Listen("tcp", s.cfg.TLSListenAddr, s.cfg.TLSConfig)
-			if err != nil {
-				_ = ln.Close()
-				return fmt.Errorf("server: tls listen %s: %w", s.cfg.TLSListenAddr, err)
-			}
-		}
-		s.listeners = append(s.listeners, tlsLn)
-		s.listenerTag[tlsLn] = connstate.ListenerExternal
-		slog.Info("skafka TLS listening", "addr", tlsLn.Addr().String(), "listener", connstate.ListenerExternal)
-	}
-
-	// gh #139: optional SASL-required plaintext listener. Connections
-	// here get tagged with connstate.ListenerAuthed; the dispatcher
-	// rejects pre-auth requests on this tag regardless of the global
-	// RequireSASL flag, so the broker can host this alongside the
-	// anonymous-OK plain listener without breaking either.
-	if s.cfg.AuthedListener != nil || s.cfg.AuthedListenAddr != "" {
-		var authLn net.Listener
-		if s.cfg.AuthedListener != nil {
-			authLn = s.cfg.AuthedListener
-		} else {
-			var err error
-			authLn, err = net.Listen("tcp", s.cfg.AuthedListenAddr)
-			if err != nil {
-				for _, l := range s.listeners {
-					_ = l.Close()
-				}
-				return fmt.Errorf("server: authed listen %s: %w", s.cfg.AuthedListenAddr, err)
-			}
-		}
-		s.listeners = append(s.listeners, authLn)
-		s.listenerTag[authLn] = connstate.ListenerAuthed
-		slog.Info("skafka authed-listener listening (SASL required)", "addr", authLn.Addr().String(), "listener", connstate.ListenerAuthed)
+		s.listeners = append(s.listeners, ln)
+		s.listenerTag[ln] = connstate.ListenerName(lc.Name)
+		slog.Info("skafka listening",
+			"addr", ln.Addr().String(),
+			"listener", lc.Name,
+			"tls", lc.TLSConfig != nil)
 	}
 
 	for _, l := range s.listeners {
@@ -145,6 +126,34 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// openListener resolves a ListenerConfig into a net.Listener: PreBound
+// wins over Addr, and a non-nil TLSConfig wraps the plaintext listener
+// with tls.NewListener — same shape as the legacy TLSPlainListener
+// path, just generalised so any listener entry can carry a TLS config.
+func (s *Server) openListener(lc ListenerConfig) (net.Listener, error) {
+	var plain net.Listener
+	if lc.PreBound != nil {
+		plain = lc.PreBound
+	} else {
+		var err error
+		plain, err = net.Listen("tcp", lc.Addr)
+		if err != nil {
+			return nil, fmt.Errorf("server: listen %s (%s): %w", lc.Addr, lc.Name, err)
+		}
+	}
+	if lc.TLSConfig != nil {
+		return tls.NewListener(plain, lc.TLSConfig), nil
+	}
+	return plain, nil
+}
+
+func (s *Server) closeAll() {
+	for _, l := range s.listeners {
+		_ = l.Close()
+	}
+	s.listeners = nil
 }
 
 // Wait blocks until all connections and listeners have closed.
@@ -193,7 +202,7 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 		// per-listener).
 		tag := s.listenerTag[ln]
 		if tag == "" {
-			tag = connstate.ListenerInternal
+			tag = connstate.ListenerName("internal")
 		}
 		s.wg.Add(1)
 		go func() {
@@ -213,9 +222,11 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn, listenerTag connstat
 	// Mark TLS connections and extract the mTLS principal if a client cert is present.
 	if tlsConn, ok := c.(*tls.Conn); ok {
 		state.IsTLS = true
-		// TLS connections override the listener tag — the TLS listener's
-		// tag is always External (mTLS principal extraction lives here).
-		state.Listener = connstate.ListenerExternal
+		// gh #124: the listener tag was stamped at accept time from
+		// ListenerConfig.Name. No longer overridden here — a TLS listener
+		// named "ext-mtls" stays "ext-mtls" instead of being forced to
+		// the predefined ListenerExternal constant. mTLS principal
+		// extraction below is independent of the tag.
 		if err := tlsConn.Handshake(); err != nil {
 			mx.TLSHandshakes.Add(context.Background(), 1,
 				metric.WithAttributes(attribute.String("result", "error")))

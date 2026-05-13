@@ -68,6 +68,50 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
 {{- end -}}
 
+{{/*
+skafka.listenersJSON — gh #124 helper. Emits the SKAFKA_LISTENERS env
+value as JSON. Walks the existing listeners.{internal,external,authed}
+map and builds a list-of-objects matching cmd/skafka/listeners.go's
+listenerSpec. Only listener entries that are actually enabled appear
+in the output (internal is always emitted; external/authed are gated
+on their `enabled` flag). The broker's parser validates the result;
+constraint violations (mtls without tls, duplicate ports/names) fail
+at startup with a clear error.
+
+Output is single-line JSON — fits cleanly into an env var without
+escape gymnastics.
+*/}}
+{{- define "skafka.listenersJSON" -}}
+{{- $list := list -}}
+
+{{/* internal listener — always enabled */}}
+{{- $internalAuth := "none" -}}
+{{- if .Values.listeners.internal.authentication -}}
+{{- $internalAuth = .Values.listeners.internal.authentication.type | default "none" -}}
+{{- end -}}
+{{- $list = append $list (dict "name" "internal" "port" (.Values.listeners.internal.port | int) "type" "internal" "tls" false "authentication" (dict "type" $internalAuth)) -}}
+
+{{/* external listener — opt-in */}}
+{{- if .Values.listeners.external.enabled -}}
+{{- $extAuth := "none" -}}
+{{- if .Values.listeners.external.authentication -}}
+{{- $extAuth = .Values.listeners.external.authentication.type | default "none" -}}
+{{- end -}}
+{{- $list = append $list (dict "name" "external" "port" (.Values.listeners.external.port | int) "type" "external" "tls" true "authentication" (dict "type" $extAuth)) -}}
+{{- end -}}
+
+{{/* authed listener (gh #139) — opt-in plaintext + SASL-required */}}
+{{- if .Values.listeners.authed.enabled -}}
+{{- $authedAuth := "scram-sha-512" -}}
+{{- if .Values.listeners.authed.authentication -}}
+{{- $authedAuth = .Values.listeners.authed.authentication.type | default "scram-sha-512" -}}
+{{- end -}}
+{{- $list = append $list (dict "name" "authed" "port" (.Values.listeners.authed.port | int) "type" "internal" "tls" false "authentication" (dict "type" $authedAuth)) -}}
+{{- end -}}
+
+{{- $list | toJson -}}
+{{- end -}}
+
 {{- define "skafka.operatorImage" -}}
 {{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag | default .Chart.AppVersion }}
 {{- end -}}

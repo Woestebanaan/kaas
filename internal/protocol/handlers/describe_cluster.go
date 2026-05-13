@@ -49,7 +49,7 @@ func (h *DescribeClusterHandler) Handle(conn *connstate.ConnState, version int16
 		return nil, fmt.Errorf("describe-cluster decode: %w", err)
 	}
 
-	listener := connstate.ListenerInternal
+	listener := connstate.ListenerName("internal")
 	if conn != nil && conn.Listener != "" {
 		listener = conn.Listener
 	}

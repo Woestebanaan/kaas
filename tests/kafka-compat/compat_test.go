@@ -90,7 +90,9 @@ func TestMain(m *testing.M) {
 	d := protocol.NewDispatcher()
 	b.RegisterHandlers(d)
 
-	srv := protocol.NewServer(protocol.Config{ListenAddr: testAddr}, d)
+	srv := protocol.NewServer(protocol.Config{
+		Listeners: []protocol.ListenerConfig{{Name: "internal", Addr: testAddr}},
+	}, d)
 	if err := srv.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "broker start failed: %v\n", err)
 		os.Exit(1)

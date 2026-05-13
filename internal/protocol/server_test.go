@@ -51,7 +51,7 @@ func TestServerAcceptsConnection(t *testing.T) {
 		return []byte{0, 0, 0, 0, 0, 0, 0}, nil
 	}))
 
-	srv := NewServer(Config{ListenAddr: "127.0.0.1:0"}, d)
+	srv := NewServer(Config{Listeners: []ListenerConfig{{Name: "internal", Addr: "127.0.0.1:0"}}}, d)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -134,7 +134,7 @@ func TestDispatcherCallsHandler(t *testing.T) {
 
 func TestServerGracefulShutdown(t *testing.T) {
 	d := NewDispatcher()
-	srv := NewServer(Config{ListenAddr: "127.0.0.1:0"}, d)
+	srv := NewServer(Config{Listeners: []ListenerConfig{{Name: "internal", Addr: "127.0.0.1:0"}}}, d)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	if err := srv.Start(ctx); err != nil {
@@ -189,7 +189,7 @@ func TestConnStateClientIDSet(t *testing.T) {
 		return []byte{0, 0}, nil
 	}))
 
-	srv := NewServer(Config{ListenAddr: "127.0.0.1:0"}, d)
+	srv := NewServer(Config{Listeners: []ListenerConfig{{Name: "internal", Addr: "127.0.0.1:0"}}}, d)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv.Start(ctx)

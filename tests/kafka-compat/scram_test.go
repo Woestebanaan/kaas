@@ -86,10 +86,19 @@ func startAuthBroker(t *testing.T, dataDir string, requireSASL bool) (string, fu
 	b.AddTopic(topicSCRAM, 1)
 
 	d := protocol.NewDispatcher()
-	d.RequireSASL = requireSASL
+	// gh #124: Dispatcher.RequireSASL is gone; pre-SASL gating is per
+	// engine via AuthEngineSelector.RequiresPreAuth. When `requireSASL`
+	// is true the test wires the RealAuthEngine through the dispatcher,
+	// which returns RequiresPreAuth=true; when false, no selector is
+	// wired and the gate is open (preserves the old `false` branch).
+	if requireSASL {
+		d.SetAuthEngines(auth.NewSingleAuthEngine(authEng))
+	}
 	b.RegisterHandlers(d)
 
-	srv := protocol.NewServer(protocol.Config{ListenAddr: addr}, d)
+	srv := protocol.NewServer(protocol.Config{
+		Listeners: []protocol.ListenerConfig{{Name: "internal", Addr: addr}},
+	}, d)
 	srv.SetAuthEngine(authEng)
 	if err := srv.Start(ctx); err != nil {
 		cancel()

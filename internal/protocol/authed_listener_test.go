@@ -3,11 +3,25 @@ package protocol
 import (
 	"testing"
 
+	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
 )
 
+// authedTestEngine returns true for RequiresPreAuth, used to mark a
+// listener as SASL-required. allowAllAuthedTest returns false — anon.
+type authedTestEngine struct{ requires bool }
+
+func (e authedTestEngine) NewSASLExchange(string) (auth.SASLExchange, error) { return nil, nil }
+func (e authedTestEngine) AuthenticateTLS(string) (auth.Principal, error)     { return auth.Principal{}, nil }
+func (e authedTestEngine) Authorize(auth.Principal, auth.Resource, auth.Operation) bool {
+	return true
+}
+func (e authedTestEngine) CheckProduceQuota(auth.Principal, int) int32 { return 0 }
+func (e authedTestEngine) CheckFetchQuota(auth.Principal, int) int32   { return 0 }
+func (e authedTestEngine) RequiresPreAuth() bool                       { return e.requires }
+
 // TestAuthedListenerRejectsUnauthenticatedRequest pins gh #139's
-// per-listener SASL gate. A request arriving on connstate.ListenerAuthed
+// per-listener SASL gate. A request arriving on connstate.ListenerName("authed")
 // that hasn't completed SASL must be rejected with
 // CLUSTER_AUTHORIZATION_FAILED, regardless of the global
 // Dispatcher.RequireSASL flag. Pre-SASL API keys (17 SaslHandshake,
@@ -15,6 +29,14 @@ import (
 // itself can proceed.
 func TestAuthedListenerRejectsUnauthenticatedRequest(t *testing.T) {
 	d := NewDispatcher()
+	// gh #124: gate fires off engine.RequiresPreAuth(). Wire a 3-entry
+	// map matching the gh #139 hardcoded triplet: anon engines on
+	// internal/external, an authed engine on the authed listener.
+	d.SetAuthEngines(auth.PerListenerAuthEngine{
+		string(connstate.ListenerName("internal")): authedTestEngine{requires: false},
+		string(connstate.ListenerName("external")): authedTestEngine{requires: false},
+		string(connstate.ListenerName("authed")):   authedTestEngine{requires: true},
+	})
 	// Register Metadata (api_key=3) — a non-pre-SASL API.
 	d.Register(3, 0, 12, HandlerFunc(func(c *connstate.ConnState, v int16, b []byte) ([]byte, error) {
 		return []byte{0, 0, 0, 0}, nil
@@ -27,12 +49,12 @@ func TestAuthedListenerRejectsUnauthenticatedRequest(t *testing.T) {
 		wantErr  bool
 		wantCode int16
 	}{
-		{"authed + Metadata (no SASL)", connstate.ListenerAuthed, 3, true, ErrClusterAuthorizationFailed},
-		{"authed + ApiVersions (pre-SASL, no SASL needed)", connstate.ListenerAuthed, 18, false, 0},
-		{"authed + SaslHandshake (pre-SASL allowed)", connstate.ListenerAuthed, 17, false, 0},
-		{"authed + SaslAuthenticate (pre-SASL allowed)", connstate.ListenerAuthed, 36, false, 0},
-		{"internal + Metadata (anon OK)", connstate.ListenerInternal, 3, false, 0},
-		{"external + Metadata (anon OK on TLS)", connstate.ListenerExternal, 3, false, 0},
+		{"authed + Metadata (no SASL)", connstate.ListenerName("authed"), 3, true, ErrClusterAuthorizationFailed},
+		{"authed + ApiVersions (pre-SASL, no SASL needed)", connstate.ListenerName("authed"), 18, false, 0},
+		{"authed + SaslHandshake (pre-SASL allowed)", connstate.ListenerName("authed"), 17, false, 0},
+		{"authed + SaslAuthenticate (pre-SASL allowed)", connstate.ListenerName("authed"), 36, false, 0},
+		{"internal + Metadata (anon OK)", connstate.ListenerName("internal"), 3, false, 0},
+		{"external + Metadata (anon OK on TLS)", connstate.ListenerName("external"), 3, false, 0},
 	}
 	// Register the pre-SASL keys + a non-pre-SASL one for the internal cases.
 	for _, k := range []int16{17, 18, 36} {

@@ -76,3 +76,9 @@ func (e *RealAuthEngine) CheckProduceQuota(p Principal, bytes int) int32 {
 func (e *RealAuthEngine) CheckFetchQuota(p Principal, bytes int) int32 {
 	return e.quotas.CheckFetch(p, bytes)
 }
+
+// RequiresPreAuth signals that the dispatcher must reject non-pre-SASL
+// requests until SASL completes. RealAuthEngine evaluates ACLs and
+// quotas against authenticated principals, so accepting traffic
+// without authentication would skip enforcement entirely.
+func (e *RealAuthEngine) RequiresPreAuth() bool { return true }

@@ -19,13 +19,13 @@ import (
 )
 
 type FetchHandler struct {
-	store  storage.StorageEngine
-	leases lease.LeaseManager
-	auth   auth.AuthEngine
+	store   storage.StorageEngine
+	leases  lease.LeaseManager
+	engines auth.AuthEngineSelector
 }
 
-func NewFetchHandler(store storage.StorageEngine, leases lease.LeaseManager, authEng auth.AuthEngine) *FetchHandler {
-	return &FetchHandler{store: store, leases: leases, auth: authEng}
+func NewFetchHandler(store storage.StorageEngine, leases lease.LeaseManager, engines auth.AuthEngineSelector) *FetchHandler {
+	return &FetchHandler{store: store, leases: leases, engines: engines}
 }
 
 func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -42,12 +42,13 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 	}
 
 	principal := principalFrom(conn)
+	eng := h.engines.For(string(conn.Listener)) // gh #124 per-listener engine
 	resp := &api.FetchResponse{ErrorCode: 0, SessionID: req.SessionID}
 
 	for _, topic := range req.Topics {
 		topicResp := api.FetchTopicResponse{Name: topic.Name}
 
-		if !h.auth.Authorize(principal, auth.Resource{Type: "topic", Name: topic.Name, PatternType: "literal"}, auth.OpRead) {
+		if !eng.Authorize(principal, auth.Resource{Type: "topic", Name: topic.Name, PatternType: "literal"}, auth.OpRead) {
 			for _, p := range topic.Partitions {
 				topicResp.Partitions = append(topicResp.Partitions, api.FetchPartitionResponse{
 					PartitionIndex:      p.PartitionIndex,
@@ -124,7 +125,7 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 			totalBytes += len(p.Records)
 		}
 	}
-	if throttleMs := h.auth.CheckFetchQuota(principal, totalBytes); throttleMs > 0 {
+	if throttleMs := eng.CheckFetchQuota(principal, totalBytes); throttleMs > 0 {
 		resp.ThrottleTimeMs = throttleMs
 	}
 
