@@ -1177,6 +1177,31 @@ func (e *DiskStorageEngine) takeoverInternal(ctx context.Context, topic string, 
 		ps.highWater = hwm
 		ps.highWaterAtomic.Store(hwm) // gh #134: mirror for lock-free reads
 		span.SetAttributes(attribute.Bool("recovered", true))
+
+		// gh #138: heal the "phantom HWM" state. Symptom: a previous
+		// retention-clean / DeleteRecords advanced past every record
+		// the partition held, but the manifest persist that should
+		// have followed was interrupted (NAS stall, broker SIGKILL).
+		// We end up with:
+		//   - no closed segments
+		//   - active segment file at baseOffset=X but logSize=0
+		//   - manifest claims logStartOffset < X, highWatermark = X
+		// On disk there are zero records, but Fetch(end_offset) -
+		// Fetch(start_offset) suggests millions exist. Heal by
+		// advancing logStart to match the empty active's baseOffset
+		// — that's the offset the next produce would land at anyway,
+		// and it makes HWM - logStart == 0 (the actual record count).
+		if len(ps.segments) == 0 && ps.active != nil && ps.active.logSize == 0 && ps.highWater > ps.logStart {
+			slog.Warn("storage: takeover detected phantom-HWM state (active segment empty, manifest logStart < HWM with no closed segments) — healing by advancing logStart to HWM",
+				"topic", topic,
+				"partition", partition,
+				"prev_logStart", ps.logStart,
+				"hwm", ps.highWater,
+				"active_baseOffset", ps.active.baseOffset)
+			ps.logStart = ps.highWater
+			ps.logStartAtomic.Store(ps.logStart)
+			span.SetAttributes(attribute.Bool("phantom_hwm_healed", true))
+		}
 	}
 
 	ps.epoch = newEpoch
