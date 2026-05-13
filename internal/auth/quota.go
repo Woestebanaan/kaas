@@ -67,15 +67,23 @@ func (q *QuotaEnforcer) check(principal Principal, bytes int, producer bool) int
 		*tokens = *rate
 	}
 
-	if *tokens >= float64(bytes) {
-		*tokens -= float64(bytes)
+	// gh #125: always deduct the requested bytes — let the bucket
+	// carry negative balance forward as debt. The previous
+	// implementation clamped at 0 on over-allocation, which made
+	// concurrent clients sharing a bucket each see an independent
+	// throttle delay and effectively burst at N × rate (two pods on
+	// a 10 MB/s quota measured ~16-20 MB/s aggregate). With the debt
+	// carried forward, the next request on the same bucket sees the
+	// negative balance and gets a longer throttle, so the aggregate
+	// converges back to `rate`. Mirrors Apache Kafka's quota
+	// algorithm (KIP-13).
+	*tokens -= float64(bytes)
+	if *tokens >= 0 {
 		return 0
 	}
-
-	// Calculate how long the client must wait for enough tokens.
-	deficit := float64(bytes) - *tokens
-	throttleMs := int32(math.Ceil(deficit / *rate * 1000))
-	*tokens = 0
+	// Negative balance → client must wait until refill brings tokens
+	// back to 0 before sending again.
+	throttleMs := int32(math.Ceil(-*tokens / *rate * 1000))
 	return throttleMs
 }
 
