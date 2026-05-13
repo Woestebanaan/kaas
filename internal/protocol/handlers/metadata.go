@@ -27,18 +27,36 @@ type PartitionLeaderSource interface {
 // Host/Port are the internal (in-cluster) address. ExternalHost/ExternalPort are
 // the externally-routable address used for the TLS listener; if ExternalHost is
 // empty, the internal Host is used instead.
+//
+// gh #125: ListenerPorts maps listener name → port on this broker for
+// per-listener Metadata advertisement (Apache Kafka's
+// `advertised.listeners` semantic). When a client connects on the
+// "authed" listener (port 9095) and asks for Metadata, the response
+// must redirect future connections to the same listener — otherwise
+// the client follows back to the anon listener (:9092) and the SCRAM
+// handshake breaks because the engine there is AllowAll. The map is
+// populated from SKAFKA_LISTENERS at broker boot.
 type BrokerEndpoint struct {
 	NodeID       int32
 	Host         string
 	Port         int32
-	ExternalHost string // per-broker external hostname (empty if no external listener)
+	ExternalHost string           // per-broker external hostname (empty if no external listener)
 	ExternalPort int32
+	// ListenerPorts: listener name → port. "external" is still
+	// handled by ExternalHost/ExternalPort (per-broker FQDN); every
+	// other listener uses the same Host with the listener's specific
+	// port. Missing entries fall back to (Host, Port).
+	ListenerPorts map[string]int32
 }
 
 // addressFor returns the host/port to advertise for the given listener.
 func (b BrokerEndpoint) addressFor(listener connstate.ListenerName) (string, int32) {
-	if listener == connstate.ListenerName("external") && b.ExternalHost != "" {
+	listenerStr := string(listener)
+	if listenerStr == "external" && b.ExternalHost != "" {
 		return b.ExternalHost, b.ExternalPort
+	}
+	if p, ok := b.ListenerPorts[listenerStr]; ok {
+		return b.Host, p
 	}
 	return b.Host, b.Port
 }
@@ -99,15 +117,19 @@ type BrokerInfo struct {
 	ClusterID    string
 	ExternalHost string // advertised on the TLS listener; empty = reuse Host
 	ExternalPort int32
+	// ListenerPorts mirrors BrokerEndpoint.ListenerPorts (gh #125):
+	// per-listener advertised port for non-external listeners.
+	ListenerPorts map[string]int32
 }
 
 func (b BrokerInfo) Self() BrokerEndpoint {
 	return BrokerEndpoint{
-		NodeID:       b.NodeID,
-		Host:         b.Host,
-		Port:         b.Port,
-		ExternalHost: b.ExternalHost,
-		ExternalPort: b.ExternalPort,
+		NodeID:        b.NodeID,
+		Host:          b.Host,
+		Port:          b.Port,
+		ExternalHost:  b.ExternalHost,
+		ExternalPort:  b.ExternalPort,
+		ListenerPorts: b.ListenerPorts,
 	}
 }
 func (b BrokerInfo) All() []BrokerEndpoint { return []BrokerEndpoint{b.Self()} }

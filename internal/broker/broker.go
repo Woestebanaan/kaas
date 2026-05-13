@@ -542,10 +542,17 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 // K8sBrokerSource adapts a *k8s.BrokerRegistry to handlers.BrokerSource.
 // ExtHostPattern + ExtPort optionally add per-broker external hostnames
 // (broker-{ordinal}.kafka.example.com:9093) to each BrokerEndpoint.
+//
+// ListenerPorts (gh #125) carries the per-listener advertised port
+// map (e.g. {"internal": 9092, "authed": 9095}) — copied onto every
+// BrokerEndpoint so MetadataResponse can route the client back to
+// the same listener it bootstrapped on. Same map for every broker
+// in the cluster because brokers run identical config.
 type K8sBrokerSource struct {
 	reg            *k8sbroker.BrokerRegistry
 	ExtHostPattern string // fmt-style pattern, e.g. "broker-%d.kafka.example.com"
 	ExtPort        int32
+	ListenerPorts  map[string]int32
 }
 
 func NewK8sBrokerSource(reg *k8sbroker.BrokerRegistry) *K8sBrokerSource {
@@ -556,6 +563,7 @@ func (a *K8sBrokerSource) Self() handlers.BrokerEndpoint {
 	e := a.reg.Self()
 	ep := handlers.BrokerEndpoint{NodeID: e.NodeID, Host: e.Host, Port: e.Port}
 	a.fillExternal(&ep)
+	ep.ListenerPorts = a.ListenerPorts
 	return ep
 }
 
@@ -565,6 +573,7 @@ func (a *K8sBrokerSource) All() []handlers.BrokerEndpoint {
 	for _, e := range all {
 		ep := handlers.BrokerEndpoint{NodeID: e.NodeID, Host: e.Host, Port: e.Port}
 		a.fillExternal(&ep)
+		ep.ListenerPorts = a.ListenerPorts
 		out = append(out, ep)
 	}
 	return out

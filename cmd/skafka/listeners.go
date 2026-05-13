@@ -11,6 +11,7 @@ import (
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/broker"
 	"github.com/woestebanaan/skafka/internal/protocol"
+	"github.com/woestebanaan/skafka/internal/protocol/handlers"
 )
 
 // listenerSpec is the JSON shape parsed from SKAFKA_LISTENERS — the
@@ -112,8 +113,12 @@ func validateListenerSpecs(specs []listenerSpec) error {
 type listenerWireup struct {
 	Configs       []protocol.ListenerConfig
 	Engines       auth.PerListenerAuthEngine
-	ListenerNames []string // for observability.HealthHandler
-	TLSActive     bool     // any listener has TLS=true (drives observability.TLSInfo)
+	ListenerNames []string         // for observability.HealthHandler
+	TLSActive     bool             // any listener has TLS=true (drives observability.TLSInfo)
+	// ListenerPorts maps listener name → port for Metadata advertising
+	// (gh #125). Excludes "external" listeners (those use per-broker
+	// FQDN hosts via ExternalHost/ExternalPort on BrokerEndpoint).
+	ListenerPorts map[string]int32
 }
 
 // buildListenerWireup turns a parsed listener spec list into the
@@ -132,7 +137,8 @@ func buildListenerWireup(
 	allowAll *broker.AllowAllAuthEngine,
 ) listenerWireup {
 	out := listenerWireup{
-		Engines: make(auth.PerListenerAuthEngine, len(specs)+1),
+		Engines:       make(auth.PerListenerAuthEngine, len(specs)+1),
+		ListenerPorts: make(map[string]int32, len(specs)),
 	}
 	out.Engines[""] = allowAll // fallback for untagged conns
 	for _, s := range specs {
@@ -153,8 +159,34 @@ func buildListenerWireup(
 		if s.TLS {
 			out.TLSActive = true
 		}
+		// gh #125: every listener (including "external") gets a port
+		// entry. addressFor uses ExternalHost when present so external
+		// listeners still route through that path, but populating the
+		// port here keeps the data model uniform — and gives
+		// per-broker external-port awareness for free once that's
+		// needed.
+		out.ListenerPorts[s.Name] = int32(s.Port)
 	}
 	return out
+}
+
+// applyListenerPortsToBrokerSource stamps the listener→port map onto
+// the underlying BrokerSource so MetadataResponse can advertise the
+// correct port per listener (gh #125). K8sBrokerSource is mutable —
+// we set the field directly. BrokerInfo is a value type — we
+// rebuild it. Other types (test stubs) are left alone so they can
+// roll their own.
+func applyListenerPortsToBrokerSource(src *handlers.BrokerSource, ports map[string]int32) {
+	if src == nil || *src == nil {
+		return
+	}
+	switch v := (*src).(type) {
+	case *broker.K8sBrokerSource:
+		v.ListenerPorts = ports
+	case handlers.BrokerInfo:
+		v.ListenerPorts = ports
+		*src = v
+	}
 }
 
 // needsReal reports whether an authentication type triggers the

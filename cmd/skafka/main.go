@@ -547,6 +547,12 @@ func runBroker(ctx context.Context) {
 		listenerCfgs = wire.Configs
 		listenerEngines = wire.Engines
 		tlsListenerActive = wire.TLSActive
+		// gh #125: stamp per-listener advertised ports onto the
+		// BrokerSource so MetadataResponse points clients back to
+		// the listener they bootstrapped on. Both broker sources
+		// need it — K8sBrokerSource is mutable (pointer), BrokerInfo
+		// is a value so we rebuild it with the ports populated.
+		applyListenerPortsToBrokerSource(&brokerSource, wire.ListenerPorts)
 	} else {
 		// Legacy path: env-var-per-listener.
 		listenerCfgs = []protocol.ListenerConfig{
