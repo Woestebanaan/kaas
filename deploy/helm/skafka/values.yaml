@@ -397,17 +397,14 @@ listeners:
   # independent of `auth.requireSasl`. Keeping it disabled by default
   # means the existing in-cluster anonymous perf path is unaffected.
   #
-  # Note on composing with the anonymous listeners: to actually
-  # exercise SCRAM here, `auth.enabled` must be true so the broker
-  # wires RealAuthEngine (credentials.json + acls.json) instead of
-  # AllowAllAuthEngine. When that's on, the broker also enforces
-  # ACLs on the anonymous listeners — so to keep existing
-  # User:ANONYMOUS traffic working there, materialise a permissive
-  # ACL via KafkaUser (e.g. `principal: User:ANONYMOUS, host: '*',
-  # operation: All, resource: Topic *`). Skafka does NOT bypass
-  # ACLs per-listener based on `authentication.type: none`; the
-  # listener tag only controls whether SASL is *required* before
-  # non-pre-SASL APIs are accepted, never whether Authorize runs.
+  # gh #124 (v0.1.122+): each listener now has its own AuthEngine.
+  # When `authentication.type: scram-sha-512` (the authed listener
+  # below), the broker wires RealAuthEngine for THIS listener only —
+  # the anonymous internal/external listeners continue to use
+  # AllowAllAuthEngine and do NOT consult ACLs. Existing anonymous
+  # bench Jobs keep working unchanged; only traffic that completes
+  # SASL on the authed listener gets ACL'd and quota'd. No
+  # `User:ANONYMOUS` workaround needed.
   authed:
     enabled: false
     port: 9095
