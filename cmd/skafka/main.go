@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -479,6 +480,42 @@ func runBroker(ctx context.Context) {
 	d.SetAuthEngines(listenerEngines)
 	if b != nil {
 		b.SetAuthEngineSelector(listenerEngines)
+		// gh #126: cluster-wide authorization. When the chart emits
+		// SKAFKA_AUTHORIZATION_TYPE=simple, RealAuthEngine's ACL
+		// path becomes the cluster-wide Authorizer for every
+		// connection regardless of which listener accepted it.
+		// SKAFKA_SUPER_USERS (comma-separated principal names) wraps
+		// the simple authorizer with an early-allow set — Strimzi's
+		// `authorization.superUsers` semantic. When the env is
+		// unset / "none", the default AllowAllAuthorizer stays
+		// wired and no ACLs run (matches Strimzi's "missing
+		// authorization property = no restrictions").
+		authzType := os.Getenv("SKAFKA_AUTHORIZATION_TYPE")
+		if authzType == "simple" {
+			if real, ok := authEngine.(*auth.RealAuthEngine); ok {
+				var authz auth.Authorizer = real
+				if raw := os.Getenv("SKAFKA_SUPER_USERS"); raw != "" {
+					var supers []string
+					for _, s := range strings.Split(raw, ",") {
+						if s = strings.TrimSpace(s); s != "" {
+							supers = append(supers, s)
+						}
+					}
+					if len(supers) > 0 {
+						authz = auth.NewSuperUserAuthorizer(supers, real)
+						slog.Info("authorization configured",
+							"type", "simple",
+							"super_users", supers)
+					}
+				}
+				b.SetAuthorizer(authz)
+				if authzType == "simple" {
+					slog.Info("authorization configured (cluster-wide)", "type", "simple")
+				}
+			} else {
+				slog.Warn("SKAFKA_AUTHORIZATION_TYPE=simple set but no RealAuthEngine wired — falling back to AllowAll. Set auth.enabled: true in the chart to load credentials.json / acls.json.")
+			}
+		}
 	}
 	// gh #121 PR2.5: request-level observability is a uniform middleware
 	// so every API key gets a latency histogram, not just the two

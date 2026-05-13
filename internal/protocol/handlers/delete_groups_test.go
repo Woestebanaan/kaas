@@ -106,7 +106,7 @@ func TestDeleteGroupsHandlerAuthGateRejectsUnauthorized(t *testing.T) {
 	// nil coord: if the gate failed, the handler would dereference
 	// nil and panic. The test passing means the gate caught the
 	// rejection before the coordinator branch.
-	h := NewDeleteGroupsHandler(nil, auth.NewSingleAuthEngine(denyEng))
+	h := NewDeleteGroupsHandler(nil, denyEng)
 
 	body := encodeDeleteGroupsRequestV2(t, []string{"orders", "payments"})
 	out, err := h.Handle(&connstate.ConnState{}, 2, body)
@@ -146,7 +146,7 @@ func TestDeleteGroupsHandlerAuthGatePermitsAllowed(t *testing.T) {
 
 	// nil coord branches into the "no-coordinator wired" fallback,
 	// returning CoordinatorNotAvailable (15) for each allowed group.
-	h := NewDeleteGroupsHandler(nil, auth.NewSingleAuthEngine(denyEng))
+	h := NewDeleteGroupsHandler(nil, denyEng)
 
 	body := encodeDeleteGroupsRequestV2(t, []string{"orders", "payments"})
 	out, err := h.Handle(&connstate.ConnState{}, 2, body)
@@ -188,7 +188,7 @@ func TestDeleteGroupsHandlerNoAuthEnginePassesThrough(t *testing.T) {
 // auth wired (production default in dev/test), every group reaches
 // the coordinator. Same expected output as the no-auth case.
 func TestDeleteGroupsHandlerAllowAllPassesThrough(t *testing.T) {
-	h := NewDeleteGroupsHandler(nil, auth.NewSingleAuthEngine(allowAuth{}))
+	h := NewDeleteGroupsHandler(nil, allowAuth{})
 	body := encodeDeleteGroupsRequestV2(t, []string{"x", "y"})
 	out, err := h.Handle(&connstate.ConnState{}, 2, body)
 	if err != nil {

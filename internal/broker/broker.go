@@ -117,6 +117,15 @@ type Broker struct {
 	// AllowAllAuthEngine, so callers (broker.New, tests) keep working
 	// without knowing about the selector.
 	auth    auth.AuthEngineSelector
+	// gh #126: authorization is cluster-wide (not per-listener). The
+	// dispatcher's pre-SASL gate still reads RequiresPreAuth() off the
+	// per-listener engine, but every Authorize call goes through this
+	// shared authorizer regardless of which listener accepted the
+	// connection.
+	authorizer auth.Authorizer
+	// gh #126: quotas are also cluster-wide. Per-user throughput caps
+	// don't depend on which listener a producer connected through.
+	quotas  auth.QuotaChecker
 	topics  *TopicRegistry
 	brokers handlers.BrokerSource
 	coord   *coordinator.Manager // nil in local-dev mode (consumer-group manager)
@@ -169,11 +178,49 @@ func New(
 		// while handler code reads through AuthEngineSelector (gh #124).
 		// Production callers wire a PerListenerAuthEngine directly via
 		// SetAuthEngineSelector below.
-		auth:    auth.NewSingleAuthEngine(authEng),
-		topics:  NewTopicRegistry(),
-		brokers: info,
+		auth: auth.NewSingleAuthEngine(authEng),
+		// gh #126: defaults to permissive cluster-wide authz + no
+		// quotas. main.go replaces both via SetAuthorizer /
+		// SetQuotaChecker when a RealAuthEngine is wired AND the
+		// cluster config sets `authorization.type: simple`. Tests
+		// that need authz checks call the setters themselves.
+		authorizer: pickDefaultAuthorizer(authEng),
+		quotas:     pickDefaultQuotaChecker(authEng),
+		topics:     NewTopicRegistry(),
+		brokers:    info,
 	}
 }
+
+// pickDefaultAuthorizer returns AllowAllAuthorizer regardless of the
+// supplied AuthEngine. gh #126: defaulting to "no authorization" at
+// the Broker layer preserves pre-v0.1.125 behavior — production
+// callers (cmd/skafka/main.go) opt INTO real ACL enforcement via
+// SetAuthorizer when SKAFKA_AUTHORIZATION_TYPE=simple is set, which
+// matches Strimzi's "authorization property missing = no restrictions"
+// semantic. Tests that need ACL enforcement wire their own via
+// SetAuthorizer.
+func pickDefaultAuthorizer(_ auth.AuthEngine) auth.Authorizer {
+	return auth.NewAllowAllAuthorizer()
+}
+
+// pickDefaultQuotaChecker is independent of authorization — quotas
+// are per-principal byte-rate limits and run whenever a RealAuthEngine
+// is wired (it implements QuotaChecker via its embedded QuotaEnforcer).
+// Test stubs without QuotaChecker fall back to NoQuotaChecker.
+func pickDefaultQuotaChecker(eng auth.AuthEngine) auth.QuotaChecker {
+	if q, ok := eng.(auth.QuotaChecker); ok {
+		return q
+	}
+	return auth.NewNoQuotaChecker()
+}
+
+// SetAuthorizer overrides the default cluster-wide authorizer (gh #126).
+// Production main.go uses this to wire a SuperUserAuthorizer{simple ACL}
+// when `spec.kafka.authorization.type: simple`. Tests can wire fakes.
+func (b *Broker) SetAuthorizer(a auth.Authorizer) { b.authorizer = a }
+
+// SetQuotaChecker overrides the default cluster-wide quota checker (gh #126).
+func (b *Broker) SetQuotaChecker(q auth.QuotaChecker) { b.quotas = q }
 
 // NewWithBrokerSource creates a Broker with a dynamic multi-broker source and
 // an optional coordinator (nil disables consumer group coordination).
@@ -186,18 +233,15 @@ func NewWithBrokerSource(
 	coord *coordinator.Manager,
 ) *Broker {
 	return &Broker{
-		cfg:     cfg,
-		store:   store,
-		leases:  leases,
-		// Wrap the single AuthEngine in a SingleAuthEngine selector so
-		// existing callers (tests, dev-mode boot) keep working unchanged
-		// while handler code reads through AuthEngineSelector (gh #124).
-		// Production callers wire a PerListenerAuthEngine directly via
-		// SetAuthEngineSelector below.
-		auth:    auth.NewSingleAuthEngine(authEng),
-		topics:  NewTopicRegistry(),
-		brokers: brokers,
-		coord:   coord,
+		cfg:        cfg,
+		store:      store,
+		leases:     leases,
+		auth:       auth.NewSingleAuthEngine(authEng),
+		authorizer: pickDefaultAuthorizer(authEng),
+		quotas:     pickDefaultQuotaChecker(authEng),
+		topics:     NewTopicRegistry(),
+		brokers:    brokers,
+		coord:      coord,
 	}
 }
 
@@ -293,12 +337,12 @@ func (b *Broker) RemoveTopic(name string) {
 
 // RegisterHandlers wires all API key handlers into d and returns d.
 func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
-	produceHandler := handlers.NewProduceHandler(b.store, b.leases, b.auth)
+	produceHandler := handlers.NewProduceHandler(b.store, b.leases, b.authorizer, b.quotas)
 	if b.brokerCoord != nil {
 		produceHandler = produceHandler.WithCoordinator(b.brokerCoord)
 	}
 	d.Register(0, 3, 9, produceHandler)
-	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.auth))
+	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.authorizer, b.quotas))
 	d.Register(2, 1, 7, handlers.NewListOffsetsHandler(b.store, b.leases))
 	// Metadata: cap at v10. v11 removed IncludeClusterAuthorizedOperations,
 	// but the Java AdminClient happily selects our advertised max and then
@@ -343,7 +387,7 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// and AdminClient.deleteConsumerGroups(). v3+ adds member-level
 	// deletion (per-member instead of per-group); skafka caps at v2
 	// until that path is wired.
-	d.Register(42, 0, 2, handlers.NewDeleteGroupsHandler(b.coord, b.auth))
+	d.Register(42, 0, 2, handlers.NewDeleteGroupsHandler(b.coord, b.authorizer))
 	d.Register(17, 0, 1, handlers.NewSaslHandshakeHandler())
 	// CreateTopics is capped at v6: v7 added the topic_id UUID
 	// (KIP-516) to CreatableTopicResult, which our encoder doesn't

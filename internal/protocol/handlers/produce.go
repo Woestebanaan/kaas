@@ -21,9 +21,10 @@ import (
 )
 
 type ProduceHandler struct {
-	store   storage.StorageEngine
-	leases  lease.LeaseManager
-	engines auth.AuthEngineSelector
+	store      storage.StorageEngine
+	leases     lease.LeaseManager
+	authorizer auth.Authorizer    // gh #126: cluster-wide
+	quotas     auth.QuotaChecker  // gh #126: cluster-wide
 
 	// coord is the v3 BrokerCoordinator. When set, it replaces the
 	// per-partition Lease ownership check on the produce hot path: Owns +
@@ -38,9 +39,10 @@ type ProduceHandler struct {
 func NewProduceHandler(
 	store storage.StorageEngine,
 	leases lease.LeaseManager,
-	engines auth.AuthEngineSelector,
+	authorizer auth.Authorizer,
+	quotas auth.QuotaChecker,
 ) *ProduceHandler {
-	return &ProduceHandler{store: store, leases: leases, engines: engines}
+	return &ProduceHandler{store: store, leases: leases, authorizer: authorizer, quotas: quotas}
 }
 
 // WithCoordinator switches the handler over to the v3 BrokerCoordinator path.
@@ -66,27 +68,27 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 	}
 
 	principal := principalFrom(conn)
-	// Per-listener auth: the engine map (gh #124) returns AllowAll for
-	// anonymous listeners, RealAuthEngine for authed listeners. The
-	// connection's listener tag was set at accept time in server.go.
-	eng := h.engines.For(string(conn.Listener))
 	resp := &api.ProduceResponse{}
 
-	// Quota enforcement: total bytes across all partitions/topics in this request.
+	// gh #126: cluster-wide quota enforcement.
+	// Total bytes across all partitions/topics in this request.
 	totalBytes := 0
 	for _, td := range req.TopicData {
 		for _, pd := range td.PartitionData {
 			totalBytes += len(pd.Records)
 		}
 	}
-	if throttleMs := eng.CheckProduceQuota(principal, totalBytes); throttleMs > 0 {
+	if throttleMs := h.quotas.CheckProduceQuota(principal, totalBytes); throttleMs > 0 {
 		resp.ThrottleTime = throttleMs
 	}
 
 	for _, td := range req.TopicData {
 		topicResp := api.ProduceTopicResponse{Name: td.Name}
 
-		if !eng.Authorize(principal, auth.Resource{Type: "topic", Name: td.Name, PatternType: "literal"}, auth.OpWrite) {
+		// gh #126: cluster-wide ACL evaluation (with superUser
+		// early-allow when configured). Runs on every listener now —
+		// anonymous listeners no longer bypass authz.
+		if !h.authorizer.Authorize(principal, auth.Resource{Type: "topic", Name: td.Name, PatternType: "literal"}, auth.OpWrite) {
 			for _, pd := range td.PartitionData {
 				topicResp.PartitionResponses = append(topicResp.PartitionResponses, api.ProducePartitionResponse{
 					Index: pd.Index, ErrorCode: int16(codec.ErrTopicAuthorizationFailed),

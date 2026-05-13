@@ -296,12 +296,12 @@ func (h *ListGroupsHandler) Handle(_ *connstate.ConnState, version int16, body [
 // ---- DeleteGroups (gh #89) ----
 
 type DeleteGroupsHandler struct {
-	coord   *coordinator.Manager
-	engines auth.AuthEngineSelector
+	coord      *coordinator.Manager
+	authorizer auth.Authorizer // gh #126: cluster-wide
 }
 
-func NewDeleteGroupsHandler(coord *coordinator.Manager, engines auth.AuthEngineSelector) *DeleteGroupsHandler {
-	return &DeleteGroupsHandler{coord: coord, engines: engines}
+func NewDeleteGroupsHandler(coord *coordinator.Manager, authorizer auth.Authorizer) *DeleteGroupsHandler {
+	return &DeleteGroupsHandler{coord: coord, authorizer: authorizer}
 }
 
 func (h *DeleteGroupsHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -316,12 +316,11 @@ func (h *DeleteGroupsHandler) Handle(conn *connstate.ConnState, version int16, b
 	// Per-group ACL gate. Producers/consumers normally hold Read on a
 	// group; deleting requires Delete. AdminClient.deleteConsumerGroups
 	// is the typical caller and runs under an operator principal.
-	if h.engines != nil {
+	if h.authorizer != nil {
 		principal := principalFrom(conn)
-		eng := h.engines.For(string(conn.Listener)) // gh #124 per-listener engine
 		var allowed []string
 		for _, gid := range req.GroupNames {
-			if !eng.Authorize(principal, auth.Resource{Type: "group", Name: gid, PatternType: "literal"}, auth.OpDelete) {
+			if !h.authorizer.Authorize(principal, auth.Resource{Type: "group", Name: gid, PatternType: "literal"}, auth.OpDelete) {
 				resp.Results = append(resp.Results, api.DeleteGroupsResult{
 					GroupID:   gid,
 					ErrorCode: int16(codec.ErrGroupAuthorizationFailed),

@@ -9,81 +9,77 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 )
 
-// recordingDenyEngine denies every Authorize call. recordingAllowEngine
-// allows everything. Both record the calls they receive so the test can
-// assert which engine was consulted for each conn.
-type recordingEngine struct {
+// recordingAuthorizer counts Authorize calls and returns a fixed
+// verdict. Used by the cluster-wide-authz test below.
+type recordingAuthorizer struct {
 	mu      sync.Mutex
 	calls   int
 	verdict bool
 }
 
-func (e *recordingEngine) NewSASLExchange(string) (auth.SASLExchange, error) { return nil, nil }
-func (e *recordingEngine) AuthenticateTLS(string) (auth.Principal, error) {
-	return auth.Principal{}, nil
+func (a *recordingAuthorizer) Authorize(auth.Principal, auth.Resource, auth.Operation) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls++
+	return a.verdict
 }
-func (e *recordingEngine) Authorize(auth.Principal, auth.Resource, auth.Operation) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.calls++
-	return e.verdict
-}
-func (e *recordingEngine) CheckProduceQuota(auth.Principal, int) int32 { return 0 }
-func (e *recordingEngine) CheckFetchQuota(auth.Principal, int) int32   { return 0 }
-func (e *recordingEngine) RequiresPreAuth() bool                       { return !e.verdict }
 
-// TestDeleteGroupsRoutesPerListenerEngine pins gh #124: a Produce/Fetch
-// or DeleteGroups on the "anon" listener consults the AllowAll engine
-// (verdict=true → request passes through); the SAME request on the
-// "authed" listener consults the Deny engine (verdict=false → request
-// rejected with the auth-failed code). One handler, one ConnState
-// listener tag, two different decisions. Demonstrates the
-// User:ANONYMOUS workaround no longer applies — anonymous listeners
-// don't trigger ACL evaluation at all.
-func TestDeleteGroupsRoutesPerListenerEngine(t *testing.T) {
-	allowOnAnon := &recordingEngine{verdict: true}
-	denyOnAuthed := &recordingEngine{verdict: false}
-	engines := auth.PerListenerAuthEngine{
-		"anon":   allowOnAnon,
-		"authed": denyOnAuthed,
-	}
-	h := NewDeleteGroupsHandler(nil, engines)
+// TestDeleteGroupsClusterWideAuthorizer pins gh #126: authorization
+// is cluster-wide. The same Authorizer evaluates every request
+// regardless of which listener accepted the connection. The legacy
+// per-listener-routing test (from gh #124) was replaced with this
+// after authorization moved off the per-listener AuthEngine.
+//
+// Both the "anon" and "authed" listener call sites consult the
+// same cluster-wide Authorizer — verdict=false on the shared
+// instance blocks DeleteGroups on either listener.
+func TestDeleteGroupsClusterWideAuthorizer(t *testing.T) {
+	denyAll := &recordingAuthorizer{verdict: false}
+	h := NewDeleteGroupsHandler(nil, denyAll)
 
 	body := encodeDeleteGroupsRequestV2(t, []string{"my-group"})
 
-	// Anon listener: AllowAll engine → request passes through to the
-	// (nil-coord) coordinator path, yielding ErrCoordinatorNotAvailable.
-	out, err := h.Handle(&connstate.ConnState{Listener: "anon"}, 2, body)
-	if err != nil {
-		t.Fatalf("anon Handle: %v", err)
+	for _, listener := range []connstate.ListenerName{"anon", "authed"} {
+		out, err := h.Handle(&connstate.ConnState{Listener: listener}, 2, body)
+		if err != nil {
+			t.Fatalf("Handle on %q: %v", listener, err)
+		}
+		got := decodeDeleteGroupsResponseV2(t, out)
+		if got["my-group"] != int16(codec.ErrGroupAuthorizationFailed) {
+			t.Errorf("listener=%q: errCode=%d, want GroupAuthorizationFailed (cluster-wide deny)",
+				listener, got["my-group"])
+		}
 	}
-	got := decodeDeleteGroupsResponseV2(t, out)
-	if got["my-group"] != int16(codec.ErrCoordinatorNotAvailable) {
-		t.Errorf("anon listener: errCode=%d, want CoordinatorNotAvailable (Allow + nil coord)",
-			got["my-group"])
+	if denyAll.calls != 2 {
+		t.Errorf("cluster-wide Authorizer should be consulted once per listener; got %d calls (want 2)",
+			denyAll.calls)
 	}
-	if allowOnAnon.calls != 1 {
-		t.Errorf("anon engine consulted %d times, want 1", allowOnAnon.calls)
+}
+
+// TestSuperUserAuthorizerEarlyAllow pins the superUsers contract:
+// a principal matching a configured superUser name bypasses the
+// inner Authorizer entirely (early-allow), regardless of what the
+// inner would have decided.
+func TestSuperUserAuthorizerEarlyAllow(t *testing.T) {
+	inner := &recordingAuthorizer{verdict: false} // would deny anything
+	su := auth.NewSuperUserAuthorizer([]string{"admin", "CN=operator"}, inner)
+
+	// superUser principal: early-allow, inner never called.
+	if !su.Authorize(auth.Principal{Name: "admin"}, auth.Resource{Type: "topic", Name: "secret"}, auth.OpRead) {
+		t.Error("superUser admin denied; want allow")
 	}
-	if denyOnAuthed.calls != 0 {
-		t.Errorf("authed engine consulted on anon listener; %d calls (want 0)", denyOnAuthed.calls)
+	if !su.Authorize(auth.Principal{Name: "CN=operator"}, auth.Resource{Type: "cluster", Name: "kafka-cluster"}, auth.OpDescribe) {
+		t.Error("superUser CN=operator denied; want allow")
+	}
+	if inner.calls != 0 {
+		t.Errorf("inner consulted for superUser principals (calls=%d, want 0)", inner.calls)
 	}
 
-	// Authed listener: Deny engine → request blocked with GROUP_AUTH_FAILED.
-	out, err = h.Handle(&connstate.ConnState{Listener: "authed"}, 2, body)
-	if err != nil {
-		t.Fatalf("authed Handle: %v", err)
+	// non-superUser principal: falls through to inner (which denies).
+	if su.Authorize(auth.Principal{Name: "bob"}, auth.Resource{Type: "topic", Name: "secret"}, auth.OpRead) {
+		t.Error("non-superUser bob allowed; inner should have denied")
 	}
-	got = decodeDeleteGroupsResponseV2(t, out)
-	if got["my-group"] != int16(codec.ErrGroupAuthorizationFailed) {
-		t.Errorf("authed listener: errCode=%d, want GroupAuthorizationFailed (Deny)",
-			got["my-group"])
-	}
-	if denyOnAuthed.calls != 1 {
-		t.Errorf("authed engine consulted %d times, want 1", denyOnAuthed.calls)
-	}
-	if allowOnAnon.calls != 1 {
-		t.Errorf("anon engine consulted on authed listener (calls now %d, was 1 before)",
-			allowOnAnon.calls)
+	if inner.calls != 1 {
+		t.Errorf("inner not consulted for non-superUser; calls=%d, want 1", inner.calls)
 	}
 }
