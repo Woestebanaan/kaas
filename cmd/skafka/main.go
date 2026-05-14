@@ -7,10 +7,11 @@ import (
 	"log/slog"
 	"encoding/json"
 	"net/http"
-	// pprof handlers are registered on http.DefaultServeMux on import.
-	// startHealthServer mounts them on its own mux behind SKAFKA_PPROF
-	// so the surface doesn't leak by default — see gh #132.
-	_ "net/http/pprof" //nolint:gosec
+	// gh #132: opt-in pprof on the health server's mux. Registered
+	// directly (not via http.DefaultServeMux) so we don't share state
+	// with anything else in-process that might inadvertently mutate
+	// the default mux.
+	"net/http/pprof"
 	goruntime "runtime"
 	"os"
 	"os/signal"
@@ -1004,7 +1005,11 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 	if os.Getenv("SKAFKA_PPROF") == "true" {
 		goruntime.SetBlockProfileRate(1)
 		goruntime.SetMutexProfileFraction(1)
-		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 		slog.Info("pprof enabled on health server", "path", "/debug/pprof/")
 	}
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
