@@ -4,7 +4,50 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 )
+
+// framePool recycles request-frame byte slices (gh #132 item 4). Pre-pool
+// the readFrame allocation was ~50% of all heap traffic on the produce
+// hot path (post the gh #133 zero-copy decode fix, which eliminated the
+// other 50%). Buffers up to 1 MiB go back into the pool; outsized
+// requests skip the pool so a one-off huge frame doesn't pin a large
+// buffer for the rest of the broker's life.
+const frameBufPoolMaxCap = 1 << 20
+
+var framePool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 64*1024)
+		return &b
+	},
+}
+
+// frameBuf returns a buffer of exactly n bytes. The first return value
+// is the pool handle that putFrameBuf wants when the caller is done;
+// the second is the byte slice the caller actually reads/decodes into.
+func frameBuf(n int) (*[]byte, []byte) {
+	bp := framePool.Get().(*[]byte)
+	if cap(*bp) < n {
+		// Pooled buffer too small for this request — allocate fresh.
+		// Keeping the old pointer means the under-sized one stays out
+		// of the pool until the next GC visits it; that's fine, the
+		// pool will grow to fit the workload's request sizes.
+		*bp = make([]byte, n)
+	} else {
+		*bp = (*bp)[:n]
+	}
+	return bp, *bp
+}
+
+// putFrameBuf returns a frame buffer to the pool. Safe to call with nil
+// (no-op) so callers can defer it before the buffer is necessarily set.
+func putFrameBuf(bp *[]byte) {
+	if bp == nil || cap(*bp) > frameBufPoolMaxCap {
+		return
+	}
+	*bp = (*bp)[:0]
+	framePool.Put(bp)
+}
 
 // RequestHeader holds the decoded Kafka request frame header.
 type RequestHeader struct {
@@ -14,24 +57,29 @@ type RequestHeader struct {
 	ClientID      string // may be empty
 }
 
-// readFrame reads one complete Kafka request frame from r.
-// Returns the header and the raw body bytes (everything after client_id / tagged fields).
-func readFrame(r io.Reader) (RequestHeader, []byte, error) {
+// readFrame reads one complete Kafka request frame from r. Returns the
+// header, the raw body bytes (everything after client_id / tagged fields),
+// and a pool handle. The caller MUST invoke putFrameBuf(handle) after
+// the request lifecycle ends — typically after the response has been
+// written. Returns a nil handle on error so callers can use a deferred
+// putFrameBuf without a nil check.
+func readFrame(r io.Reader) (RequestHeader, []byte, *[]byte, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-		return RequestHeader{}, nil, err
+		return RequestHeader{}, nil, nil, err
 	}
 	totalLen := int(binary.BigEndian.Uint32(lenBuf[:]))
 	if totalLen < 4 {
-		return RequestHeader{}, nil, fmt.Errorf("protocol: frame length %d too small", totalLen)
+		return RequestHeader{}, nil, nil, fmt.Errorf("protocol: frame length %d too small", totalLen)
 	}
 	if totalLen > 100<<20 { // 100 MB sanity cap
-		return RequestHeader{}, nil, fmt.Errorf("protocol: frame length %d exceeds limit", totalLen)
+		return RequestHeader{}, nil, nil, fmt.Errorf("protocol: frame length %d exceeds limit", totalLen)
 	}
 
-	buf := make([]byte, totalLen)
+	bufHandle, buf := frameBuf(totalLen)
 	if _, err := io.ReadFull(r, buf); err != nil {
-		return RequestHeader{}, nil, err
+		putFrameBuf(bufHandle)
+		return RequestHeader{}, nil, nil, err
 	}
 
 	pos := 0
@@ -45,13 +93,15 @@ func readFrame(r io.Reader) (RequestHeader, []byte, error) {
 	// client_id: nullable string (int16 length)
 	var clientID string
 	if pos+2 > len(buf) {
-		return RequestHeader{}, nil, io.ErrUnexpectedEOF
+		putFrameBuf(bufHandle)
+		return RequestHeader{}, nil, nil, io.ErrUnexpectedEOF
 	}
 	clientIDLen := int16(binary.BigEndian.Uint16(buf[pos:]))
 	pos += 2
 	if clientIDLen > 0 {
 		if pos+int(clientIDLen) > len(buf) {
-			return RequestHeader{}, nil, io.ErrUnexpectedEOF
+			putFrameBuf(bufHandle)
+			return RequestHeader{}, nil, nil, io.ErrUnexpectedEOF
 		}
 		clientID = string(buf[pos : pos+int(clientIDLen)])
 		pos += int(clientIDLen)
@@ -79,7 +129,7 @@ func readFrame(r io.Reader) (RequestHeader, []byte, error) {
 		CorrelationID: correlationID,
 		ClientID:      clientID,
 	}
-	return hdr, buf[pos:], nil
+	return hdr, buf[pos:], bufHandle, nil
 }
 
 // writeFrame prepends the int32 frame length and writes the complete response to w.

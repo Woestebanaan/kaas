@@ -709,6 +709,20 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 		return -1, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
 	}
 
+	// gh #132 item 1: parse the batch BEFORE taking ps.mu. These are
+	// pure functions over rawBatch bytes — no partition state involved
+	// — so there's no reason to hold the lock through them. On the
+	// produce hot path this shaves a few µs off every lock acquisition
+	// (parseBatchProducerInfo walks the batch header for the PID/epoch/
+	// sequence fields, parseBatchOffsets is a fixed-offset read). The
+	// big lock-duration win (moving WriteAt out) is parked as a
+	// follow-up because it needs sequence-numbered durability tracking
+	// to interact correctly with the group-commit fsync barrier.
+	prodInfo, err := parseBatchProducerInfo(rawBatch)
+	if err != nil {
+		return -1, fmt.Errorf("storage: %w", err)
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -725,10 +739,6 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	// state advance are atomic with concurrent Appends. PID == -1
 	// (the wire sentinel for non-idempotent producers) skips this
 	// branch entirely.
-	prodInfo, err := parseBatchProducerInfo(rawBatch)
-	if err != nil {
-		return -1, fmt.Errorf("storage: %w", err)
-	}
 	if ps.producerStates == nil && prodInfo.producerID >= 0 {
 		ps.producerStates = make(map[int64]*producerEntry)
 	}

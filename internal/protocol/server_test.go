@@ -168,10 +168,11 @@ func TestFrameReadWrite(t *testing.T) {
 	}()
 
 	server.SetDeadline(time.Now().Add(time.Second))
-	hdr, body, err := readFrame(server)
+	hdr, body, bufHandle, err := readFrame(server)
 	if err != nil {
 		t.Fatalf("readFrame: %v", err)
 	}
+	defer putFrameBuf(bufHandle)
 	if hdr.APIKey != 18 || hdr.APIVersion != 0 || hdr.CorrelationID != 99 || hdr.ClientID != "cli" {
 		t.Errorf("unexpected header: %+v", hdr)
 	}
