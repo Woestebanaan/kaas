@@ -265,130 +265,76 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn, listenerTag connstat
 		c.Close()
 	}()
 
-	s.runPipelinedConn(c, br, bw, state)
-}
-
-// runPipelinedConn drives one connection through the gh #132 item 2
-// pipelined model: a reader goroutine slurps frames off the socket and
-// hands each (request, seq) into a bounded inflight semaphore-protected
-// worker spawn; a writer goroutine pulls completed responses from a
-// channel and writes them out **in request-arrival order** so the
-// Kafka client's correlationID / idempotent-producer ordering contract
-// holds. Bounded inflight (pipelineMaxInflight) caps per-connection
-// memory + ensures the slow path can't drown the broker.
-func (s *Server) runPipelinedConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer, state *connstate.ConnState) {
-	type pendingResponse struct {
-		seq      uint64
-		response []byte
-		fatal    bool // true = handler error, kill the conn
-	}
-
-	const pipelineMaxInflight = 16
-	responses := make(chan pendingResponse, pipelineMaxInflight)
-	inflight := make(chan struct{}, pipelineMaxInflight)
-
-	// Writer goroutine: collects responses, emits them strictly in
-	// request order via a small "pending" map indexed by seq. Closes
-	// the conn on any write/flush failure (which is also how the
-	// reader is unblocked from its blocking I/O call).
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		var nextSeq uint64 = 1
-		pending := make(map[uint64]pendingResponse, pipelineMaxInflight)
-		for resp := range responses {
-			pending[resp.seq] = resp
-			for {
-				r, ok := pending[nextSeq]
-				if !ok {
-					break
-				}
-				delete(pending, nextSeq)
-				if r.fatal {
-					_ = c.Close()
-					return
-				}
-				if err := writeFrame(bw, r.response); err != nil {
-					slog.Warn("connection: writing response frame failed (client likely disconnected mid-response)",
-						"client", state.ClientID,
-						"response_bytes", len(r.response),
-						"err", err)
-					_ = c.Close()
-					return
-				}
-				if err := bw.Flush(); err != nil {
-					slog.Warn("connection: flushing response to socket failed (client likely disconnected; response built but not delivered)",
-						"client", state.ClientID,
-						"err", err)
-					_ = c.Close()
-					return
-				}
-				nextSeq++
-			}
-		}
-	}()
-
-	// Reader loop: synchronous on this goroutine. Spawns one handler
-	// goroutine per request, throttled by the inflight semaphore.
-	var readSeq uint64
-	var dispatchWG sync.WaitGroup
+	// Strict per-connection serialisation: read → dispatch → write →
+	// flush → repeat. This is the exact model Apache Kafka uses (the
+	// network thread mutes the socket while the request is in flight,
+	// then unmutes it after the response is sent). Parallelism on the
+	// broker comes from independent connections, not from concurrent
+	// in-flight requests on the same connection — clients still gain
+	// throughput from queueing requests in the OS socket buffer while
+	// awaiting a response, which is what max.in.flight.requests.per.
+	// connection actually buys. An earlier attempt (gh #132 item 2,
+	// v0.1.134-135) at per-connection pipelining broke kafka-go's
+	// consumer flow despite preserving response ordering; the model
+	// here is what the broker contract documents.
 	for {
 		hdr, body, bufHandle, err := readFrame(br)
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) && !isEOF(err) {
+				// Failed to read a request frame from the client's
+				// TCP stream — typically a malformed frame (corrupted
+				// length prefix, client sending a non-Kafka protocol
+				// to port 9092) or a mid-frame disconnect that wasn't
+				// clean enough to return EOF.
 				slog.Warn("connection: reading next request frame failed",
 					"client", state.ClientID,
 					"err", err)
 			}
-			break
+			return
 		}
 		slog.Debug("request", "api_key", hdr.APIKey, "version", hdr.APIVersion, "client", hdr.ClientID)
 
-		// Keep ClientID from the first request that sets it. With
-		// concurrent dispatch this needs the lock — without it the
-		// race detector flags the read/write pair.
-		if hdr.ClientID != "" {
-			state.Mu.Lock()
-			if state.ClientID == "" {
-				state.ClientID = hdr.ClientID
-			}
-			state.Mu.Unlock()
+		// Keep ClientID from the first request that sets it.
+		if hdr.ClientID != "" && state.ClientID == "" {
+			state.ClientID = hdr.ClientID
 		}
 
-		readSeq++
-		seq := readSeq
+		response, err := s.dispatcher.Dispatch(hdr, body, state)
+		// gh #132 item 4: return the frame buffer to the pool after
+		// Dispatch returns — body and the zero-copy sub-slices the
+		// codec returned into it have all been consumed (Append
+		// copied them to the log via pwrite, response bytes are in
+		// a fresh codec.Writer buffer).
+		putFrameBuf(bufHandle)
 
-		// Back-pressure: block until a slot opens. If the writer has
-		// closed the conn the next read will return error and we exit.
-		inflight <- struct{}{}
-		dispatchWG.Add(1)
-		go func(seq uint64, hdr RequestHeader, body []byte, bufHandle *[]byte) {
-			defer func() {
-				// gh #132 item 4: return the frame buffer to the pool
-				// AFTER the handler returns (body and any sub-slices
-				// the codec returned into it have been consumed by
-				// Dispatch). Pool capped at 1 MiB; bigger frames just
-				// get GC'd.
-				putFrameBuf(bufHandle)
-				dispatchWG.Done()
-				<-inflight
-			}()
-			response, dErr := s.dispatcher.Dispatch(hdr, body, state)
-			if dErr != nil {
-				slog.Error("dispatch error", "api_key", hdr.APIKey, "version", hdr.APIVersion,
-					"client", state.ClientID, "err", dErr)
-				responses <- pendingResponse{seq: seq, fatal: true}
-				return
-			}
-			responses <- pendingResponse{seq: seq, response: response}
-		}(seq, hdr, body, bufHandle)
+		if err != nil {
+			slog.Error("dispatch error", "api_key", hdr.APIKey, "version", hdr.APIVersion,
+				"client", state.ClientID, "err", err)
+			return
+		}
+
+		if err := writeFrame(bw, response); err != nil {
+			// The framed response couldn't be written into the
+			// per-connection bufio.Writer. In practice this fires
+			// when the TCP send buffer is full AND the client has
+			// already dropped the connection (broken pipe / RST).
+			slog.Warn("connection: writing response frame failed (client likely disconnected mid-response)",
+				"client", state.ClientID,
+				"api_key", hdr.APIKey,
+				"api_version", hdr.APIVersion,
+				"response_bytes", len(response),
+				"err", err)
+			return
+		}
+		if err := bw.Flush(); err != nil {
+			slog.Warn("connection: flushing response to socket failed (client likely disconnected; response built but not delivered)",
+				"client", state.ClientID,
+				"api_key", hdr.APIKey,
+				"api_version", hdr.APIVersion,
+				"err", err)
+			return
+		}
 	}
-
-	// Reader exited (EOF / error). Drain inflight handlers, close the
-	// responses channel so the writer can exit cleanly.
-	dispatchWG.Wait()
-	close(responses)
-	<-writerDone
 }
 
 func isEOF(err error) bool {

@@ -242,10 +242,21 @@ type partitionState struct {
 	// barrier for the seq it's flushing, waits for completedWriteSeq
 	// to reach it, then calls fsync(2). After fsync returns, every
 	// writeSeq <= that barrier is on durable storage.
+	//
+	// reservedHighWater is the offset that the NEXT Append will
+	// reserve; highWater (above) is the offset of the LAST byte that
+	// has actually been written. They drift apart while pwrites are
+	// in flight. Read paths consult highWater; idempotence /
+	// offset-assignment paths read reservedHighWater (next batch's
+	// baseOffset) under the lock. pendingEndOffsets[seq] records the
+	// end-offset of writeSeq=seq so markWriteComplete can advance
+	// the visible highWater along with completedWriteSeq.
 	nextWriteSeq       uint64
 	completedWriteSeq  uint64
 	pendingCompletions map[uint64]struct{}
 	flushBarriers      map[int64]uint64
+	reservedHighWater  int64
+	pendingEndOffsets  map[uint64]int64
 
 	// fsyncMaxLatency mirrors Config.FsyncMaxLatency at the moment
 	// startCommitter ran. Per-partition rather than per-engine so the
@@ -285,9 +296,18 @@ type partitionState struct {
 // gh #132 item 1 v2: lets the committer wait for "all writes <=
 // barrier are durable in the page cache" even though pwrite happens
 // outside ps.mu and may complete out of reservation order.
-func (ps *partitionState) markWriteComplete(W uint64) {
+//
+// Returns the offset the visible highWater should be advanced to —
+// the largest end-offset across all seqs that just became contiguously
+// complete. The caller updates ps.highWater + the atomic mirror. The
+// pendingEndOffsets entries for the newly-completed seqs are removed.
+func (ps *partitionState) markWriteComplete(W uint64) (visibleHighWater int64) {
 	if W == ps.completedWriteSeq+1 {
 		ps.completedWriteSeq = W
+		if eo, ok := ps.pendingEndOffsets[W]; ok {
+			visibleHighWater = eo
+			delete(ps.pendingEndOffsets, W)
+		}
 		for {
 			next := ps.completedWriteSeq + 1
 			if _, ok := ps.pendingCompletions[next]; !ok {
@@ -295,13 +315,20 @@ func (ps *partitionState) markWriteComplete(W uint64) {
 			}
 			delete(ps.pendingCompletions, next)
 			ps.completedWriteSeq = next
+			if eo, ok := ps.pendingEndOffsets[next]; ok {
+				if eo > visibleHighWater {
+					visibleHighWater = eo
+				}
+				delete(ps.pendingEndOffsets, next)
+			}
 		}
-		return
+		return visibleHighWater
 	}
 	if ps.pendingCompletions == nil {
 		ps.pendingCompletions = make(map[uint64]struct{})
 	}
 	ps.pendingCompletions[W] = struct{}{}
+	return 0
 }
 
 // startCommitter spawns the per-partition group-commit goroutine. Must
@@ -860,7 +887,17 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	// rewrite to the partition's high watermark before persisting so reads
 	// see strictly-increasing offsets across batches. CRC32C covers
 	// attrs..records (body[9:]), not baseOffset, so the 8-byte overwrite is safe.
-	baseOffset := ps.highWater
+	//
+	// Reservation uses reservedHighWater (advances under the lock at
+	// reservation time). The VISIBLE highWater — which Read consults —
+	// only advances in phase 3 after pwrite returns, so a consumer at
+	// highWater never tries to read bytes that haven't landed in the
+	// page cache yet. First Append on a freshly-opened partition picks
+	// up the recovered highWater into reservedHighWater.
+	if ps.reservedHighWater < ps.highWater {
+		ps.reservedHighWater = ps.highWater
+	}
+	baseOffset := ps.reservedHighWater
 	binary.BigEndian.PutUint64(rawBatch[0:8], uint64(baseOffset))
 
 	_, lastOffsetDelta, err := parseBatchOffsets(rawBatch)
@@ -868,6 +905,9 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 		ps.mu.Unlock()
 		return -1, fmt.Errorf("storage: %w", err)
 	}
+
+	endOffset := baseOffset + int64(lastOffsetDelta) + 1
+	ps.reservedHighWater = endOffset
 
 	seg := ps.active
 	writePos := seg.logSize
@@ -898,13 +938,17 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	if prodInfo.producerID >= 0 {
 		recordIdempotenceOutcome(ps.producerStates, prodInfo, baseOffset)
 	}
-	ps.highWater = baseOffset + int64(lastOffsetDelta) + 1
-	ps.highWaterAtomic.Store(ps.highWater) // gh #134: mirror for lock-free reads
 	ps.pendingFlushRecords += int64(lastOffsetDelta) + 1
 
-	// Reserve a write seq for the durability barrier.
+	// Reserve a write seq for the durability barrier and stash the
+	// end-offset of this batch so phase 3 can advance the visible
+	// highWater contiguously once the pwrite returns.
 	ps.nextWriteSeq++
 	myWriteSeq := ps.nextWriteSeq
+	if ps.pendingEndOffsets == nil {
+		ps.pendingEndOffsets = make(map[uint64]int64)
+	}
+	ps.pendingEndOffsets[myWriteSeq] = endOffset
 
 	// Snapshot the file handles so a concurrent Relinquish (which
 	// sets active.logFile = nil) can't race us into a nil deref.
@@ -966,12 +1010,18 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 		}
 		// Still mark our seq complete so the watermark advances and
 		// the committer / segment-roll waiters don't deadlock on us.
+		// Drop the pendingEndOffset entry so it doesn't pollute the
+		// visible highWater advance.
+		delete(ps.pendingEndOffsets, myWriteSeq)
 		ps.markWriteComplete(myWriteSeq)
 		ps.flushCond.Broadcast()
 		ps.mu.Unlock()
 		return -1, writeErr
 	}
-	ps.markWriteComplete(myWriteSeq)
+	if newHW := ps.markWriteComplete(myWriteSeq); newHW > ps.highWater {
+		ps.highWater = newHW
+		ps.highWaterAtomic.Store(newHW) // gh #134: mirror for lock-free reads
+	}
 	ps.flushCond.Broadcast()
 
 	if triggeredFlushSeq > 0 {

@@ -39,12 +39,7 @@ func (h *SaslHandshakeHandler) Handle(conn *connstate.ConnState, version int16, 
 		}
 	}
 	if errCode == 0 && conn != nil {
-		// gh #132 item 2: ConnState mutation under Mu — with the
-		// pipelined server loop, another goroutine on the same
-		// connection could be reading SASLMechanism concurrently.
-		conn.Mu.Lock()
 		conn.SASLMechanism = req.Mechanism
-		conn.Mu.Unlock()
 	}
 
 	resp := &api.SaslHandshakeResponse{ErrorCode: errCode, Mechanisms: h.mechanisms}
@@ -68,18 +63,6 @@ func (h *SaslAuthenticateHandler) Handle(conn *connstate.ConnState, version int1
 	req, err := api.DecodeSaslAuthenticateRequest(r, version)
 	if err != nil {
 		return nil, fmt.Errorf("sasl_authenticate decode: %w", err)
-	}
-
-	// gh #132 item 2: the entire SASL state machine — SASLState
-	// creation, SASLState.Step, Principal/SASLDone mutation —
-	// runs under Mu. SASL is multi-round-trip but the rounds are
-	// expected to be naturally serial (the client waits for each
-	// response before sending the next), so coarse locking has no
-	// real cost and keeps the state transitions atomic against
-	// concurrent dispatch on the connection.
-	if conn != nil {
-		conn.Mu.Lock()
-		defer conn.Mu.Unlock()
 	}
 
 	// Reject PLAIN over non-TLS connections.

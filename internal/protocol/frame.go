@@ -41,12 +41,12 @@ func frameBuf(n int) (*[]byte, []byte) {
 
 // putFrameBuf returns a frame buffer to the pool. Safe to call with nil
 // (no-op) so callers can defer it before the buffer is necessarily set.
+//
+// TEMP: disabled pending investigation — recycling appears to break the
+// kafka-compat consumer flow. Tests pass without it; perf impact is
+// modest. Re-enable once the aliasing hazard is identified.
 func putFrameBuf(bp *[]byte) {
-	if bp == nil || cap(*bp) > frameBufPoolMaxCap {
-		return
-	}
-	*bp = (*bp)[:0]
-	framePool.Put(bp)
+	_ = bp
 }
 
 // RequestHeader holds the decoded Kafka request frame header.

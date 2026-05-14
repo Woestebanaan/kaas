@@ -1,10 +1,6 @@
 package connstate
 
-import (
-	"sync"
-
-	"github.com/woestebanaan/skafka/internal/auth"
-)
+import "github.com/woestebanaan/skafka/internal/auth"
 
 // ListenerName labels which listener a connection arrived on. The
 // string value matches the listener's Name field on the protocol
@@ -18,14 +14,10 @@ import (
 type ListenerName string
 
 // ConnState holds per-connection mutable state shared between the server and handlers.
-//
-// gh #132 item 2: with per-connection request pipelining, multiple
-// handler goroutines may touch ConnState concurrently. Mu guards the
-// mutable fields below (ClientID, SASLDone, SASLMechanism, SASLState,
-// Principal). IsTLS and Listener are set once at connection accept
-// time and read-only thereafter — they don't need the lock.
+// Owned by a single goroutine (serveConn) — Apache Kafka's per-connection
+// "one request in flight" contract means no concurrent mutation, so no
+// lock is needed.
 type ConnState struct {
-	Mu            sync.Mutex
 	ClientID      string
 	Principal     *auth.Principal
 	SASLDone      bool
