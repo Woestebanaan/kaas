@@ -7,6 +7,11 @@ import (
 	"log/slog"
 	"encoding/json"
 	"net/http"
+	// pprof handlers are registered on http.DefaultServeMux on import.
+	// startHealthServer mounts them on its own mux behind SKAFKA_PPROF
+	// so the surface doesn't leak by default — see gh #132.
+	_ "net/http/pprof" //nolint:gosec
+	goruntime "runtime"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -990,6 +995,18 @@ type readinessStatus struct {
 func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", observability.HealthHandler(cfg.brokerID, cfg.listeners, cfg.tls, cfg.source))
+	// gh #132: opt-in pprof for perf investigations. Block + mutex
+	// profilers are off by default in Go (rate 0); enable them
+	// explicitly so /debug/pprof/{block,mutex} actually return data.
+	// Block rate 1 = sample every block event; mutex fraction 1 = every
+	// contention event. Both add observable overhead — only flip
+	// SKAFKA_PPROF=true when you're about to profile.
+	if os.Getenv("SKAFKA_PPROF") == "true" {
+		goruntime.SetBlockProfileRate(1)
+		goruntime.SetMutexProfileFraction(1)
+		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+		slog.Info("pprof enabled on health server", "path", "/debug/pprof/")
+	}
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		st := cfg.readiness()
 		w.Header().Set("Content-Type", "application/json")

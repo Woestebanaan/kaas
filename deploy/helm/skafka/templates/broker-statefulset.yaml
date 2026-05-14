@@ -126,6 +126,14 @@ spec:
               value: "{{ .Values.broker.controllerLease.retryPeriodSeconds }}"
             - name: SKAFKA_FLUSH_INTERVAL_MESSAGES
               value: "{{ .Values.broker.flushIntervalMessages | default 1 }}"
+            {{- if .Values.broker.pprof }}
+            # gh #132: pprof on the health server's mux at /debug/pprof/.
+            # Enables block + mutex profiling at full sample rate — only
+            # flip this on for short-lived investigations; the runtime
+            # overhead is observable.
+            - name: SKAFKA_PPROF
+              value: "true"
+            {{- end }}
             # gh #108 (refactored v0.1.84): numSlots for the sharded
             # TxnStateStore is decoupled from the StatefulSet replica
             # count and pinned to a fixed cluster-wide constant —
