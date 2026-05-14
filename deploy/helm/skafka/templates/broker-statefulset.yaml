@@ -64,14 +64,13 @@ spec:
           image: {{ include "skafka.brokerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
-            - name: kafka
-              containerPort: {{ .Values.broker.ports.kafka }}
-            - name: kafka-tls
-              containerPort: {{ .Values.listeners.external.port | default .Values.broker.ports.tls }}
-            {{- if .Values.listeners.authed.enabled }}
-            - name: kafka-authed
-              containerPort: {{ .Values.listeners.authed.port }}
+          {{- /* gh #126: one containerPort per enabled listener. */}}
+          {{- range .Values.listeners }}
+            {{- if or (not (hasKey . "enabled")) .enabled }}
+            - name: kafka-{{ .name }}
+              containerPort: {{ .port }}
             {{- end }}
+          {{- end }}
             - name: health
               containerPort: {{ .Values.broker.ports.health }}
             - name: heartbeat
@@ -101,7 +100,7 @@ spec:
             - name: SKAFKA_POD_NAME_PATTERN
               value: "{{ include "skafka.fullname" . }}-%d"
             - name: SKAFKA_CLUSTER_DOMAIN
-              value: {{ .Values.listeners.internal.clusterDomain | default "cluster.local" }}
+              value: {{ .Values.clusterDomain | default "cluster.local" }}
             - name: SKAFKA_DATA_DIR
               value: {{ .Values.storage.mountPath }}
             - name: SKAFKA_CLUSTER_ID
@@ -113,16 +112,6 @@ spec:
               value: {{ include "skafka.fullname" . }}
             - name: SKAFKA_PORT
               value: "{{ .Values.broker.ports.kafka }}"
-            # gh #124: per-listener config JSON. The broker parses this
-            # into a []ListenerConfig + PerListenerAuthEngine map so each
-            # listener gets its own auth policy (anonymous-OK on internal,
-            # SCRAM on the authed listener, mTLS on external). The legacy
-            # SKAFKA_PORT / SKAFKA_TLS_PORT / SKAFKA_AUTHED_LISTEN_ADDR
-            # envs below stay populated so the back-compat path in
-            # cmd/skafka/main.go is still exercised if SKAFKA_LISTENERS
-            # is ever unset (defensive — chart always sets it).
-            - name: SKAFKA_LISTENERS
-              value: {{ include "skafka.listenersJSON" . | quote }}
             - name: SKAFKA_HEALTH_ADDR
               value: ":{{ .Values.broker.ports.health }}"
             - name: SKAFKA_CONTROLLER_HEARTBEAT_ADDR
@@ -218,18 +207,30 @@ spec:
               # to skip the sync-options annotation entirely.
               value: {{ .Values.admin.argocd.syncOptions | quote }}
             {{- end }}
-            {{- if .Values.listeners.authed.enabled }}
-            # gh #139: dedicated SASL-required listener on a separate
-            # plaintext port. Activated by the main binary when
-            # SKAFKA_AUTHED_LISTEN_ADDR is set (cmd/skafka/main.go);
-            # the dispatcher tags every conn from this listener with
-            # connstate.ListenerAuthed and rejects pre-auth requests
-            # with CLUSTER_AUTHORIZATION_FAILED, regardless of the
-            # global SKAFKA_REQUIRE_SASL flag.
-            - name: SKAFKA_AUTHED_LISTEN_ADDR
-              value: "0.0.0.0:{{ .Values.listeners.authed.port }}"
+            {{- /*
+            gh #126: every listener flows through SKAFKA_LISTENERS
+            (JSON) — the broker reads that as the single source of
+            truth and stops needing per-listener env vars for ports.
+            The TLS cert / external-hostname env vars below still
+            target the FIRST type=external listener entry (the
+            multi-external follow-up will rewire these).
+            */}}
+            - name: SKAFKA_LISTENERS
+              value: {{ include "skafka.listenersJSON" . | quote }}
+            {{- /* gh #126: cluster-wide authorization opt-in. Omitted env = AllowAllAuthorizer. */}}
+            {{- if .Values.authorization }}
+            {{- with .Values.authorization.type }}
+            - name: SKAFKA_AUTHORIZATION_TYPE
+              value: {{ . | quote }}
             {{- end }}
-            {{- if .Values.listeners.external.enabled }}
+            {{- $su := include "skafka.superUsersList" . }}
+            {{- if $su }}
+            - name: SKAFKA_SUPER_USERS
+              value: {{ $su | quote }}
+            {{- end }}
+            {{- end }}
+            {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
+            {{- if $external }}
             # TLS listener for external clients. Hostname pattern is fmt-style
             # with the pod ordinal as the single %d argument. The broker reads
             # apps.kubernetes.io/pod-index from the downward-API label.
@@ -238,18 +239,18 @@ spec:
             - name: SKAFKA_TLS_KEY_FILE
               value: /tls/tls.key
             - name: SKAFKA_TLS_PORT
-              value: "{{ .Values.listeners.external.port }}"
+              value: "{{ $external.port }}"
             - name: POD_ORDINAL
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
             - name: EXTERNAL_HOSTNAME_PATTERN
-              value: {{ .Values.listeners.external.hostnamePattern | quote }}
-            {{- if and .Values.listeners.external.tls.clientCA.enabled .Values.listeners.external.tls.clientCA.existingSecret }}
+              value: {{ $external.hostnamePattern | quote }}
+            {{- if and $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
             # Mutual TLS: require every TLS client to present a cert
             # signed by this CA bundle.
             - name: SKAFKA_TLS_CLIENT_CA_FILE
-              value: /tls-client-ca/{{ .Values.listeners.external.tls.clientCA.key }}
+              value: /tls-client-ca/{{ $external.clientCA.key }}
             {{- end }}
             {{- end }}
           # startupProbe gates liveness/readiness during boot. Brokers
@@ -276,14 +277,15 @@ spec:
               port: health
             periodSeconds: 5
             initialDelaySeconds: 5
+          {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}
-            {{- if .Values.listeners.external.enabled }}
+            {{- if $external }}
             - name: tls
               mountPath: /tls
               readOnly: true
-            {{- if and .Values.listeners.external.tls.clientCA.enabled .Values.listeners.external.tls.clientCA.existingSecret }}
+            {{- if and $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
             - name: tls-client-ca
               mountPath: /tls-client-ca
               readOnly: true
@@ -294,15 +296,15 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "skafka.pvcName" . }}
-        {{- if .Values.listeners.external.enabled }}
+        {{- if $external }}
         - name: tls
           secret:
             # Secret created by cert-manager from the Certificate resource.
             # Single Secret shared across all broker pods.
             secretName: {{ include "skafka.fullname" . }}-broker-tls
-        {{- if and .Values.listeners.external.tls.clientCA.enabled .Values.listeners.external.tls.clientCA.existingSecret }}
+        {{- if and $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
         - name: tls-client-ca
           secret:
-            secretName: {{ .Values.listeners.external.tls.clientCA.existingSecret }}
+            secretName: {{ $external.clientCA.existingSecret }}
         {{- end }}
         {{- end }}

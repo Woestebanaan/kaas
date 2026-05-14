@@ -6,25 +6,27 @@ Shared PVC:         {{ include "skafka.pvcName" . }} ({{ .Values.storage.size }}
 Operator:           {{ include "skafka.fullname" . }}-operator
 {{- end }}
 
-{{- if .Values.listeners.external.enabled }}
+{{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
+{{- $internal := include "skafka.firstByType" (dict "ctx" . "type" "internal") | fromYaml }}
+{{- if $external }}
 
 External access is enabled with end-to-end TLS.
 Wait for the cert-manager Certificate to be ready:
 
   kubectl get certificate {{ include "skafka.fullname" . }}-broker-tls -n {{ .Release.Namespace }}
 
-{{- with .Values.listeners.external.bootstrapHostname }}
+{{- with $external.bootstrapHostname }}
 Configure your Kafka clients with the bootstrap address:
 
-  {{ . }}:{{ $.Values.listeners.external.port }}
+  {{ . }}:{{ $external.port }}
 
 It is also a SAN on the broker certificate, so any client that resolves it
 to one of the broker pods (e.g. a CNAME pointing at broker-0) will succeed
 the TLS handshake. Clients learn the full per-broker list from Metadata.
 {{- else }}
 Configure your Kafka clients with any one of the bootstrap servers:
-  {{- range $i, $e := until (int .Values.broker.replicaCount) }}
-  {{ printf $.Values.listeners.external.hostnamePattern $i }}:{{ $.Values.listeners.external.port }}
+  {{- range $i, $e := until (int $.Values.broker.replicaCount) }}
+  {{ printf $external.hostnamePattern $i }}:{{ $external.port }}
   {{- end }}
 
 Each address resolves to its own broker pod via SNI. Clients learn the full list
@@ -35,11 +37,11 @@ changes — no special client configuration needed.
 
 External access is disabled. In-cluster clients connect directly to:
   {{- range $i, $e := until (int .Values.broker.replicaCount) }}
-  {{ include "skafka.fullname" $ }}-{{ $i }}.{{ include "skafka.headlessName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.listeners.internal.port }}
+  {{ include "skafka.fullname" $ }}-{{ $i }}.{{ include "skafka.headlessName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $internal.port }}
   {{- end }}
 
-To enable external access, set listeners.external.enabled=true and configure
-listeners.external.hostnamePattern with your DNS pattern.
+To enable external access, add a listener with `type: external` to .Values.listeners
+and configure its `hostnamePattern` with your DNS pattern.
 {{- end }}
 
 To create a topic:

@@ -1,3 +1,8 @@
+{{- /*
+gh #126: iterate the listeners array to emit one Service port per
+enabled entry. Listeners without `enabled` (the "plain" default)
+are always emitted; those with `enabled: false` are skipped.
+*/ -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,18 +14,13 @@ spec:
   publishNotReadyAddresses: false
   selector: {{- include "skafka.selectorLabels" . | nindent 4 }}
   ports:
-    - name: kafka
-      port: {{ .Values.broker.ports.kafka }}
-      targetPort: kafka
-    {{- if .Values.listeners.authed.enabled }}
-    - name: kafka-authed
-      # gh #139: SASL-required plaintext listener. Same headless DNS as
-      # the anonymous listener, just a different port — the per-listener
-      # SASL gate runs broker-side from the listener tag, not from any
-      # DNS routing.
-      port: {{ .Values.listeners.authed.port }}
-      targetPort: kafka-authed
+  {{- range .Values.listeners }}
+    {{- if or (not (hasKey . "enabled")) .enabled }}
+    - name: kafka-{{ .name }}
+      port: {{ .port }}
+      targetPort: kafka-{{ .name }}
     {{- end }}
+  {{- end }}
     - name: heartbeat
       # Internal-only: brokers dial each other's heartbeat port to reach
       # the elected cluster controller. Headless DNS gives each pod a
@@ -36,20 +36,14 @@ metadata:
   labels: {{- include "skafka.labels" . | nindent 4 }}
 spec:
   # Client-facing Service. Load-balances to any ready broker; clients retry on
-  # NOT_LEADER_FOR_PARTITION. Superseded by the router in Phase 9.
+  # NOT_LEADER_FOR_PARTITION.
   type: ClusterIP
   selector: {{- include "skafka.selectorLabels" . | nindent 4 }}
   ports:
-    - name: kafka
-      port: {{ .Values.broker.ports.kafka }}
-      targetPort: kafka
-    {{- if .Values.auth.tls.enabled }}
-    - name: tls
-      port: {{ .Values.broker.ports.tls }}
-      targetPort: tls
+  {{- range .Values.listeners }}
+    {{- if or (not (hasKey . "enabled")) .enabled }}
+    - name: kafka-{{ .name }}
+      port: {{ .port }}
+      targetPort: kafka-{{ .name }}
     {{- end }}
-    {{- if .Values.listeners.authed.enabled }}
-    - name: kafka-authed
-      port: {{ .Values.listeners.authed.port }}
-      targetPort: kafka-authed
-    {{- end }}
+  {{- end }}

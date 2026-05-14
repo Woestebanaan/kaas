@@ -69,47 +69,117 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end -}}
 
 {{/*
-skafka.listenersJSON — gh #124 helper. Emits the SKAFKA_LISTENERS env
-value as JSON. Walks the existing listeners.{internal,external,authed}
-map and builds a list-of-objects matching cmd/skafka/listeners.go's
-listenerSpec. Only listener entries that are actually enabled appear
-in the output (internal is always emitted; external/authed are gated
-on their `enabled` flag). The broker's parser validates the result;
-constraint violations (mtls without tls, duplicate ports/names) fail
-at startup with a clear error.
+skafka.listenersJSON — gh #126 helper. Iterates the user-facing
+listeners array (Strimzi shape) and emits the SKAFKA_LISTENERS env
+value as a JSON list-of-objects matching cmd/skafka/listeners.go's
+listenerSpec.
 
-Output is single-line JSON — fits cleanly into an env var without
-escape gymnastics.
+Listener entries with no `enabled` key are treated as enabled
+(always-on listeners). Entries with `enabled: false` are skipped.
+This preserves the "internal is always on, external/authed are
+opt-in" convention from earlier versions while letting custom
+listeners freely toggle.
+
+The broker's parser validates the result; constraint violations
+(mtls without tls, duplicate ports/names) fail at startup with a
+clear error. Output is single-line JSON — fits cleanly into an env
+var without escape gymnastics.
 */}}
 {{- define "skafka.listenersJSON" -}}
-{{- $list := list -}}
-
-{{/* internal listener — always enabled */}}
-{{- $internalAuth := "none" -}}
-{{- if .Values.listeners.internal.authentication -}}
-{{- $internalAuth = .Values.listeners.internal.authentication.type | default "none" -}}
+{{- $out := list -}}
+{{- range .Values.listeners -}}
+{{- if or (not (hasKey . "enabled")) .enabled -}}
+{{- $auth := "none" -}}
+{{- if .authentication -}}
+{{- $auth = .authentication.type | default "none" -}}
 {{- end -}}
-{{- $list = append $list (dict "name" "internal" "port" (.Values.listeners.internal.port | int) "type" "internal" "tls" false "authentication" (dict "type" $internalAuth)) -}}
-
-{{/* external listener — opt-in */}}
-{{- if .Values.listeners.external.enabled -}}
-{{- $extAuth := "none" -}}
-{{- if .Values.listeners.external.authentication -}}
-{{- $extAuth = .Values.listeners.external.authentication.type | default "none" -}}
+{{- $tls := false -}}
+{{- if hasKey . "tls" -}}
+{{- $tls = .tls -}}
 {{- end -}}
-{{- $list = append $list (dict "name" "external" "port" (.Values.listeners.external.port | int) "type" "external" "tls" true "authentication" (dict "type" $extAuth)) -}}
+{{- $out = append $out (dict
+  "name" .name
+  "port" (.port | int)
+  "type" .type
+  "tls" $tls
+  "authentication" (dict "type" $auth)) -}}
 {{- end -}}
-
-{{/* authed listener (gh #139) — opt-in plaintext + SASL-required */}}
-{{- if .Values.listeners.authed.enabled -}}
-{{- $authedAuth := "scram-sha-512" -}}
-{{- if .Values.listeners.authed.authentication -}}
-{{- $authedAuth = .Values.listeners.authed.authentication.type | default "scram-sha-512" -}}
 {{- end -}}
-{{- $list = append $list (dict "name" "authed" "port" (.Values.listeners.authed.port | int) "type" "internal" "tls" false "authentication" (dict "type" $authedAuth)) -}}
+{{- $out | toJson -}}
 {{- end -}}
 
-{{- $list | toJson -}}
+{{/*
+skafka.findListener — return the listener entry matching `name`, or
+an empty dict if no such entry exists. Templates that need the
+legacy "look up one listener by name" pattern (e.g. the
+KafkaCluster CR emitter, the external-listener-only TLS/Gateway
+plumbing) consult this instead of `.Values.listeners.<name>`.
+
+Usage:
+  {{- $ext := include "skafka.findListener" (dict "ctx" . "name" "external") | fromYaml -}}
+  {{- if $ext.enabled }}
+    port: {{ $ext.port }}
+  {{- end }}
+
+Returns YAML (parseable via `fromYaml`); empty `{}` when no match.
+*/}}
+{{- define "skafka.findListener" -}}
+{{- $name := .name -}}
+{{- $found := dict -}}
+{{- range .ctx.Values.listeners -}}
+{{- if eq .name $name -}}
+{{- $found = . -}}
+{{- end -}}
+{{- end -}}
+{{- $found | toYaml -}}
+{{- end -}}
+
+{{/*
+skafka.firstByType — return the first listener entry with the given
+type, or an empty dict. Used by the external-listener machinery
+(cert-manager Certificate, per-broker Service, TLSRoute) which
+today supports one external listener. The multi-external follow-up
+will rewire these to iterate; this helper isolates the assumption.
+*/}}
+{{- define "skafka.firstByType" -}}
+{{- $type := .type -}}
+{{- $found := dict -}}
+{{- range .ctx.Values.listeners -}}
+{{- if and (eq .type $type) (or (not (hasKey . "enabled")) .enabled) -}}
+{{- if not $found -}}
+{{- $found = . -}}
+{{- else if eq (len $found) 0 -}}
+{{- $found = . -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $found | toYaml -}}
+{{- end -}}
+
+{{/*
+skafka.hasEnabledExternalListener — true if any listener has type:
+external + (enabled missing or true). Convenience predicate so
+templates don't have to range-fold themselves.
+*/}}
+{{- define "skafka.hasEnabledExternalListener" -}}
+{{- $hit := "" -}}
+{{- range .Values.listeners -}}
+{{- if and (eq .type "external") (or (not (hasKey . "enabled")) .enabled) -}}
+{{- $hit = "1" -}}
+{{- end -}}
+{{- end -}}
+{{- $hit -}}
+{{- end -}}
+
+{{/*
+skafka.superUsersList — emit the cluster-wide superUsers as a
+comma-separated string for SKAFKA_SUPER_USERS. Empty when the list
+is empty (broker treats unset env as "no superUsers").
+*/}}
+{{- define "skafka.superUsersList" -}}
+{{- if .Values.authorization -}}
+{{- join "," (.Values.authorization.superUsers | default list) -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "skafka.operatorImage" -}}

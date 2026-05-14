@@ -283,130 +283,130 @@ observability:
       # non-zero is the signal a partitioned ex-controller is still alive.
       staleAssignmentsPerMinute: 1
 
-# Per-listener configuration. gh #139 introduces a third "authed"
-# listener so a single broker can host both anonymous (existing perf
-# benches, ops tools) traffic and SASL-authed traffic on different
-# TCP ports simultaneously — needed because skafka quotas only fire
-# for non-ANONYMOUS principals.
+# gh #126: Strimzi-style listeners array. Each entry is one TCP
+# listener on every broker pod, described by three orthogonal axes:
 #
-# Each listener carries its own `authentication.type` field, mirroring
-# Strimzi's per-listener auth policy. "none" → ANONYMOUS principal
-# (no quotas, no ACL match on User:bob), "scram-sha-512" → broker
-# rejects every non-pre-SASL API with CLUSTER_AUTHORIZATION_FAILED
-# until SASL completes (`internal/protocol/dispatch.go` consults
-# `connstate.ListenerName` to enforce per-listener; the global
-# `auth.requireSasl` flag still works as a shortcut for "every
-# listener is authed").
+#   - `type`: "internal" or "external". Internal listeners are
+#     reachable via the headless Service DNS; external listeners
+#     get per-broker FQDNs + cert-manager Certificate + TLSRoute
+#     plumbing for off-cluster clients.
+#   - `tls`: false or true. Independent of authentication —
+#     `tls: true, authentication.type: none` is "opportunistic
+#     TLS" (encrypted, anonymous principal).
+#   - `authentication.type`: "none" (ANONYMOUS principal) /
+#     "scram-sha-512" (SASL/SCRAM, RealAuthEngine wired) /
+#     "mtls" (requires tls: true; broker extracts CN as principal)
+#     / "plain" (SASL/PLAIN against the ServiceAccount JWT path).
+#
+# `mtls` requires `tls: true`; every other combination is legal.
+# Names are user-chosen strings; they appear in
+# ConnState.Listener and become keys in the per-listener auth
+# engine map. Duplicate names or duplicate ports fail at boot
+# with a clear validator error.
+#
+# The "external" listener entry (when enabled) also drives operator-
+# side reconciliation of cert-manager Certificate, per-broker
+# Service, and TLSRoute resources. Today only the FIRST `type:
+# external` entry is consumed for that machinery; widening to N is
+# tracked separately as a follow-up.
 listeners:
-  internal:
-    # Plaintext in-cluster listener. Always active; clients use headless DNS.
+  - name: plain
+    # Plaintext in-cluster listener. Use the per-broker headless DNS
+    # to reach it: `<pod>.<headlessSvc>.<ns>.svc.<clusterDomain>:9092`.
+    # Anonymous + no ACL evaluation (anonymous listeners short-circuit
+    # the cluster authorizer's ACL path — only quotas run, and they're
+    # no-ops for User:ANONYMOUS).
     port: 9092
-
-    # gh #139: Strimzi-style per-listener auth policy. The internal
-    # listener defaults to "none" so existing in-cluster workloads
-    # keep working unchanged. Set to "scram-sha-512" only if you
-    # want to require SASL on the in-cluster headless DNS path —
-    # equivalent to flipping the legacy `auth.requireSasl` for
-    # this listener only.
+    type: internal
+    tls: false
     authentication:
       type: none
 
-    # gh #97: cluster DNS suffix used to build the per-broker FQDN
-    # the broker advertises in MetadataResponse. Default works for
-    # >99% of k8s distros (kubeadm / k3s / EKS / GKE / AKS); override
-    # only if your cluster's CoreDNS uses a non-default domain (some
-    # on-prem installs, EKS clusters with privateDnsHostnames
-    # disabled).
-    #
-    # The advertised host is computed at runtime as:
-    #   {podName}.{headlessSvc}.{namespace}.svc.{clusterDomain}
-    #
-    # so a pod restart that gets a new IP doesn't invalidate clients'
-    # cached metadata — they re-resolve the same DNS name to the new
-    # IP. Mirrors the StatefulSet headless-Service per-pod DNS shape
-    # Strimzi uses for in-cluster traffic.
-    clusterDomain: cluster.local
-
-  external:
-    # External listener is opt-in. When disabled, no Certificate / per-broker
-    # Service / TLSRoute is created; clients must use the internal headless DNS.
+  - name: external
+    # External listener is opt-in. When disabled, no Certificate /
+    # per-broker Service / TLSRoute is created; off-cluster clients
+    # cannot reach the broker.
     enabled: false
     port: 9093
-
+    type: external
+    tls: true
     # fmt-style pattern substituted with the broker ordinal.
-    # Example: "broker-%d.kafka.example.com" → broker-0.kafka.example.com, etc.
+    # Example: "broker-%d.kafka.example.com" → broker-0..., etc.
     hostnamePattern: "broker-%d.kafka.example.com"
-
-    # Optional convenience hostname (e.g. a CNAME to broker-0). Added to the
-    # certificate SANs so clients can use a single bootstrap address.
+    # Optional convenience hostname (e.g. a CNAME to broker-0).
+    # Added to the certificate SANs so clients can use a single
+    # bootstrap address.
     bootstrapHostname: ""
-
-    tls:
-      certManager:
-        enabled: true
-        issuerRef:
-          name: letsencrypt-prod
-          kind: ClusterIssuer
-
-      # Mutual TLS: when set, the broker requires every TLS client to
-      # present a cert signed by one of the CAs in this bundle. Pair
-      # with auth.mechanisms = ["mTLS"] (or include alongside SCRAM)
-      # for full mTLS authentication. Disabled by default — opportunistic
-      # mTLS still works without this (the broker will record the client
-      # CN as principal if a cert is presented, otherwise fall back to
-      # SASL or anonymous per auth.requireSasl).
-      clientCA:
-        enabled: false
-        # Name of an existing Secret containing the CA bundle. The chart
-        # mounts secret.key (default ca.crt) at /tls-client-ca/ca.crt and
-        # sets SKAFKA_TLS_CLIENT_CA_FILE to point at it.
-        existingSecret: ""
-        key: ca.crt
-
+    certManager:
+      enabled: true
+      issuerRef:
+        name: letsencrypt-prod
+        kind: ClusterIssuer
+    # Mutual TLS: when enabled the broker requires every TLS client
+    # to present a cert signed by one of the CAs in `existingSecret`.
+    # Pair with `authentication.type: mtls` for hard mTLS auth.
+    clientCA:
+      enabled: false
+      existingSecret: ""
+      key: ca.crt
     gateway:
-      # Create one TLSRoute per broker when true. Requires Gateway API CRDs
-      # and a Gateway resource with a TLS passthrough listener on the external
-      # port. If false, per-broker Services are still created and can be fronted
-      # by per-broker LoadBalancer Services instead.
+      # Create one TLSRoute per broker when true. Requires Gateway API
+      # CRDs + a Gateway with a TLS passthrough listener on the external
+      # port. If false, per-broker Services are still created and can be
+      # fronted by per-broker LoadBalancer Services instead.
       enabled: true
       gatewayRef:
         name: skafka-gateway
         namespace: kafka
-
     service:
       annotations: {}
-
-    # gh #139: Strimzi-style per-listener auth on the external port.
-    # Most external clients connecting over the Gateway-API/TLSRoute
-    # path use mTLS (clientCA section above) for principal extraction;
-    # SCRAM is also supported (the per-listener gate just means SASL
-    # *or* mTLS must complete before non-pre-SASL APIs are accepted).
-    # Default "none" preserves the existing opportunistic-mTLS shape
-    # — the broker accepts a TLS handshake without a client cert and
-    # falls back to ANONYMOUS unless `auth.requireSasl` is true.
+    # "none" = opportunistic TLS (anonymous principal on this
+    # listener despite the encrypted channel). Set to "mtls" for
+    # hard authentication via client cert CN, or "scram-sha-512"
+    # for SASL_SSL.
     authentication:
       type: none
 
-  # gh #139: dedicated authed listener on a separate port.
-  # Plaintext-but-SASL-required so the perf bench Jobs can verify
-  # quotas fire (quotas need a non-ANONYMOUS principal, which means
-  # SASL must complete before non-pre-SASL APIs are accepted).
-  # The dispatcher consults the listener tag at request time and
-  # rejects pre-auth traffic on this listener with
-  # CLUSTER_AUTHORIZATION_FAILED until SaslAuthenticate completes,
-  # independent of `auth.requireSasl`. Keeping it disabled by default
-  # means the existing in-cluster anonymous perf path is unaffected.
-  #
-  # gh #124 (v0.1.122+): each listener now has its own AuthEngine.
-  # When `authentication.type: scram-sha-512` (the authed listener
-  # below), the broker wires RealAuthEngine for THIS listener only —
-  # the anonymous internal/external listeners continue to use
-  # AllowAllAuthEngine and do NOT consult ACLs. Existing anonymous
-  # bench Jobs keep working unchanged; only traffic that completes
-  # SASL on the authed listener gets ACL'd and quota'd. No
-  # `User:ANONYMOUS` workaround needed.
-  authed:
+  - name: authed
+    # Plaintext + SASL-required listener for in-cluster workloads
+    # that should authenticate. The dispatcher rejects pre-SASL
+    # APIs on this listener until SCRAM completes.
     enabled: false
     port: 9095
+    type: internal
+    tls: false
     authentication:
       type: scram-sha-512
+
+# gh #97: cluster DNS suffix used to build per-broker FQDNs the
+# broker advertises in MetadataResponse for internal-type
+# listeners. Default works for >99% of k8s distros (kubeadm / k3s
+# / EKS / GKE / AKS); override only if your cluster's CoreDNS uses
+# a non-default domain. Moved to top level in v0.1.126+ (gh #126);
+# it applies to every internal-type listener, not just the first.
+clusterDomain: cluster.local
+
+# gh #126: Strimzi-style cluster-wide authorization. Applies to
+# every listener (authentication remains per-listener). When type
+# is unset or empty, no authorization is enforced — matches
+# Strimzi's "missing authorization property = no restrictions".
+#
+# Supported types (v0.1.126+): "simple" (ACL-based via the
+# operator-managed acls.json). OAuth / OPA / custom backends are
+# tracked separately and slot into the same Authorizer interface
+# without further refactor.
+#
+# `superUsers` is a list of principal names that bypass ACL
+# evaluation entirely (early-allow). Match verbatim against
+# Principal.Name — use `CN=foo` for mTLS subjects and bare names
+# for SCRAM principals. Useful for operator-internal accounts and
+# break-glass.
+authorization:
+  type: ""           # "" | "simple"
+  superUsers: []
+  #
+  # Example:
+  #   type: simple
+  #   superUsers:
+  #     - alice
+  #     - CN=operator

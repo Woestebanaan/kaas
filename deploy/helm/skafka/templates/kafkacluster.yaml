@@ -9,6 +9,14 @@ The chart still owns static infra (StatefulSet, PVC, headless Service,
 RBAC, NOTES) since none of those depend on runtime decisions; the
 KafkaCluster CR is purely the external-listener / cluster-shape surface.
 */ -}}
+{{- /*
+gh #126: the KafkaCluster CR schema still has internal/external as a
+fixed map (operator-side refactor to a list is a separate
+follow-up). The chart synthesizes that legacy shape from the first
+type=internal + first type=external entry in .Values.listeners.
+*/ -}}
+{{- $internal := include "skafka.firstByType" (dict "ctx" . "type" "internal") | fromYaml -}}
+{{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml -}}
 apiVersion: skafka.io/v1alpha1
 kind: KafkaCluster
 metadata:
@@ -21,32 +29,37 @@ spec:
     size: {{ .Values.storage.size | quote }}
   listeners:
     internal:
-      port: {{ .Values.listeners.internal.port }}
+      port: {{ $internal.port | default 9092 }}
+    {{- if $external }}
     external:
-      enabled: {{ .Values.listeners.external.enabled }}
-      port: {{ .Values.listeners.external.port }}
-      hostnamePattern: {{ .Values.listeners.external.hostnamePattern | quote }}
-      {{- with .Values.listeners.external.bootstrapHostname }}
+      enabled: {{ default false $external.enabled }}
+      port: {{ $external.port }}
+      hostnamePattern: {{ $external.hostnamePattern | quote }}
+      {{- with $external.bootstrapHostname }}
       bootstrapHostname: {{ . | quote }}
       {{- end }}
       tls:
         certManager:
-          enabled: {{ .Values.listeners.external.tls.certManager.enabled }}
-          {{- if .Values.listeners.external.tls.certManager.enabled }}
+          enabled: {{ $external.certManager.enabled }}
+          {{- if $external.certManager.enabled }}
           issuerRef:
-            name: {{ .Values.listeners.external.tls.certManager.issuerRef.name | quote }}
-            kind: {{ .Values.listeners.external.tls.certManager.issuerRef.kind | quote }}
+            name: {{ $external.certManager.issuerRef.name | quote }}
+            kind: {{ $external.certManager.issuerRef.kind | quote }}
           {{- end }}
       gateway:
-        enabled: {{ .Values.listeners.external.gateway.enabled }}
-        {{- if .Values.listeners.external.gateway.enabled }}
+        enabled: {{ $external.gateway.enabled }}
+        {{- if $external.gateway.enabled }}
         gatewayRef:
-          name: {{ .Values.listeners.external.gateway.gatewayRef.name | quote }}
-          {{- with .Values.listeners.external.gateway.gatewayRef.namespace }}
+          name: {{ $external.gateway.gatewayRef.name | quote }}
+          {{- with $external.gateway.gatewayRef.namespace }}
           namespace: {{ . | quote }}
           {{- end }}
         {{- end }}
-      {{- with .Values.listeners.external.service.annotations }}
+      {{- with $external.service.annotations }}
       service:
         annotations: {{- toYaml . | nindent 10 }}
       {{- end }}
+    {{- else }}
+    external:
+      enabled: false
+    {{- end }}
