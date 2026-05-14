@@ -29,7 +29,8 @@ const (
 	topicKafkaGo     = "test-topic-kafkago"
 	topicSnappy      = "test-topic-snappy"
 	topicIdempotent  = "test-topic-idempotent"
-	topicConsumerGrp = "test-topic-consumer-group"
+	topicConsumerGrp      = "test-topic-consumer-group"
+	topicConsumerGrpShare = "test-topic-consumer-group-share"
 )
 
 func TestMain(m *testing.M) {
@@ -102,7 +103,8 @@ func TestMain(m *testing.M) {
 	b.AddTopic(topicKafkaGo, 1)
 	b.AddTopic(topicSnappy, 1)
 	b.AddTopic(topicIdempotent, 1)
-	b.AddTopic(topicConsumerGrp, 3) // 3 partitions so two consumers can split the load
+	b.AddTopic(topicConsumerGrp, 3)        // 3 partitions so two consumers can split the load
+	b.AddTopic(topicConsumerGrpShare, 16)  // 16 partitions for the gh #134 partition-share probe (matches the bench config)
 
 	code := m.Run()
 	cancel()
