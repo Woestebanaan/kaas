@@ -76,8 +76,12 @@ func Bootstrap(ctx context.Context, service string) (*Providers, error) {
 		// contain only one sample, so `rate()` silently returns empty
 		// and stat panels look like 'no data' even when traffic is
 		// flowing. 30s ensures rate([60s]) always sees 2+ samples.
+		// Reads SKAFKA_METRIC_EXPORT_INTERVAL (Go duration string) rather
+		// than the OTel-spec OTEL_METRIC_EXPORT_INTERVAL — the latter
+		// expects a bare-integer millisecond count and the SDK's internal
+		// logger shouts on any non-numeric value, polluting boot logs.
 		pushInterval := 30 * time.Second
-		if v := os.Getenv("OTEL_METRIC_EXPORT_INTERVAL"); v != "" {
+		if v := os.Getenv("SKAFKA_METRIC_EXPORT_INTERVAL"); v != "" {
 			if d, err := time.ParseDuration(v); err == nil {
 				pushInterval = d
 			}

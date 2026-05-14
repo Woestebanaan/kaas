@@ -170,7 +170,12 @@ spec:
             # (e.g. "15s", "1m"). The SDK default would be 60s; at
             # that cadence rate([1m]) windows often see only one
             # sample and Grafana stat panels show "no data".
-            - name: OTEL_METRIC_EXPORT_INTERVAL
+            #
+            # Skafka-specific env name (not OTEL_METRIC_EXPORT_INTERVAL):
+            # the OTel spec value is bare-int milliseconds, and the SDK
+            # logs an Atoi error on every boot when it sees a duration
+            # string. Using SKAFKA_* keeps that env out of the SDK's path.
+            - name: SKAFKA_METRIC_EXPORT_INTERVAL
               value: {{ .Values.observability.otlp.metrics.exportInterval | quote }}
             {{- end }}
             {{- if .Values.observability.otlp.traces.enabled }}

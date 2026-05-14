@@ -35,7 +35,7 @@ spec:
             {{- if .Values.observability.otlp.metrics.enabled }}
             - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
               value: {{ .Values.observability.otlp.metrics.endpoint | quote }}
-            - name: OTEL_METRIC_EXPORT_INTERVAL
+            - name: SKAFKA_METRIC_EXPORT_INTERVAL
               value: {{ .Values.observability.otlp.metrics.exportInterval | quote }}
             {{- end }}
             {{- if .Values.observability.otlp.traces.enabled }}
