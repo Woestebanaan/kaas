@@ -157,6 +157,26 @@ will rewire these to iterate; this helper isolates the assumption.
 {{- end -}}
 
 {{/*
+skafka.primaryListenerName — name of the first enabled listener in
+.Values.listeners. Used as the container-port name for the broker's
+startup/liveness probes (which need *some* listener port to TCP-probe
+but don't care which one). Fails the chart render if no listener is
+enabled — that would mean no Kafka traffic, which is never the intent.
+*/}}
+{{- define "skafka.primaryListenerName" -}}
+{{- $name := "" -}}
+{{- range .Values.listeners -}}
+{{- if and (eq $name "") (or (not (hasKey . "enabled")) .enabled) -}}
+{{- $name = .name -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $name "" -}}
+{{- fail "skafka chart: at least one entry in .Values.listeners must be enabled" -}}
+{{- end -}}
+{{- $name -}}
+{{- end -}}
+
+{{/*
 skafka.hasEnabledExternalListener — true if any listener has type:
 external + (enabled missing or true). Convenience predicate so
 templates don't have to range-fold themselves.

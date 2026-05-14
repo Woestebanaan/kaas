@@ -259,16 +259,17 @@ spec:
           # reconcile manifests. Without this, kubelet kills the broker
           # mid-recovery and the pod CrashLoops.
           # failureThreshold * periodSeconds = 600s = 10 min budget.
+          {{- $probePort := printf "kafka-%s" (include "skafka.primaryListenerName" .) }}
           startupProbe:
             tcpSocket:
-              port: kafka
+              port: {{ $probePort }}
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 60
             timeoutSeconds: 3
           livenessProbe:
             tcpSocket:
-              port: kafka
+              port: {{ $probePort }}
             initialDelaySeconds: 30
             periodSeconds: 10
           readinessProbe:
