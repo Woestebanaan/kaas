@@ -1201,6 +1201,78 @@ func (e *DiskStorageEngine) Read(_ context.Context, topic string, partition int3
 	return out, nil
 }
 
+// ReadSegmentRef returns a (file, offset, length) triple describing a
+// contiguous byte range of the partition's currently-active log segment
+// that covers records starting at startOffset, up to maxBytes of log
+// data. The caller can splice this range straight to the wire via
+// sendfile(2) — that's what this helper exists for (gh #130).
+//
+// ok=true only when the byte range fits within the active segment AND
+// can be located via an exact-or-prefix index lookup (no batch scan
+// required). Specifically:
+//   - startOffset < ps.highWater (data is visible)
+//   - startOffset >= seg.baseOffset (target lives in the active seg)
+//   - searchIndex returned a position that's <= startOffset's true position
+//
+// When ok=false, the caller falls back to Read which materialises bytes
+// in user space. Conditions that flip ok=false:
+//   - startOffset is past HWM (nothing to read)
+//   - startOffset is below the active segment's baseOffset (would need
+//     closed-segment access; not yet supported by splice path)
+//   - active segment has no open log file (partition mid-Relinquish)
+//
+// The returned *os.File is the broker's already-open active-segment
+// handle. The caller MUST NOT Close it; lifecycle is owned by the
+// partition's TakeOver/Relinquish path. A concurrent Relinquish can
+// close the fd underneath the splice syscall, which returns EBADF.
+// Callers surface that as an error to the client (which retries).
+//
+// length covers complete bytes only — Kafka clients tolerate truncated
+// final batches at the tail of a Fetch response by spec, so we don't
+// align to a batch boundary here.
+func (e *DiskStorageEngine) ReadSegmentRef(topic string, partition int32, startOffset int64, maxBytes int) (file *os.File, offset int64, length int, ok bool, err error) {
+	ps, exists := e.getPartition(topic, partition)
+	if !exists {
+		return nil, 0, 0, false, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	seg := ps.active
+	if seg == nil || seg.logFile == nil {
+		return nil, 0, 0, false, nil
+	}
+	if startOffset >= ps.highWater {
+		return nil, 0, 0, false, nil
+	}
+	if startOffset < seg.baseOffset {
+		// Target lives in a closed segment. Splice for closed
+		// segments is a future extension — would need to lazy-open
+		// the file ourselves. Bail to the scan-required path.
+		return nil, 0, 0, false, nil
+	}
+
+	approxPos, _ := searchIndex(seg.indexPath, seg.baseOffset, startOffset)
+	// approxPos is the largest indexed position whose batch starts at or
+	// before startOffset. If the index is empty and startOffset is past
+	// baseOffset, approxPos is 0 (start of file) and the caller would
+	// have to scan to find the right batch — defeats the splice point.
+	if startOffset != seg.baseOffset && approxPos == 0 {
+		return nil, 0, 0, false, nil
+	}
+
+	available := seg.logSize - approxPos
+	if available <= 0 {
+		return nil, 0, 0, false, nil
+	}
+	wantLen := int64(maxBytes)
+	if wantLen > available {
+		wantLen = available
+	}
+	return seg.logFile, approxPos, int(wantLen), true, nil
+}
+
 // DeleteRecords advances the partition's log start offset to (at least)
 // targetOffset. -1 is a sentinel for "current high watermark" (purge
 // everything currently visible). Closed segments whose entire range
