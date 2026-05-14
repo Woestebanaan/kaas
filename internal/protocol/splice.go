@@ -103,27 +103,37 @@ func (t *tcpSplicer) Splice(file *os.File, offset int64, length int) error {
 	off := offset
 	remaining := length
 	var sendErr error
-	ctlErr := rc.Control(func(outFd uintptr) {
-		for remaining > 0 {
-			n, e := unix.Sendfile(int(outFd), int(file.Fd()), &off, remaining)
-			if n > 0 {
-				remaining -= n
-			}
-			if e == nil {
-				continue
-			}
-			if e == unix.EAGAIN || e == unix.EINTR {
-				// Transient; retry the same range. Sendfile advanced
-				// `off` for the partial bytes it did write, so the
-				// next call resumes correctly.
-				continue
-			}
+	// Use Write, not Control: Control runs fn once without netpoll
+	// integration, so EAGAIN (TCP send buffer full) is the caller's
+	// problem to retry — and the only way to wait for writability is
+	// to either spin (bad) or go through netpoll, which Control
+	// doesn't expose. Write blocks via the runtime poller until the
+	// socket is writable, then invokes fn; if fn returns false, Write
+	// re-blocks and retries. That's exactly the loop sendfile needs.
+	writeErr := rc.Write(func(outFd uintptr) (done bool) {
+		n, e := unix.Sendfile(int(outFd), int(file.Fd()), &off, remaining)
+		if n > 0 {
+			remaining -= n
+		}
+		switch e {
+		case nil:
+			return remaining == 0
+		case unix.EAGAIN:
+			// Send buffer full. Return false so rc.Write re-blocks
+			// on the netpoller until the socket is writable again,
+			// then invokes us with the same fd. off has advanced
+			// for partial bytes, so we resume cleanly.
+			return false
+		case unix.EINTR:
+			// Interrupted by a signal before any progress; retry.
+			return false
+		default:
 			sendErr = fmt.Errorf("sendfile: %w", e)
-			return
+			return true
 		}
 	})
-	if ctlErr != nil {
-		return fmt.Errorf("tcpSplicer: SyscallConn.Control: %w", ctlErr)
+	if writeErr != nil {
+		return fmt.Errorf("tcpSplicer: SyscallConn.Write: %w", writeErr)
 	}
 	return sendErr
 }
