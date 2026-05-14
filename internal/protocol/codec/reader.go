@@ -193,6 +193,15 @@ func (r *Reader) ReadBytes() ([]byte, error) {
 }
 
 // ReadNullableBytes reads a length-prefixed byte slice; returns nil if null (length=-1).
+//
+// gh #132: returns a sub-slice of the Reader's underlying frame buffer
+// rather than a copy. On the Produce hot path this drops ~1 GB/s of
+// allocation + memmove pressure (the records section is decoded per
+// partition per request and immediately handed to storage.Append).
+// Callers must finish using the slice before the frame buffer is
+// recycled. Currently every caller (produce, sasl_authenticate,
+// join_group, sync_group) consumes the bytes within request lifetime,
+// so this is safe.
 func (r *Reader) ReadNullableBytes() ([]byte, error) {
 	length, err := r.ReadInt32()
 	if err != nil {
@@ -204,13 +213,13 @@ func (r *Reader) ReadNullableBytes() ([]byte, error) {
 	if err := r.require(int(length)); err != nil {
 		return nil, err
 	}
-	b := make([]byte, length)
-	copy(b, r.buf[r.pos:r.pos+int(length)])
+	b := r.buf[r.pos : r.pos+int(length) : r.pos+int(length)]
 	r.pos += int(length)
 	return b, nil
 }
 
 // ReadCompactBytes reads a uvarint-prefixed byte slice (flexible version APIs).
+// gh #132: zero-copy — see ReadNullableBytes for aliasing semantics.
 func (r *Reader) ReadCompactBytes() ([]byte, error) {
 	u, err := r.ReadUvarint()
 	if err != nil {
@@ -223,13 +232,13 @@ func (r *Reader) ReadCompactBytes() ([]byte, error) {
 	if err := r.require(length); err != nil {
 		return nil, err
 	}
-	b := make([]byte, length)
-	copy(b, r.buf[r.pos:r.pos+length])
+	b := r.buf[r.pos : r.pos+length : r.pos+length]
 	r.pos += length
 	return b, nil
 }
 
 // ReadCompactNullableBytes reads compact bytes; returns nil if null (u=0).
+// gh #132: zero-copy — see ReadNullableBytes for aliasing semantics.
 func (r *Reader) ReadCompactNullableBytes() ([]byte, error) {
 	u, err := r.ReadUvarint()
 	if err != nil {
@@ -242,8 +251,7 @@ func (r *Reader) ReadCompactNullableBytes() ([]byte, error) {
 	if err := r.require(length); err != nil {
 		return nil, err
 	}
-	b := make([]byte, length)
-	copy(b, r.buf[r.pos:r.pos+length])
+	b := r.buf[r.pos : r.pos+length : r.pos+length]
 	r.pos += length
 	return b, nil
 }
