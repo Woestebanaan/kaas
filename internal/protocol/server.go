@@ -259,6 +259,14 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn, listenerTag connstat
 	br := bufio.NewReaderSize(c, 64*1024)
 	bw := bufio.NewWriterSize(c, 64*1024)
 
+	// gh #130: stash a Splicer on ConnState for the lifetime of the
+	// connection. Plaintext *net.TCPConn picks up the kernel-sendfile
+	// path; TLS / non-TCP connections get the copy-fallback. Splicing-
+	// aware handlers (Fetch, in a follow-up PR) consult state.Splicer
+	// and write their response directly via it, returning
+	// ErrResponseWritten so the dispatch loop below skips writeFrame.
+	state.Splicer = NewSplicerFor(c, bw)
+
 	// Close the connection when the server context is cancelled.
 	go func() {
 		<-ctx.Done()
@@ -308,6 +316,21 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn, listenerTag connstat
 		putFrameBuf(bufHandle)
 
 		if err != nil {
+			if errors.Is(err, ErrResponseWritten) {
+				// Splicing-aware handler already wrote the framed
+				// response (correlation prefix + body + any file
+				// splices) directly via state.Splicer. Just flush
+				// any remaining buffered bytes onto the socket and
+				// move on to the next request.
+				if err := bw.Flush(); err != nil {
+					slog.Warn("connection: flushing post-splice response failed (client likely disconnected)",
+						"client", state.ClientID,
+						"api_key", hdr.APIKey,
+						"err", err)
+					return
+				}
+				continue
+			}
 			slog.Error("dispatch error", "api_key", hdr.APIKey, "version", hdr.APIVersion,
 				"client", state.ClientID, "err", err)
 			return

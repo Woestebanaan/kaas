@@ -25,4 +25,17 @@ type ConnState struct {
 	SASLState     auth.SASLExchange // nil until exchange is started
 	IsTLS         bool              // true when the connection arrived on the TLS listener
 	Listener      ListenerName      // which listener received this connection
+
+	// Splicer is non-nil for connections where the server can perform a
+	// kernel-side splice (sendfile(2)) on outgoing response data — today
+	// that's plaintext *net.TCPConn only. Splicing-aware handlers (the
+	// Fetch path, gh #130) check this field and write their response
+	// directly via the splicer instead of materialising it as []byte.
+	// They signal that path by returning protocol.ErrResponseWritten;
+	// the server skips its own writeFrame in response. Concrete type is
+	// any value that implements protocol.Splicer — ConnState carries it
+	// as an interface{} only to avoid a circular import between
+	// connstate and protocol. The protocol package narrows it back to
+	// Splicer at use-site.
+	Splicer any
 }

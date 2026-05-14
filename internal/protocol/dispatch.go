@@ -1,11 +1,20 @@
 package protocol
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/connstate"
 )
+
+// ErrResponseWritten is the sentinel a Handler returns when it has
+// already written the response directly to the underlying connection
+// (typically via the splicer in ConnState.Splicer for gh #130). The
+// dispatcher propagates this verbatim; serveConn checks for it and
+// skips its own writeFrame + Flush. Handler middleware still runs —
+// the error is part of the Handler interface contract, not a bypass.
+var ErrResponseWritten = errors.New("protocol: handler wrote response directly via splicer")
 
 // Handler is a broker-side API handler.
 // It receives the raw request body bytes and the negotiated API version,
@@ -110,6 +119,12 @@ func (d *Dispatcher) Dispatch(hdr RequestHeader, body []byte, connState *connsta
 
 	responseBody, err := reg.handler.Handle(connState, hdr.APIVersion, body)
 	if err != nil {
+		if errors.Is(err, ErrResponseWritten) {
+			// Splicing-aware handler took over: response is already on
+			// the wire. Propagate the sentinel so serveConn skips its
+			// own writeFrame.
+			return nil, err
+		}
 		return nil, fmt.Errorf("handler api_key=%d: %w", hdr.APIKey, err)
 	}
 
