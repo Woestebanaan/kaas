@@ -135,7 +135,23 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 		resp.ThrottleTimeMs = throttleMs
 	}
 
-	w := codec.NewWriter()
+	// Pre-size the encoder buffer. The CPU profile shows ~40% of broker
+	// CPU in runtime.memmove during Fetch, driven by growslice doubling
+	// a buf=nil writer through ~24 reallocations on a 50 MB response.
+	// Estimate: records bytes (already summed for quota) + per-partition
+	// fixed overhead (errorCode, HWM, LSO, LogStart, preferredReplica,
+	// aborted-txn array length, tagged fields, records-length prefix) +
+	// per-topic overhead (compact name + array length + tags) +
+	// top-level header. Conservative — overshooting wastes a few KB
+	// once; undershooting triggers exactly the growslice we're trying
+	// to kill.
+	estimate := totalBytes
+	for _, t := range resp.Responses {
+		estimate += 32 + len(t.Name) // per-topic
+		estimate += 64 * len(t.Partitions)
+	}
+	estimate += 64 // top-level header
+	w := codec.NewWriterWithCap(estimate)
 	api.EncodeFetchResponse(w, resp, version)
 	return w.Bytes(), nil
 }

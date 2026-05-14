@@ -10,6 +10,20 @@ func NewWriter() *Writer {
 	return &Writer{}
 }
 
+// NewWriterWithCap returns a Writer whose backing buffer has at least
+// `cap` bytes of capacity. Callers that can estimate the encoded size
+// up front (Fetch is the obvious one — sum of partition Records bytes
+// + small per-partition / per-topic / per-response overhead) avoid
+// the geometric growslice memmoves that dominate a 50 MB Fetch
+// response. Pass a slight over-estimate; under-shooting falls back to
+// append's normal doubling for the tail.
+func NewWriterWithCap(cap int) *Writer {
+	if cap <= 0 {
+		return &Writer{}
+	}
+	return &Writer{buf: make([]byte, 0, cap)}
+}
+
 func (w *Writer) Bytes() []byte { return w.buf }
 
 // Reset truncates the buffer to zero length while preserving capacity
