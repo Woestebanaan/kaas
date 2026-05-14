@@ -229,6 +229,24 @@ type partitionState struct {
 	committerDone     chan struct{}
 	closing           bool
 
+	// gh #132 item 1 v2: sequence-numbered durability tracking.
+	// nextWriteSeq is incremented (under ps.mu) every time Append
+	// reserves a write position. After pwrite returns, the Append
+	// calls markWriteComplete which advances completedWriteSeq via
+	// a contiguous watermark — that's what lets the committer wait
+	// for "all writes <= flushBarrier are durable in the page cache"
+	// even though pwrite happens outside the partition mutex.
+	//
+	// flushBarriers[N] stores the writeSeq watermark captured at the
+	// moment the Nth flush was requested. The committer pulls the
+	// barrier for the seq it's flushing, waits for completedWriteSeq
+	// to reach it, then calls fsync(2). After fsync returns, every
+	// writeSeq <= that barrier is on durable storage.
+	nextWriteSeq       uint64
+	completedWriteSeq  uint64
+	pendingCompletions map[uint64]struct{}
+	flushBarriers      map[int64]uint64
+
 	// fsyncMaxLatency mirrors Config.FsyncMaxLatency at the moment
 	// startCommitter ran. Per-partition rather than per-engine so the
 	// committer's tight loop doesn't have to chase the engine pointer
@@ -255,6 +273,35 @@ type partitionState struct {
 	// Nil until the first idempotent batch lands so non-idempotent
 	// partitions don't pay the allocation cost.
 	producerStates map[int64]*producerEntry
+}
+
+// markWriteComplete advances the contiguous-completion watermark
+// completedWriteSeq when writeSeq W's pwrite has returned. If W is the
+// next-expected seq, we extend the watermark and consume any further
+// contiguous completions that were stashed out-of-order. Otherwise we
+// stash W in pendingCompletions and let a later in-order completion
+// pick it up. Must be called with ps.mu held.
+//
+// gh #132 item 1 v2: lets the committer wait for "all writes <=
+// barrier are durable in the page cache" even though pwrite happens
+// outside ps.mu and may complete out of reservation order.
+func (ps *partitionState) markWriteComplete(W uint64) {
+	if W == ps.completedWriteSeq+1 {
+		ps.completedWriteSeq = W
+		for {
+			next := ps.completedWriteSeq + 1
+			if _, ok := ps.pendingCompletions[next]; !ok {
+				break
+			}
+			delete(ps.pendingCompletions, next)
+			ps.completedWriteSeq = next
+		}
+		return
+	}
+	if ps.pendingCompletions == nil {
+		ps.pendingCompletions = make(map[uint64]struct{})
+	}
+	ps.pendingCompletions[W] = struct{}{}
 }
 
 // startCommitter spawns the per-partition group-commit goroutine. Must
@@ -294,6 +341,24 @@ func (ps *partitionState) committerLoop() {
 			continue
 		}
 		seqAtStart := ps.requestedFlushSeq
+		// gh #132 item 1 v2: wait for every pwrite that was inflight at
+		// the moment of flush request to land in the page cache before
+		// we issue fsync. flushBarriers[seqAtStart] is the writeSeq
+		// watermark captured under the lock by Append when it requested
+		// the flush. After completedWriteSeq reaches that barrier, the
+		// fsync we're about to issue is guaranteed to cover those bytes.
+		barrier, hasBarrier := ps.flushBarriers[seqAtStart]
+		for hasBarrier && ps.completedWriteSeq < barrier && !ps.closing && ps.flushErr == nil {
+			ps.flushCond.Wait()
+		}
+		if hasBarrier {
+			delete(ps.flushBarriers, seqAtStart)
+		}
+		if ps.closing {
+			ps.mu.Unlock()
+			ps.drainAndExit()
+			return
+		}
 		// Snapshot the logFile pointer (not just the segment) so that
 		// a concurrent Relinquish — which sets ps.active.logFile = nil
 		// after closing — doesn't cause us to deref nil between this
@@ -723,16 +788,27 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 		return -1, fmt.Errorf("storage: %w", err)
 	}
 
+	// gh #132 item 1 v2: phase 1 (under ps.mu) — reserve write position
+	// and bookkeeping. Phase 2 (outside ps.mu) — issue pwrite. Phase 3
+	// (under ps.mu) — mark complete via the seq watermark + optionally
+	// signal the committer. Multiple concurrent Appends to the same
+	// partition can pwrite in parallel because pwrite is positional.
 	ps.mu.Lock()
-	defer ps.mu.Unlock()
 
 	// Epoch fence: caller's epoch must match the partition's stored epoch
 	// when both sides are non-zero. Strict equality matches the plan
 	// pseudocode in §"Append flow" — a caller running ahead of TakeOver
 	// is just as wrong as one running behind.
 	if epoch != 0 && ps.epoch != 0 && uint32(ps.epoch) != epoch {
+		ps.mu.Unlock()
 		return -1, ErrEpochMismatch
 	}
+
+	// Don't fail fast on a sticky ps.flushErr here — new Appends after
+	// a failed cycle deserve their own attempt (the flushErr clears on
+	// the next flush-trigger anyway, matching gh #95's recovery
+	// contract). flushErr is only consulted in the flush-wait below
+	// and during segment-roll-drain.
 
 	// gh #12 stage B: idempotence check before we touch the log.
 	// Runs on the partition mutex so dedupe + offset assignment +
@@ -744,29 +820,81 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	}
 	switch action, savedOffset := classifyIdempotence(ps.producerStates, prodInfo); action {
 	case idemDuplicate:
+		ps.mu.Unlock()
 		return savedOffset, nil
 	case idemOutOfOrder:
+		ps.mu.Unlock()
 		return -1, ErrOutOfOrderSequence
 	case idemInvalidEpoch:
+		ps.mu.Unlock()
 		return -1, ErrInvalidProducerEpoch
 	case idemAccept, idemNotIdempotent:
 		// fall through
+	}
+
+	// If reserving this batch would push the active segment past the
+	// configured size, roll FIRST. The roll needs to drain inflight
+	// pwrites to the old segment before swapping in the new one (so
+	// the old segment's fsync inside rollFast sees all the bytes).
+	if ps.active.logSize+int64(len(rawBatch)) >= e.cfg.SegmentBytes {
+		for ps.completedWriteSeq < ps.nextWriteSeq && !ps.closing && ps.flushErr == nil {
+			ps.flushCond.Wait()
+		}
+		if ps.flushErr != nil {
+			err := ps.flushErr
+			ps.mu.Unlock()
+			return -1, err
+		}
+		if ps.closing {
+			ps.mu.Unlock()
+			return -1, ErrPartitionClosing
+		}
+		if err := e.rollSegment(ctx, ps); err != nil {
+			ps.mu.Unlock()
+			return -1, err
+		}
+		ps.pendingFlushRecords = 0
 	}
 
 	// Brokers own offsets. Producers ship baseOffset=0 (the wire convention);
 	// rewrite to the partition's high watermark before persisting so reads
 	// see strictly-increasing offsets across batches. CRC32C covers
 	// attrs..records (body[9:]), not baseOffset, so the 8-byte overwrite is safe.
-	binary.BigEndian.PutUint64(rawBatch[0:8], uint64(ps.highWater))
+	baseOffset := ps.highWater
+	binary.BigEndian.PutUint64(rawBatch[0:8], uint64(baseOffset))
 
-	baseOffset, lastOffsetDelta, err := parseBatchOffsets(rawBatch)
+	_, lastOffsetDelta, err := parseBatchOffsets(rawBatch)
 	if err != nil {
+		ps.mu.Unlock()
 		return -1, fmt.Errorf("storage: %w", err)
 	}
 
-	if err := ps.active.appendBatch(rawBatch, e.cfg.IndexIntervalBytes); err != nil {
-		return -1, err
+	seg := ps.active
+	writePos := seg.logSize
+	seg.logSize += int64(len(rawBatch))
+	seg.lastOffset = baseOffset + int64(lastOffsetDelta)
+	// Incremental maxTimestamp track (gh #132 part 1) — read the
+	// batch's maxTimestamp from rawBatch[35:43] directly so we don't
+	// need to call segmentMaxTimestamp on segment roll.
+	if len(rawBatch) >= 43 {
+		if ts := int64(binary.BigEndian.Uint64(rawBatch[35:43])); ts > seg.maxTimestamp {
+			seg.maxTimestamp = ts
+		}
 	}
+
+	// Index entry decision is made (and the entry write happens) under
+	// the lock — sparse (every IndexIntervalBytes), tiny (8 B), so it
+	// doesn't extend the critical section meaningfully.
+	var indexEntry [8]byte
+	var indexNeeded bool
+	if seg.logSize-seg.lastIndexedLogPos >= e.cfg.IndexIntervalBytes {
+		relOffset := int32(baseOffset - seg.baseOffset)
+		binary.BigEndian.PutUint32(indexEntry[0:4], uint32(relOffset))
+		binary.BigEndian.PutUint32(indexEntry[4:8], uint32(writePos))
+		seg.lastIndexedLogPos = seg.logSize
+		indexNeeded = true
+	}
+
 	if prodInfo.producerID >= 0 {
 		recordIdempotenceOutcome(ps.producerStates, prodInfo, baseOffset)
 	}
@@ -774,57 +902,100 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	ps.highWaterAtomic.Store(ps.highWater) // gh #134: mirror for lock-free reads
 	ps.pendingFlushRecords += int64(lastOffsetDelta) + 1
 
-	if ps.active.logSize >= e.cfg.SegmentBytes {
-		if err := e.rollSegment(ctx, ps); err != nil {
-			return -1, err
-		}
-		// rollSegment fsyncs the previous segment via roll() and persists
-		// the manifest, so the pending counter is fully discharged.
-		ps.pendingFlushRecords = 0
-		return baseOffset, nil
-	}
+	// Reserve a write seq for the durability barrier.
+	ps.nextWriteSeq++
+	myWriteSeq := ps.nextWriteSeq
 
-	// Group commit (gh #82): instead of running the fsync inline under
-	// ps.mu — which serialises every concurrent Appender to the same
-	// partition through one round-trip — we hand the request to a
-	// committer goroutine and wait for our seq to be acknowledged.
-	// Concurrent Appends that arrive before the committer's lock-and-
-	// fsync cycle starts share that single fsync. On wifi/NFS where
-	// each fsync round-trip is the dominant cost, this turns N
-	// serial fsyncs into 1 (best case) or O(N/batch_arrival_rate)
-	// in steady state.
+	// Snapshot the file handles so a concurrent Relinquish (which
+	// sets active.logFile = nil) can't race us into a nil deref.
+	logFile := seg.logFile
+	indexFile := seg.indexFile
+
+	// Decide flush trigger under the lock — captures the barrier.
+	var triggeredFlushSeq int64
 	if e.cfg.FlushIntervalMessages > 0 && ps.pendingFlushRecords >= e.cfg.FlushIntervalMessages {
 		// Clear any stale error from a previous cycle (gh #95). flushErr
 		// is "sticky" so concurrent appenders that piggybacked onto a
 		// failed cycle all see the same error — but a NEW request that
 		// arrives after the failed cycle completed should not fail
 		// immediately on a leftover sentinel; it deserves its own
-		// fresh attempt. Without this, ErrStorageStalled (or any
-		// transient EBADF from a Relinquish race) would lock the
-		// partition into a permanent error state until restart.
+		// fresh attempt.
 		ps.flushErr = nil
 		ps.requestedFlushSeq++
-		mySeq := ps.requestedFlushSeq
+		triggeredFlushSeq = ps.requestedFlushSeq
 		ps.pendingFlushRecords = 0
-		// Non-blocking signal — if the channel already has a pending
-		// signal, the committer's next iteration will pick up our
-		// updated requestedFlushSeq anyway.
+		// Record the writeSeq barrier this flush has to wait for.
+		// Anything reserved up to nextWriteSeq must be durable in the
+		// page cache before the fsync runs.
+		if ps.flushBarriers == nil {
+			ps.flushBarriers = make(map[int64]uint64)
+		}
+		ps.flushBarriers[triggeredFlushSeq] = ps.nextWriteSeq
+	}
+	ps.mu.Unlock()
+
+	// Phase 2: outside the lock. Issue the actual pwrite. Multiple
+	// concurrent Appends on the same partition reach this point with
+	// different writePos values — pwrite is positional, the kernel
+	// serialises the page-cache writes internally, and there's no
+	// userspace contention.
+	var writeErr error
+	if logFile != nil {
+		if _, err := logFile.WriteAt(rawBatch, writePos); err != nil {
+			writeErr = err
+		}
+	} else {
+		writeErr = fmt.Errorf("storage: log file closed during append")
+	}
+	if writeErr == nil && indexNeeded && indexFile != nil {
+		// Index file writes are small + sparse; let the kernel order
+		// them. Failures here are non-fatal (the index is rebuildable
+		// from the log on takeover) but still mark the partition's
+		// flushErr so the next caller can decide what to do.
+		if _, err := indexFile.Write(indexEntry[:]); err != nil {
+			writeErr = err
+		}
+	}
+
+	// Phase 3: re-acquire lock briefly to mark our pwrite complete and
+	// notify the committer + any in-progress flush waiters.
+	ps.mu.Lock()
+	if writeErr != nil {
+		if ps.flushErr == nil {
+			ps.flushErr = writeErr
+		}
+		// Still mark our seq complete so the watermark advances and
+		// the committer / segment-roll waiters don't deadlock on us.
+		ps.markWriteComplete(myWriteSeq)
+		ps.flushCond.Broadcast()
+		ps.mu.Unlock()
+		return -1, writeErr
+	}
+	ps.markWriteComplete(myWriteSeq)
+	ps.flushCond.Broadcast()
+
+	if triggeredFlushSeq > 0 {
+		// We triggered a flush. Signal the committer (non-blocking;
+		// committer's next iteration picks up requestedFlushSeq) and
+		// wait for the fsync to cover our seq.
 		select {
 		case ps.flushReqCh <- struct{}{}:
 		default:
 		}
-		// Wait for our seq to be flushed, the partition to close, or
-		// a sticky fsync error to surface.
-		for ps.completedFlushSeq < mySeq && !ps.closing && ps.flushErr == nil {
+		for ps.completedFlushSeq < triggeredFlushSeq && !ps.closing && ps.flushErr == nil {
 			ps.flushCond.Wait()
 		}
 		if ps.flushErr != nil {
-			return -1, ps.flushErr
+			err := ps.flushErr
+			ps.mu.Unlock()
+			return -1, err
 		}
-		if ps.closing && ps.completedFlushSeq < mySeq {
+		if ps.closing && ps.completedFlushSeq < triggeredFlushSeq {
+			ps.mu.Unlock()
 			return -1, ErrPartitionClosing
 		}
 	}
+	ps.mu.Unlock()
 
 	return baseOffset, nil
 }
