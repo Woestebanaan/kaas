@@ -1201,76 +1201,139 @@ func (e *DiskStorageEngine) Read(_ context.Context, topic string, partition int3
 	return out, nil
 }
 
-// ReadSegmentRef returns a (file, offset, length) triple describing a
-// contiguous byte range of the partition's currently-active log segment
-// that covers records starting at startOffset, up to maxBytes of log
-// data. The caller can splice this range straight to the wire via
-// sendfile(2) — that's what this helper exists for (gh #130).
+// ReadSegmentRef returns a (file, offset, length, cleanup) triple
+// describing a contiguous byte range of one of the partition's log
+// segments (active OR closed) that covers records starting at
+// startOffset, up to maxBytes of log data. The caller can splice this
+// range straight to the wire via sendfile(2) — that's what this
+// helper exists for (gh #130).
 //
-// ok=true only when the byte range fits within the active segment AND
-// can be located via an exact-or-prefix index lookup (no batch scan
-// required). Specifically:
+// ok=true when:
 //   - startOffset < ps.highWater (data is visible)
-//   - startOffset >= seg.baseOffset (target lives in the active seg)
+//   - the target segment (active or closed) can be located AND
 //   - searchIndex returned a position that's <= startOffset's true position
 //
 // When ok=false, the caller falls back to Read which materialises bytes
-// in user space. Conditions that flip ok=false:
-//   - startOffset is past HWM (nothing to read)
-//   - startOffset is below the active segment's baseOffset (would need
-//     closed-segment access; not yet supported by splice path)
-//   - active segment has no open log file (partition mid-Relinquish)
+// in user space.
 //
-// The returned *os.File is the broker's already-open active-segment
-// handle. The caller MUST NOT Close it; lifecycle is owned by the
-// partition's TakeOver/Relinquish path. A concurrent Relinquish can
-// close the fd underneath the splice syscall, which returns EBADF.
-// Callers surface that as an error to the client (which retries).
+// cleanup is non-nil ONLY when the returned file is a lazy-opened
+// closed-segment fd. The caller MUST invoke cleanup() after the splice
+// is complete to release the fd. For active segments (cleanup==nil),
+// the caller MUST NOT Close the file — lifecycle is owned by the
+// partition's TakeOver/Relinquish path.
+//
+// On NFS, holding a fd to a closed segment is briefly visible to the
+// retention cleaner: when the cleaner runs `os.Remove` while this fd
+// is open, NFS silly-renames the file. The cleanup() runs immediately
+// after sendfile so the window is bounded to one fetch's duration —
+// acceptable trade for the ~10× memmove cost saved by splicing
+// historical reads.
 //
 // length covers complete bytes only — Kafka clients tolerate truncated
 // final batches at the tail of a Fetch response by spec, so we don't
-// align to a batch boundary here.
-func (e *DiskStorageEngine) ReadSegmentRef(topic string, partition int32, startOffset int64, maxBytes int) (file *os.File, offset int64, length int, ok bool, err error) {
+// align to a batch boundary here. The returned range never crosses a
+// segment boundary; callers can issue a follow-up Fetch at
+// startOffset+returned-batches' end-offset to continue into the next
+// segment.
+func (e *DiskStorageEngine) ReadSegmentRef(topic string, partition int32, startOffset int64, maxBytes int) (file *os.File, offset int64, length int, cleanup func(), ok bool, err error) {
 	ps, exists := e.getPartition(topic, partition)
 	if !exists {
-		return nil, 0, 0, false, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
+		return nil, 0, 0, nil, false, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	seg := ps.active
-	if seg == nil || seg.logFile == nil {
-		return nil, 0, 0, false, nil
-	}
 	if startOffset >= ps.highWater {
-		return nil, 0, 0, false, nil
-	}
-	if startOffset < seg.baseOffset {
-		// Target lives in a closed segment. Splice for closed
-		// segments is a future extension — would need to lazy-open
-		// the file ourselves. Bail to the scan-required path.
-		return nil, 0, 0, false, nil
+		return nil, 0, 0, nil, false, nil
 	}
 
-	approxPos, _ := searchIndex(seg.indexPath, seg.baseOffset, startOffset)
+	active := ps.active
+	if active == nil {
+		return nil, 0, 0, nil, false, nil
+	}
+
+	// Closed-segment case: startOffset is in a segment older than the
+	// active one. Look up the closed segment containing startOffset and
+	// lazy-open it. Cleanup is the caller's responsibility — pass the
+	// returned cleanup func to the splice driver so the fd closes the
+	// moment sendfile finishes.
+	if startOffset < active.baseOffset {
+		closed, found := findClosedSegmentLocked(ps, startOffset)
+		if !found {
+			// startOffset is below the lowest closed segment (probably
+			// got truncated by retention while in flight). Bail.
+			return nil, 0, 0, nil, false, nil
+		}
+		approxPos, _ := searchIndex(closed.indexPath, closed.baseOffset, startOffset)
+		if startOffset != closed.baseOffset && approxPos == 0 {
+			return nil, 0, 0, nil, false, nil
+		}
+		fi, statErr := os.Stat(closed.logPath)
+		if statErr != nil {
+			return nil, 0, 0, nil, false, nil
+		}
+		segSize := fi.Size()
+		available := segSize - approxPos
+		if available <= 0 {
+			return nil, 0, 0, nil, false, nil
+		}
+		// Don't cross into the next segment: clamp wantLen to what's
+		// left in THIS file. Clients re-issue Fetch from the next
+		// offset to walk into the next segment.
+		wantLen := int64(maxBytes)
+		if wantLen > available {
+			wantLen = available
+		}
+		f, openErr := os.Open(closed.logPath)
+		if openErr != nil {
+			return nil, 0, 0, nil, false, nil
+		}
+		return f, approxPos, int(wantLen), func() { _ = f.Close() }, true, nil
+	}
+
+	// Active-segment case: same as before, no cleanup needed.
+	if active.logFile == nil {
+		return nil, 0, 0, nil, false, nil
+	}
+	approxPos, _ := searchIndex(active.indexPath, active.baseOffset, startOffset)
 	// approxPos is the largest indexed position whose batch starts at or
 	// before startOffset. If the index is empty and startOffset is past
 	// baseOffset, approxPos is 0 (start of file) and the caller would
 	// have to scan to find the right batch — defeats the splice point.
-	if startOffset != seg.baseOffset && approxPos == 0 {
-		return nil, 0, 0, false, nil
+	if startOffset != active.baseOffset && approxPos == 0 {
+		return nil, 0, 0, nil, false, nil
 	}
 
-	available := seg.logSize - approxPos
+	available := active.logSize - approxPos
 	if available <= 0 {
-		return nil, 0, 0, false, nil
+		return nil, 0, 0, nil, false, nil
 	}
 	wantLen := int64(maxBytes)
 	if wantLen > available {
 		wantLen = available
 	}
-	return seg.logFile, approxPos, int(wantLen), true, nil
+	return active.logFile, approxPos, int(wantLen), nil, true, nil
+}
+
+// findClosedSegmentLocked walks ps.segments (sorted by baseOffset
+// ascending) and returns the closed segment that contains startOffset,
+// i.e., the segment with the largest baseOffset that is <= startOffset.
+// Caller must hold ps.mu.
+func findClosedSegmentLocked(ps *partitionState, startOffset int64) (segmentMeta, bool) {
+	if len(ps.segments) == 0 {
+		return segmentMeta{}, false
+	}
+	// Linear walk from the back — typical bench reads progress forward,
+	// so the most recently-read closed segment is the most likely hit.
+	// With 24 segments the scan is trivial; if this ever shows up in a
+	// profile, switch to sort.Search.
+	for i := len(ps.segments) - 1; i >= 0; i-- {
+		if ps.segments[i].baseOffset <= startOffset {
+			return ps.segments[i], true
+		}
+	}
+	return segmentMeta{}, false
 }
 
 // DeleteRecords advances the partition's log start offset to (at least)

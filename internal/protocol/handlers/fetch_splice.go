@@ -23,17 +23,21 @@ import (
 // other backends without on-disk segments don't, and the splice path
 // falls through to standard Handle.
 type segmentRefReader interface {
-	ReadSegmentRef(topic string, partition int32, startOffset int64, maxBytes int) (file *os.File, offset int64, length int, ok bool, err error)
+	ReadSegmentRef(topic string, partition int32, startOffset int64, maxBytes int) (file *os.File, offset int64, length int, cleanup func(), ok bool, err error)
 }
 
 // fetchPartitionSlice is the splice-path equivalent of a
 // FetchPartitionResponse. Records are replaced by a (file, offset,
 // length) tuple that the dispatcher's Splicer hands to sendfile(2).
+// cleanup is non-nil when the file is a lazy-opened closed-segment
+// fd that must be Closed after the splice completes; it's nil when
+// the file is the partition's owned active-segment fd.
 type fetchPartitionSlice struct {
-	resp   api.FetchPartitionResponse // ErrorCode + HWM + LastStableOffset etc. — Records stays nil
-	file   *os.File
-	offset int64
-	length int
+	resp    api.FetchPartitionResponse // ErrorCode + HWM + LastStableOffset etc. — Records stays nil
+	file    *os.File
+	offset  int64
+	length  int
+	cleanup func()
 }
 
 // HandleSplicing is the gh #130 sendfile path for Fetch. Builds a
@@ -124,7 +128,7 @@ func (h *FetchHandler) HandleSplicing(conn *connstate.ConnState, hdr protocol.Re
 			pr.LastStableOffset = hwm
 			pr.LogStartOffset, _ = h.store.LogStartOffset(topic.Name, p.PartitionIndex)
 
-			file, offset, length, refOK, refErr := refReader.ReadSegmentRef(topic.Name, p.PartitionIndex, p.FetchOffset, int(p.PartitionMaxBytes))
+			file, offset, length, cleanup, refOK, refErr := refReader.ReadSegmentRef(topic.Name, p.PartitionIndex, p.FetchOffset, int(p.PartitionMaxBytes))
 			if refErr != nil {
 				if errors.Is(refErr, storage.ErrUnknownPartition) {
 					pr.ErrorCode = int16(codec.ErrNotLeaderOrFollower)
@@ -136,14 +140,13 @@ func (h *FetchHandler) HandleSplicing(conn *connstate.ConnState, hdr protocol.Re
 				return nil // unexpected storage error: fall back
 			}
 			if !refOK {
-				// Either nothing to read (past HWM, closed seg, etc.)
+				// Either nothing to read (past HWM, retention truncated)
 				// or splice not eligible. Bail to standard path: the
-				// Read-based handler covers cross-segment and partial-
-				// batch-scan cases.
+				// Read-based handler covers cross-segment partial scans.
 				return nil
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
-			sliceTable = append(sliceTable, fetchPartitionSlice{resp: pr, file: file, offset: offset, length: length})
+			sliceTable = append(sliceTable, fetchPartitionSlice{resp: pr, file: file, offset: offset, length: length, cleanup: cleanup})
 			mx.TopicTraffic.RecordFetch(topic.Name, 0, int64(length))
 		}
 		resp.Responses = append(resp.Responses, topicResp)
@@ -157,6 +160,17 @@ func (h *FetchHandler) HandleSplicing(conn *connstate.ConnState, hdr protocol.Re
 	if throttleMs := h.quotas.CheckFetchQuota(principal, totalBytes); throttleMs > 0 {
 		resp.ThrottleTimeMs = throttleMs
 	}
+
+	// Ensure lazy-opened closed-segment fds get released after the
+	// splice completes. Active-segment slices have cleanup==nil and
+	// this is a no-op for them.
+	defer func() {
+		for _, s := range sliceTable {
+			if s.cleanup != nil {
+				s.cleanup()
+			}
+		}
+	}()
 
 	// Encode the response, splicing records sections from disk on the
 	// wire. We use codec.Writer for the body and frame-prefix bytes,
