@@ -27,17 +27,25 @@ type segmentRefReader interface {
 }
 
 // fetchPartitionSlice is the splice-path equivalent of a
-// FetchPartitionResponse. Records are replaced by a (file, offset,
-// length) tuple that the dispatcher's Splicer hands to sendfile(2).
-// cleanup is non-nil when the file is a lazy-opened closed-segment
-// fd that must be Closed after the splice completes; it's nil when
-// the file is the partition's owned active-segment fd.
+// FetchPartitionResponse. Records can take one of three shapes:
+//   - (file, offset, length) tuple — emitted via splicer.Splice (sendfile)
+//   - recordBytes []byte           — emitted via splicer.Write (gh #135 per-partition
+//     fallback for splice-ineligible partitions; this used to bail
+//     the entire multi-partition fetch back to the standard path)
+//   - length == 0, file == nil, recordBytes == nil — no records (error
+//     response, past HWM, etc.)
+//
+// cleanup is non-nil when the file is a lazy-opened closed-segment fd
+// that must be Closed after the splice completes; it's nil when the
+// file is the partition's owned active-segment fd OR when recordBytes
+// is the records source.
 type fetchPartitionSlice struct {
-	resp    api.FetchPartitionResponse // ErrorCode + HWM + LastStableOffset etc. — Records stays nil
-	file    *os.File
-	offset  int64
-	length  int
-	cleanup func()
+	resp        api.FetchPartitionResponse // ErrorCode + HWM + LastStableOffset etc. — Records stays nil
+	file        *os.File
+	offset      int64
+	length      int
+	cleanup     func()
+	recordBytes []byte
 }
 
 // HandleSplicing is the gh #130 sendfile path for Fetch. Builds a
@@ -140,10 +148,22 @@ func (h *FetchHandler) HandleSplicing(conn *connstate.ConnState, hdr protocol.Re
 				return nil // unexpected storage error: fall back
 			}
 			if !refOK {
-				// Either nothing to read (past HWM, retention truncated)
-				// or splice not eligible. Bail to standard path: the
-				// Read-based handler covers cross-segment partial scans.
-				return nil
+				// Splice-ineligible partition (mid-segment with sparse-
+				// index gap, past HWM, retention truncated, etc.). gh #135:
+				// fall back to storage.Read for THIS partition only —
+				// other partitions in the same multi-partition fetch
+				// still go through sendfile. Pre-#135 a single bad
+				// partition bailed the whole fetch into the byte-copy
+				// path, killing splice's amortised benefit on 16-
+				// partition fetches.
+				bytes, readErr := h.store.Read(context.Background(), topic.Name, p.PartitionIndex, p.FetchOffset, int(p.PartitionMaxBytes))
+				if readErr != nil {
+					return nil // unexpected: bail whole request
+				}
+				topicResp.Partitions = append(topicResp.Partitions, pr)
+				sliceTable = append(sliceTable, fetchPartitionSlice{resp: pr, recordBytes: bytes, length: len(bytes)})
+				mx.TopicTraffic.RecordFetch(topic.Name, 0, int64(len(bytes)))
+				continue
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 			sliceTable = append(sliceTable, fetchPartitionSlice{resp: pr, file: file, offset: offset, length: length, cleanup: cleanup})

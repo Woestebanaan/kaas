@@ -163,17 +163,27 @@ func writeFetchResponseWithSplices(hdr protocol.RequestHeader, version int16, re
 			}
 			emit.WriteUvarint(uint64(recLen) + 1)
 
-			// Flush header bytes accumulated so far, then splice the
-			// records, then reset the writer for the next partition's
+			// Flush header bytes accumulated so far, then emit the
+			// records section (splice from disk, OR write the
+			// materialised bytes if this partition fell back per
+			// gh #135). Reset the writer for the next partition's
 			// trailing tagged fields + next-partition header.
 			if _, err := splicer.Write(emit.Bytes()); err != nil {
 				return fmt.Errorf("fetch splice: write partition header: %w", err)
 			}
 			emit.Reset()
 
-			if sliceIdx < len(slices) && slices[sliceIdx].file != nil && slices[sliceIdx].length > 0 {
-				if err := splicer.Splice(slices[sliceIdx].file, slices[sliceIdx].offset, slices[sliceIdx].length); err != nil {
-					return fmt.Errorf("fetch splice: splice partition %d: %w", p.PartitionIndex, err)
+			if sliceIdx < len(slices) {
+				s := &slices[sliceIdx]
+				switch {
+				case s.file != nil && s.length > 0:
+					if err := splicer.Splice(s.file, s.offset, s.length); err != nil {
+						return fmt.Errorf("fetch splice: splice partition %d: %w", p.PartitionIndex, err)
+					}
+				case len(s.recordBytes) > 0:
+					if _, err := splicer.Write(s.recordBytes); err != nil {
+						return fmt.Errorf("fetch splice: write fallback records partition %d: %w", p.PartitionIndex, err)
+					}
 				}
 			}
 			sliceIdx++
