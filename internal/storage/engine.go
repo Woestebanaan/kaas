@@ -851,10 +851,13 @@ func (e *DiskStorageEngine) rollSegment(ctx context.Context, ps *partitionState)
 		baseOffset: ps.active.baseOffset,
 		logPath:    ps.active.logPath,
 		indexPath:  ps.active.indexPath,
-	}
-	// Capture maxTimestamp from the last batch in the segment.
-	if ts, err := segmentMaxTimestamp(closed.logPath); err == nil {
-		closed.maxTimestamp = ts
+		// gh #132: use the running maxTimestamp from activeSegment instead
+		// of re-scanning the closed log. The scan held ps.mu for seconds
+		// on a 1 GiB segment and was the dominant p99 spike on the
+		// matched-substrate Strimzi bench. The cleaner still falls back
+		// to segmentMaxTimestamp on segments restored from disk (where
+		// the running value isn't available).
+		maxTimestamp: ps.active.maxTimestamp,
 	}
 
 	oldActive := ps.active

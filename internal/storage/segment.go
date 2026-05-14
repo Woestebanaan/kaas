@@ -38,6 +38,12 @@ type activeSegment struct {
 	logSize           int64
 	lastOffset        int64
 	lastIndexedLogPos int64 // log position at which the last index entry was written
+	// maxTimestamp is the highest batch-header maxTimestamp seen so far.
+	// Tracked incrementally in appendBatch so rollSegment can copy it onto
+	// segmentMeta without re-scanning the closed segment (gh #132 — the
+	// scan held ps.mu for ~8 s on a 1 GiB segment, dominating p99 on the
+	// matched-substrate bench against Strimzi).
+	maxTimestamp int64
 }
 
 // segmentLogPath returns the .log file path for a segment.
@@ -284,6 +290,15 @@ func (s *activeSegment) appendBatch(raw []byte, indexIntervalBytes int64) error 
 
 	s.logSize += int64(len(raw))
 	s.lastOffset = baseOffset + int64(lastOffsetDelta)
+	// gh #132: track running maxTimestamp incrementally. Layout matches
+	// segmentMaxTimestamp's scan: full batch offset [35:43] holds the
+	// batch's maxTimestamp big-endian. Cheap (8-byte read per batch); saves
+	// the synchronous re-scan in rollSegment.
+	if len(raw) >= 43 {
+		if ts := int64(binary.BigEndian.Uint64(raw[35:43])); ts > s.maxTimestamp {
+			s.maxTimestamp = ts
+		}
+	}
 	return nil
 }
 
