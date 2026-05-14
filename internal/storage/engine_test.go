@@ -104,7 +104,7 @@ func TestEngineAppendDoesNotConsultLeaseIsLeader(t *testing.T) {
 	// fails on the underlying segment write doesn't matter for this
 	// test; what matters is that it does NOT return ErrNotLeader.
 	batch := make([]byte, 27)
-	_, err = e.Append(context.Background(), "t", 0, 1, batch)
+	_, err = e.Append(context.Background(), "t", 0, 1, -1, batch)
 	if errors.Is(err, ErrNotLeader) {
 		t.Errorf("Append returned ErrNotLeader — the lease.IsLeader gate is still in place (gh #75 regression)")
 	}

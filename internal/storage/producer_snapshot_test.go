@@ -140,11 +140,11 @@ func TestEngineProducerStateSurvivesReopen(t *testing.T) {
 	}
 
 	// Producer writes two batches at PID=42, epoch=0.
-	first, err := e1.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 0, 0, 5))
+	first, err := e1.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(42, 0, 0, 5))
 	if err != nil {
 		t.Fatalf("seed 1: %v", err)
 	}
-	second, err := e1.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 0, 5, 5))
+	second, err := e1.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(42, 0, 5, 5))
 	if err != nil {
 		t.Fatalf("seed 2: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestEngineProducerStateSurvivesReopen(t *testing.T) {
 
 	// Producer's in-flight retry of the SECOND batch must dedupe
 	// to the original baseOffset, not be treated as out-of-order.
-	retry, err := e2.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 0, 5, 5))
+	retry, err := e2.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(42, 0, 5, 5))
 	if err != nil {
 		t.Fatalf("post-restart retry: %v (B2 snapshot did not restore dedupe window)", err)
 	}
@@ -202,7 +202,7 @@ func TestEngineProducerStateRestoresAcrossDifferentEpoch(t *testing.T) {
 	}
 
 	// Establish PID=99 at epoch=5 with a batch landed.
-	if _, err := e1.Append(context.Background(), "t", 0, 1, idempotentBatch(99, 5, 0, 3)); err != nil {
+	if _, err := e1.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(99, 5, 0, 3)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := e1.Relinquish("t", 0); err != nil {
@@ -219,7 +219,7 @@ func TestEngineProducerStateRestoresAcrossDifferentEpoch(t *testing.T) {
 
 	// Zombie producer at older epoch=4 attempts to write — must
 	// get InvalidProducerEpoch (47), not appear as a fresh PID.
-	_, err = e2.Append(context.Background(), "t", 0, 1, idempotentBatch(99, 4, 3, 3))
+	_, err = e2.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(99, 4, 3, 3))
 	if !errors.Is(err, ErrInvalidProducerEpoch) {
 		t.Errorf("post-restart zombie err=%v, want ErrInvalidProducerEpoch (B2 did not persist epoch)", err)
 	}

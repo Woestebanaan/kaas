@@ -41,7 +41,7 @@ func TestDeleteRecordsAdvancesLogStart(t *testing.T) {
 				Value:       make([]byte, 256),
 			}},
 		}
-		if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+		if _, err := e.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -114,7 +114,7 @@ func TestDeleteRecords_HighWatermarkSentinel(t *testing.T) {
 			ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
 			Records:    []recordbatch.Record{{OffsetDelta: 0, Value: []byte("z")}},
 		}
-		if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+		if _, err := e.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -162,7 +162,7 @@ func TestDeleteRecords_CompletePurgeReclaimsActive(t *testing.T) {
 				Value:       make([]byte, 4096),
 			}},
 		}
-		if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+		if _, err := e.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -192,7 +192,7 @@ func TestDeleteRecords_CompletePurgeReclaimsActive(t *testing.T) {
 		ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
 		Records: []recordbatch.Record{{OffsetDelta: 0, Value: []byte("post-purge")}},
 	}
-	if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 		t.Errorf("append after purge: %v", err)
 	}
 }
@@ -232,7 +232,7 @@ func TestDeleteRecords_RepurgeReclaimsStrandedActive(t *testing.T) {
 				Value:       make([]byte, 4096),
 			}},
 		}
-		if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+		if _, err := e.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}

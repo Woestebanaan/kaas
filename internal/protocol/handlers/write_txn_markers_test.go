@@ -21,7 +21,7 @@ type markerAppend struct {
 	batchLen  int
 }
 
-func (s *fakeMarkerStore) Append(_ context.Context, topic string, partition int32, _ uint32, batch []byte) (int64, error) {
+func (s *fakeMarkerStore) Append(_ context.Context, topic string, partition int32, _ uint32, _ int16, batch []byte) (int64, error) {
 	s.appends = append(s.appends, markerAppend{topic, partition, len(batch)})
 	if s.err != nil {
 		return 0, s.err

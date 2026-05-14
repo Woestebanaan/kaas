@@ -57,7 +57,7 @@ func TestRollDoesNotStallConcurrentAppends(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			if _, err := e.Append(context.Background(), "t", 0, 1, mkBatch()); err != nil {
+			if _, err := e.Append(context.Background(), "t", 0, 1, -1, mkBatch()); err != nil {
 				t.Errorf("append: %v", err)
 			}
 		}()

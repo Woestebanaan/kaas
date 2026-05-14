@@ -119,7 +119,7 @@ func TestTakeOverPreservesGenuineLogStartWhenSegmentsExist(t *testing.T) {
 	value := make([]byte, 500)
 	for i := 0; i < 30; i++ {
 		batch := simpleBatch(int64(i), value)
-		if _, err := e.Append(context.Background(), "real", 0, 1, batch); err != nil {
+		if _, err := e.Append(context.Background(), "real", 0, 1, -1, batch); err != nil {
 			t.Fatalf("append i=%d: %v", i, err)
 		}
 	}

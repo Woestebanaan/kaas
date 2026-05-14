@@ -46,7 +46,7 @@ func TestGroupCommitCoalescesConcurrentAppends(t *testing.T) {
 			Records: []recordbatch.Record{{OffsetDelta: 0, Value: []byte("x")}},
 		})
 	}
-	if _, err := e.Append(context.Background(), "t", 0, 1, batch(0)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, batch(0)); err != nil {
 		t.Fatalf("baseline append: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestGroupCommitCoalescesConcurrentAppends(t *testing.T) {
 	for i := 0; i < concurrency; i++ {
 		go func() {
 			defer wg.Done()
-			if _, err := e.Append(context.Background(), "t", 0, 1, batch(0)); err != nil {
+			if _, err := e.Append(context.Background(), "t", 0, 1, -1, batch(0)); err != nil {
 				t.Errorf("concurrent append: %v", err)
 			}
 		}()
@@ -96,7 +96,7 @@ func TestGroupCommitDurabilityHoldsAcrossRestart(t *testing.T) {
 
 	const n = 8
 	for i := 0; i < n; i++ {
-		_, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, &recordbatch.RecordBatch{
+		_, err := e.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, &recordbatch.RecordBatch{
 			BaseOffset: int64(i), LastOffsetDelta: 0,
 			ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
 			Records: []recordbatch.Record{{OffsetDelta: 0, Value: []byte("y")}},

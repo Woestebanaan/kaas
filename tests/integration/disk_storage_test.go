@@ -83,7 +83,7 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		batch := makeBatch(int64(i*10), 10)
 		allBatches = append(allBatches, batch)
-		base, err := engine.Append(ctx, "test-topic", 0, 0, batch)
+		base, err := engine.Append(ctx, "test-topic", 0, 0, -1, batch)
 		if err != nil {
 			t.Fatalf("Append batch %d: %v", i, err)
 		}
@@ -155,7 +155,7 @@ func TestReadFromOffset(t *testing.T) {
 	b1 := makeBatch(10, 10)
 	b2 := makeBatch(20, 10)
 	for _, b := range [][]byte{b0, b1, b2} {
-		if _, err := engine.Append(ctx, "topic", 0, 0, b); err != nil {
+		if _, err := engine.Append(ctx, "topic", 0, 0, -1, b); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -184,10 +184,10 @@ func TestRecoveryAfterPartialWrite(t *testing.T) {
 
 	b0 := makeBatch(0, 5)
 	b1 := makeBatch(5, 5)
-	if _, err := engine.Append(ctx, "topic", 0, 0, b0); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, -1, b0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Append(ctx, "topic", 0, 0, b1); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, -1, b1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -296,7 +296,7 @@ func TestSegmentRollAndRead(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		b := makeBatch(int64(i*5), 5)
 		allBatches = append(allBatches, b)
-		if _, err := engine.Append(ctx, "topic", 0, 0, b); err != nil {
+		if _, err := engine.Append(ctx, "topic", 0, 0, -1, b); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -326,7 +326,7 @@ func TestPartitionSizeReflectsAppends(t *testing.T) {
 	}
 
 	before := engine.PartitionSize("topic", 0)
-	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 10)); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, -1, makeBatch(0, 10)); err != nil {
 		t.Fatal(err)
 	}
 	after := engine.PartitionSize("topic", 0)
@@ -359,7 +359,7 @@ func TestAppendAssignsOffsets(t *testing.T) {
 	recordCounts := []int{1, 1, 3}
 	for i, n := range recordCounts {
 		// Caller always sends baseOffset=0, like a real producer.
-		base, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, n))
+		base, err := engine.Append(ctx, "topic", 0, 0, -1, makeBatch(0, n))
 		if err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
@@ -415,7 +415,7 @@ func TestAppendEpochFenceRejectsStaleCaller(t *testing.T) {
 	}
 
 	// Pre-fence: epoch=0 caller works fine (backwards compat).
-	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 1)); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, -1, makeBatch(0, 1)); err != nil {
 		t.Fatalf("Append(epoch=0) before TakeOver: %v", err)
 	}
 
@@ -425,22 +425,22 @@ func TestAppendEpochFenceRejectsStaleCaller(t *testing.T) {
 	}
 
 	// Caller at the matching epoch succeeds.
-	if _, err := engine.Append(ctx, "topic", 0, 5, makeBatch(0, 1)); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 5, -1, makeBatch(0, 1)); err != nil {
 		t.Errorf("Append(epoch=5) after TakeOver(5): unexpected err %v", err)
 	}
 
 	// Caller at a stale epoch is rejected.
-	if _, err := engine.Append(ctx, "topic", 0, 4, makeBatch(0, 1)); !errors.Is(err, storage.ErrEpochMismatch) {
+	if _, err := engine.Append(ctx, "topic", 0, 4, -1, makeBatch(0, 1)); !errors.Is(err, storage.ErrEpochMismatch) {
 		t.Errorf("Append(epoch=4) after TakeOver(5): want ErrEpochMismatch, got %v", err)
 	}
 
 	// Caller running ahead is also rejected (strict equality — plan §"Append flow").
-	if _, err := engine.Append(ctx, "topic", 0, 6, makeBatch(0, 1)); !errors.Is(err, storage.ErrEpochMismatch) {
+	if _, err := engine.Append(ctx, "topic", 0, 6, -1, makeBatch(0, 1)); !errors.Is(err, storage.ErrEpochMismatch) {
 		t.Errorf("Append(epoch=6) after TakeOver(5): want ErrEpochMismatch, got %v", err)
 	}
 
 	// epoch=0 still works as the v2.6 compat sentinel.
-	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 1)); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, -1, makeBatch(0, 1)); err != nil {
 		t.Errorf("Append(epoch=0) after TakeOver: should still work for v2.6 callers; got %v", err)
 	}
 }
@@ -476,7 +476,7 @@ func TestFlushPolicyDataSurvivesCrash(t *testing.T) {
 
 	// Single Append, then drop the engine without a clean close —
 	// simulates the broker process being SIGKILL'd between batches.
-	if _, err := e.Append(ctx, "topic", 0, 0, makeBatch(0, 5)); err != nil {
+	if _, err := e.Append(ctx, "topic", 0, 0, -1, makeBatch(0, 5)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
@@ -524,7 +524,7 @@ func TestFlushPolicyDisabledDelaysSync(t *testing.T) {
 	// First Append creates the manifest at openPartition with HWM=0.
 	// With flushing disabled, subsequent Appends do NOT update the manifest
 	// until the segment rolls — so the on-disk HWM stays at 0.
-	if _, err := e.Append(ctx, "topic", 0, 0, makeBatch(0, 3)); err != nil {
+	if _, err := e.Append(ctx, "topic", 0, 0, -1, makeBatch(0, 3)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	data, err := os.ReadFile(dir + "/topic/0/manifest.json")
@@ -560,7 +560,7 @@ func TestManifestPersistedAcrossRestart(t *testing.T) {
 		t.Fatalf("TakeOver: %v", err)
 	}
 	for i := 0; i < 5; i++ {
-		if _, err := engine.Append(ctx, "topic", 0, 1, makeBatch(int64(i*10), 10)); err != nil {
+		if _, err := engine.Append(ctx, "topic", 0, 1, -1, makeBatch(int64(i*10), 10)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 	}
@@ -607,7 +607,7 @@ func TestTakeOverWritesManifestEpoch(t *testing.T) {
 	if err := engine.CreatePartition("topic", 0); err != nil {
 		t.Fatalf("CreatePartition: %v", err)
 	}
-	if _, err := engine.Append(ctx, "topic", 0, 0, makeBatch(0, 3)); err != nil {
+	if _, err := engine.Append(ctx, "topic", 0, 0, -1, makeBatch(0, 3)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 

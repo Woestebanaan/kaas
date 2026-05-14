@@ -123,7 +123,7 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 			}
 
 			appendStart := time.Now()
-			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, epoch, pd.Records)
+			baseOffset, err := h.store.Append(context.Background(), td.Name, pd.Index, epoch, req.Acks, pd.Records)
 			mx.WriteLatency.Record(context.Background(), time.Since(appendStart).Seconds(),
 				metric.WithAttributes(attribute.String("topic", td.Name)))
 			if err != nil {

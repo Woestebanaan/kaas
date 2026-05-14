@@ -106,7 +106,7 @@ func TestCompactionEmitsRunMetric(t *testing.T) {
 				{OffsetDelta: 0, Key: key, Value: value},
 			},
 		})
-		if _, err := e.Append(context.Background(), "kt", 0, 1, batch); err != nil {
+		if _, err := e.Append(context.Background(), "kt", 0, 1, -1, batch); err != nil {
 			t.Fatalf("append i=%d: %v", i, err)
 		}
 	}

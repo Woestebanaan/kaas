@@ -106,7 +106,7 @@ func TestTxnFailoverFencesZombieAcrossBrokers(t *testing.T) {
 
 	// --- Old session writes to broker C at (p=7777, epoch=0). ---
 	// Engine C now has producerStates[7777].epoch=0.
-	if _, err := leaderEngine.Append(ctx, "payments", 0, 1, idempotentBatch(7777, 0, 0, 5)); err != nil {
+	if _, err := leaderEngine.Append(ctx, "payments", 0, 1, -1, idempotentBatch(7777, 0, 0, 5)); err != nil {
 		t.Fatalf("old session write: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestTxnFailoverFencesZombieAcrossBrokers(t *testing.T) {
 
 	// --- Zombie batch at (p, 0) — old session's in-flight. ---
 	// Must be rejected: engine C's producerStates[7777].epoch is now 1.
-	_, zombieErr := leaderEngine.Append(ctx, "payments", 0, 1, idempotentBatch(7777, 0, 5, 1))
+	_, zombieErr := leaderEngine.Append(ctx, "payments", 0, 1, -1, idempotentBatch(7777, 0, 5, 1))
 	if !errors.Is(zombieErr, storage.ErrInvalidProducerEpoch) {
 		t.Errorf("zombie at epoch=0 got err=%v, want ErrInvalidProducerEpoch — gh #108 phase 2 fence didn't propagate",
 			zombieErr)
@@ -157,7 +157,7 @@ func TestTxnFailoverFencesZombieAcrossBrokers(t *testing.T) {
 	// the cache to epoch=1 and cleared the dedupe window, so a fresh
 	// (firstSeq=0, count=5) batch is appended cleanly even though
 	// the old session sent the same sequence range.
-	if _, err := leaderEngine.Append(ctx, "payments", 0, 1, idempotentBatch(7777, 1, 0, 5)); err != nil {
+	if _, err := leaderEngine.Append(ctx, "payments", 0, 1, -1, idempotentBatch(7777, 1, 0, 5)); err != nil {
 		t.Errorf("new session at epoch=1: %v (fence cleared recent[] but rejected the new batch?)", err)
 	}
 }
@@ -187,7 +187,7 @@ func TestTxnFenceBroadcastDedupesAcrossTicks(t *testing.T) {
 		t.Fatalf("takeover: %v", err)
 	}
 	// Seed the engine's producerStates with PID=42 epoch=0.
-	if _, err := leaderEngine.Append(ctx, "t", 0, 1, idempotentBatch(42, 0, 0, 1)); err != nil {
+	if _, err := leaderEngine.Append(ctx, "t", 0, 1, -1, idempotentBatch(42, 0, 0, 1)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestTxnFenceBroadcastDedupesAcrossTicks(t *testing.T) {
 	}
 
 	// Verify the fence was applied: a zombie at (42, 0) must be rejected.
-	_, err = leaderEngine.Append(ctx, "t", 0, 1, idempotentBatch(42, 0, 1, 1))
+	_, err = leaderEngine.Append(ctx, "t", 0, 1, -1, idempotentBatch(42, 0, 1, 1))
 	if !errors.Is(err, storage.ErrInvalidProducerEpoch) {
 		t.Errorf("post-watcher zombie at epoch=0 got err=%v, want ErrInvalidProducerEpoch", err)
 	}

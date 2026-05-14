@@ -15,7 +15,7 @@ import (
 // path, since a control batch is just a record batch with the
 // isControl bit set.
 type WriteTxnMarkersStore interface {
-	Append(ctx context.Context, topic string, partition int32, epoch uint32, batchBytes []byte) (int64, error)
+	Append(ctx context.Context, topic string, partition int32, epoch uint32, acks int16, batchBytes []byte) (int64, error)
 }
 
 // WriteTxnMarkersOwnership reports whether this broker leads
@@ -96,7 +96,10 @@ func (h *WriteTxnMarkersHandler) writeMarker(topic string, partition int32, batc
 	}
 	// epoch=0 for control batches — they're idempotence-exempt
 	// (baseSequence=-1 in the encoded batch).
-	if _, err := h.store.Append(context.Background(), topic, partition, 0, batch); err != nil {
+	// Control markers commit transactions — they must be durable before
+	// the broker acks the WriteTxnMarkers request to the transaction
+	// coordinator. acks=-1 (all) waits for the fsync.
+	if _, err := h.store.Append(context.Background(), topic, partition, 0, -1, batch); err != nil {
 		slog.Warn("write-txn-markers: appending a control batch (COMMIT/ABORT marker) failed (consumers in read_committed mode will not see the transaction's records as committed until the producer retries; client receives UNKNOWN_SERVER_ERROR and TransactionCoordinator retries)",
 			"topic", topic, "partition", partition, "err", err)
 		return int16(codec.ErrUnknownServerError)

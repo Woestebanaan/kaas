@@ -99,7 +99,7 @@ func TestStartupOpensWithoutFileHandles(t *testing.T) {
 		ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
 		Records:    []recordbatch.Record{{OffsetDelta: 0, Value: []byte("x")}},
 	}
-	if _, err := e1.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+	if _, err := e1.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if err := e1.ClosePartition("t", 0); err != nil {
@@ -190,7 +190,7 @@ func TestFollowerDoesNotBlockLeaderUnlink(t *testing.T) {
 				OffsetDelta: 0, Value: make([]byte, 1024),
 			}},
 		}
-		if _, err := leader.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+		if _, err := leader.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}

@@ -55,7 +55,7 @@ func newIdempotenceEngine(t *testing.T) *DiskStorageEngine {
 func TestEngineIdempotentAppendDeduplicatesRetry(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
-	first, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(11, 0, 0, 5))
+	first, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(11, 0, 0, 5))
 	if err != nil {
 		t.Fatalf("first append: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestEngineIdempotentAppendDeduplicatesRetry(t *testing.T) {
 		t.Errorf("first baseOffset=%d, want 0", first)
 	}
 
-	retry, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(11, 0, 0, 5))
+	retry, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(11, 0, 0, 5))
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -84,11 +84,11 @@ func TestEngineIdempotentAppendDeduplicatesRetry(t *testing.T) {
 func TestEngineIdempotentAppendOutOfOrderReturnsErr45(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(22, 0, 0, 5)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(22, 0, 0, 5)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// Skip ahead past 5..9 — broker should reject 10..14.
-	_, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(22, 0, 10, 5))
+	_, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(22, 0, 10, 5))
 	if !errors.Is(err, ErrOutOfOrderSequence) {
 		t.Errorf("err=%v, want ErrOutOfOrderSequence", err)
 	}
@@ -101,11 +101,11 @@ func TestEngineIdempotentAppendStaleEpochReturnsErr47(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
 	// Establish PID=33 at epoch=2.
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(33, 2, 0, 5)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(33, 2, 0, 5)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// Zombie at epoch=1 tries to write.
-	_, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(33, 1, 5, 5))
+	_, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(33, 1, 5, 5))
 	if !errors.Is(err, ErrInvalidProducerEpoch) {
 		t.Errorf("err=%v, want ErrInvalidProducerEpoch", err)
 	}
@@ -117,14 +117,14 @@ func TestEngineIdempotentAppendStaleEpochReturnsErr47(t *testing.T) {
 func TestEngineIdempotentAppendEpochBumpAccepted(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(44, 0, 0, 5)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(44, 0, 0, 5)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(44, 0, 5, 5)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(44, 0, 5, 5)); err != nil {
 		t.Fatalf("seed2: %v", err)
 	}
 	// Producer reinitialised — same PID, epoch++, seq back to 0.
-	off, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(44, 1, 0, 5))
+	off, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(44, 1, 0, 5))
 	if err != nil {
 		t.Fatalf("epoch-bump append: %v", err)
 	}
@@ -143,11 +143,11 @@ func TestEngineIdempotentAppendEpochBumpAccepted(t *testing.T) {
 func TestEngineNonIdempotentAppendStillWorks(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
-	first, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(-1, -1, -1, 3))
+	first, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(-1, -1, -1, 3))
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	second, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(-1, -1, -1, 3))
+	second, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(-1, -1, -1, 3))
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestFenceProducerEpochUpdatesAllPartitions(t *testing.T) {
 	// Producer P=99 writes one batch on EACH partition at epoch=0.
 	// Each partition's producerStates now records epoch=0.
 	for _, p := range []int32{0, 1, 2} {
-		if _, err := e.Append(context.Background(), "t", p, 1, idempotentBatch(99, 0, 0, 1)); err != nil {
+		if _, err := e.Append(context.Background(), "t", p, 1, -1, idempotentBatch(99, 0, 0, 1)); err != nil {
 			t.Fatalf("seed p%d: %v", p, err)
 		}
 	}
@@ -198,7 +198,7 @@ func TestFenceProducerEpochUpdatesAllPartitions(t *testing.T) {
 	// rejected — even partitions the "new session" has not yet
 	// written to. That's the gap B + #22 alone leave open.
 	for _, p := range []int32{0, 1, 2} {
-		_, err := e.Append(context.Background(), "t", p, 1, idempotentBatch(99, 0, 5, 1))
+		_, err := e.Append(context.Background(), "t", p, 1, -1, idempotentBatch(99, 0, 5, 1))
 		if !errors.Is(err, ErrInvalidProducerEpoch) {
 			t.Errorf("p%d: zombie at epoch=0 got err=%v, want ErrInvalidProducerEpoch (#30 fence missed it)", p, err)
 		}
@@ -214,7 +214,7 @@ func TestFenceProducerEpochClearsRecentWindow(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
 	// Old session: P=77, epoch=0, write seq 0..4.
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(77, 0, 0, 5)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(77, 0, 0, 5)); err != nil {
 		t.Fatalf("old session: %v", err)
 	}
 
@@ -223,7 +223,7 @@ func TestFenceProducerEpochClearsRecentWindow(t *testing.T) {
 	// New session at epoch=1 writes seq 0..4 (sequence resets
 	// on epoch bump per the producer client). Must land as a
 	// fresh batch, NOT dedupe against the old epoch-0 batch.
-	off, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(77, 1, 0, 5))
+	off, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(77, 1, 0, 5))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -240,14 +240,14 @@ func TestFenceProducerEpochSkipsLowerEpoch(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
 	// PID=88 writes at epoch=2.
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(88, 2, 0, 3)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(88, 2, 0, 3)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	// Spurious fence at lower epoch — must be a no-op.
 	e.FenceProducerEpoch(88, 1)
 
 	// Original epoch-2 producer continues — must NOT be fenced.
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(88, 2, 3, 3)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(88, 2, 3, 3)); err != nil {
 		t.Errorf("legit epoch-2 batch fenced by spurious lower-epoch call: %v", err)
 	}
 }
@@ -268,27 +268,27 @@ func TestEngineRejoinFenceClosesZombieWindow(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
 	// Session 1: PID=42, epoch=0 — write 3 records.
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 0, 0, 3)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(42, 0, 0, 3)); err != nil {
 		t.Fatalf("session1 seed: %v", err)
 	}
 
 	// Session 2 starts (gh #22 bump): PID=42, epoch=1 — writes 5
 	// records starting from seq=0 (a fresh epoch resets the
 	// sequence counter on the producer side).
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 1, 0, 5)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(42, 1, 0, 5)); err != nil {
 		t.Fatalf("session2 first batch: %v", err)
 	}
 
 	// Zombie from session 1's in-flight queue: PID=42, epoch=0,
 	// seq=3 (continuing where the seed left off). MUST be fenced.
-	_, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 0, 3, 2))
+	_, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(42, 0, 3, 2))
 	if !errors.Is(err, ErrInvalidProducerEpoch) {
 		t.Errorf("zombie batch err=%v, want ErrInvalidProducerEpoch (gh #22 fence missed it)", err)
 	}
 
 	// Sanity: session 2 keeps working — the zombie's reject
 	// didn't poison the per-PID state.
-	if _, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(42, 1, 5, 3)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(42, 1, 5, 3)); err != nil {
 		t.Errorf("session2 continued append after fence: %v", err)
 	}
 }
@@ -300,11 +300,11 @@ func TestEngineRejoinFenceClosesZombieWindow(t *testing.T) {
 func TestEngineIdempotentDifferentProducersDontInterfere(t *testing.T) {
 	e := newIdempotenceEngine(t)
 
-	pidA, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(55, 0, 0, 5))
+	pidA, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(55, 0, 0, 5))
 	if err != nil {
 		t.Fatalf("A: %v", err)
 	}
-	pidB, err := e.Append(context.Background(), "t", 0, 1, idempotentBatch(66, 0, 0, 5))
+	pidB, err := e.Append(context.Background(), "t", 0, 1, -1, idempotentBatch(66, 0, 0, 5))
 	if err != nil {
 		t.Fatalf("B: %v", err)
 	}

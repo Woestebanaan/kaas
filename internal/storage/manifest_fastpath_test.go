@@ -49,7 +49,7 @@ func TestOpenPartitionTrustsManifest(t *testing.T) {
 			Records:         []recordbatch.Record{{OffsetDelta: 0, Value: []byte("x")}},
 		}
 		raw := recordbatch.Encode(nil, batch)
-		if _, err := e.Append(context.Background(), "t", 0, 1, raw); err != nil {
+		if _, err := e.Append(context.Background(), "t", 0, 1, -1, raw); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -125,7 +125,7 @@ func TestOpenPartitionFallsBackToScanWhenNoManifest(t *testing.T) {
 			ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
 			Records: []recordbatch.Record{{OffsetDelta: 0, Value: []byte("y")}},
 		}
-		if _, err := e.Append(context.Background(), "t", 0, 1, recordbatch.Encode(nil, batch)); err != nil {
+		if _, err := e.Append(context.Background(), "t", 0, 1, -1, recordbatch.Encode(nil, batch)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}

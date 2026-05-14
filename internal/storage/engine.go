@@ -80,7 +80,17 @@ var (
 // plumbs the parameter; the fence is wired together with the BrokerCoordinator
 // in Phase 4. Pass 0 to skip the fence under v2.6 callers.
 type StorageEngine interface {
-	Append(ctx context.Context, topic string, partition int32, epoch uint32, batchBytes []byte) (baseOffset int64, err error)
+	// Append writes batchBytes to (topic, partition). The acks parameter
+	// is the producer's acks field from the Produce request: -1 means
+	// "wait for the batch to be on durable storage before returning"
+	// (Apache Kafka's acks=all on a single-broker RF=1 deploy); 0 and 1
+	// mean "return as soon as the bytes are accepted into the leader's
+	// log" (page cache, not necessarily fsynced). Skafka honours the
+	// distinction by skipping the per-batch flush wait when acks != -1
+	// — the committer still runs in the background on its threshold,
+	// the Append just doesn't block on it. Matches Apache's
+	// acks=1 semantics (gh #132).
+	Append(ctx context.Context, topic string, partition int32, epoch uint32, acks int16, batchBytes []byte) (baseOffset int64, err error)
 	Read(ctx context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]byte, error)
 	HighWatermark(topic string, partition int32) (int64, error)
 	LogStartOffset(topic string, partition int32) (int64, error)
@@ -783,7 +793,7 @@ func (e *DiskStorageEngine) DeletePartition(topic string, partition int32) error
 // assignment_watch.go's file-validation half. epoch==0 is the v2.6
 // compatibility sentinel ("no fence configured"), as is ps.epoch==0 (no
 // TakeOver has run since the partition was opened).
-func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition int32, epoch uint32, rawBatch []byte) (int64, error) {
+func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition int32, epoch uint32, acks int16, rawBatch []byte) (int64, error) {
 	if len(rawBatch) == 0 {
 		hwm, _ := e.HighWatermark(topic, partition)
 		return hwm, nil
@@ -1026,23 +1036,30 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 
 	if triggeredFlushSeq > 0 {
 		// We triggered a flush. Signal the committer (non-blocking;
-		// committer's next iteration picks up requestedFlushSeq) and
-		// wait for the fsync to cover our seq.
+		// committer's next iteration picks up requestedFlushSeq).
 		select {
 		case ps.flushReqCh <- struct{}{}:
 		default:
 		}
-		for ps.completedFlushSeq < triggeredFlushSeq && !ps.closing && ps.flushErr == nil {
-			ps.flushCond.Wait()
-		}
-		if ps.flushErr != nil {
-			err := ps.flushErr
-			ps.mu.Unlock()
-			return -1, err
-		}
-		if ps.closing && ps.completedFlushSeq < triggeredFlushSeq {
-			ps.mu.Unlock()
-			return -1, ErrPartitionClosing
+		// Only acks=-1 (all) requires waiting for the fsync to land on
+		// durable storage. acks=0/1 ack as soon as the bytes are in the
+		// leader's log (page cache), per Apache Kafka's contract — the
+		// committer still fsyncs in the background, the request just
+		// doesn't sit on it. This is what closed most of the throughput
+		// gap to Strimzi on the matched-substrate bench.
+		if acks == -1 {
+			for ps.completedFlushSeq < triggeredFlushSeq && !ps.closing && ps.flushErr == nil {
+				ps.flushCond.Wait()
+			}
+			if ps.flushErr != nil {
+				err := ps.flushErr
+				ps.mu.Unlock()
+				return -1, err
+			}
+			if ps.closing && ps.completedFlushSeq < triggeredFlushSeq {
+				ps.mu.Unlock()
+				return -1, ErrPartitionClosing
+			}
 		}
 	}
 	ps.mu.Unlock()

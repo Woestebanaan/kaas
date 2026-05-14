@@ -45,7 +45,7 @@ func (r *recordingStorage) Relinquish(topic string, partition int32) error {
 	return nil
 }
 
-func (r *recordingStorage) Append(_ context.Context, _ string, _ int32, _ uint32, _ []byte) (int64, error) {
+func (r *recordingStorage) Append(_ context.Context, _ string, _ int32, _ uint32, _ int16, _ []byte) (int64, error) {
 	panic("recordingStorage: Append unexpectedly called")
 }
 func (r *recordingStorage) Read(_ context.Context, _ string, _ int32, _ int64, _ int) ([]byte, error) {

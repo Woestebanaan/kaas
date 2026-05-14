@@ -51,7 +51,7 @@ func TestCompactPartitionDedupesByKey(t *testing.T) {
 				{OffsetDelta: 0, Key: []byte(key), Value: value},
 			},
 		})
-		if _, err := e.Append(context.Background(), "ktbl", 0, 1, batch); err != nil {
+		if _, err := e.Append(context.Background(), "ktbl", 0, 1, -1, batch); err != nil {
 			t.Fatalf("append i=%d: %v", i, err)
 		}
 	}
@@ -159,7 +159,7 @@ func TestCompactPartitionPreservesNullKeyedRecords(t *testing.T) {
 			ProducerID: -1, ProducerEpoch: -1, BaseSequence: -1,
 			Records: []recordbatch.Record{{OffsetDelta: 0, Key: key, Value: value}},
 		})
-		if _, err := e.Append(context.Background(), "mixed", 0, 1, batch); err != nil {
+		if _, err := e.Append(context.Background(), "mixed", 0, 1, -1, batch); err != nil {
 			t.Fatalf("append i=%d: %v", i, err)
 		}
 	}

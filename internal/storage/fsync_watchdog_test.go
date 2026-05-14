@@ -125,7 +125,7 @@ func TestCommitterFsyncStallSurfacesAsErrStorageStalled(t *testing.T) {
 	})
 
 	start := time.Now()
-	_, err = e.Append(context.Background(), "t", 0, 1, batch)
+	_, err = e.Append(context.Background(), "t", 0, 1, -1, batch)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrStorageStalled) {
@@ -201,7 +201,7 @@ func TestCommitterStalledClearsAfterRecovery(t *testing.T) {
 			Records: []recordbatch.Record{{OffsetDelta: 0, Value: []byte("x")}},
 		})
 	}
-	if _, err := e.Append(context.Background(), "t", 0, 1, batch(0)); !errors.Is(err, ErrStorageStalled) {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, batch(0)); !errors.Is(err, ErrStorageStalled) {
 		t.Fatalf("Append #1 err=%v, want ErrStorageStalled", err)
 	}
 	if !e.AnyStalled() {
@@ -216,7 +216,7 @@ func TestCommitterStalledClearsAfterRecovery(t *testing.T) {
 	mu.Unlock()
 	close(gate) // drain the orphan from phase 1's Sync call
 
-	if _, err := e.Append(context.Background(), "t", 0, 1, batch(1)); err != nil {
+	if _, err := e.Append(context.Background(), "t", 0, 1, -1, batch(1)); err != nil {
 		t.Fatalf("Append #2 (recovery): %v", err)
 	}
 	if e.AnyStalled() {

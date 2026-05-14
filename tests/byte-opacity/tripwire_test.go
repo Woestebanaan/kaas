@@ -77,7 +77,7 @@ func TestStorageRoundTripIsByteIdentical(t *testing.T) {
 		batch := buildBatch(t, baseOffset, c.numRecords, c.compression)
 		baseOffset += int64(c.numRecords)
 
-		if _, err := store.Append(ctx, "byteopacity-topic", 0, 0, batch); err != nil {
+		if _, err := store.Append(ctx, "byteopacity-topic", 0, 0, -1, batch); err != nil {
 			t.Fatalf("[%s] Append: %v", c.name, err)
 		}
 		combined = append(combined, batch...)

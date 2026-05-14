@@ -60,7 +60,7 @@ func TestOpenPartitionToleratesEmptyIndex(t *testing.T) {
 			}},
 		}
 		raw := recordbatch.Encode(nil, batch)
-		if _, err := e.Append(context.Background(), "t", 0, 1, raw); err != nil {
+		if _, err := e.Append(context.Background(), "t", 0, 1, -1, raw); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
