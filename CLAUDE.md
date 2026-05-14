@@ -33,7 +33,7 @@ Releases are tag-driven; see `RELEASING.md`. **Always bump the patch (`v0.1.N-pr
 
 skafka is a from-scratch Kafka-protocol-compatible broker that runs on Kubernetes. Two binaries ship in this repo:
 
-- **`cmd/skafka`** — the broker (port 9092 plaintext, 9093 TLS, 8080 health, 9094 inter-broker heartbeat gRPC).
+- **`cmd/skafka`** — the broker. Listeners are declared via the `SKAFKA_LISTENERS` JSON env (gh #126); the chart emits one entry per `.Values.listeners[]` item. Fixed ports: 8080 health, 9094 inter-broker heartbeat gRPC.
 - **`cmd/skafka-operator`** — a controller-runtime operator that reconciles 4 CRDs into on-disk config files (auth/topics) and Kubernetes plumbing (TLS routes, etc.).
 
 There are also two helper binaries for tests/diagnostics: `cmd/skafka-failover-probe` and `cmd/skafka-fsync-check`.
@@ -98,18 +98,37 @@ The Java producer enables idempotence by default since Kafka 3.0, so every `kafk
 
 `GroupTakeoverDriver.OnAssignmentChange` runs both a prev→next diff AND an orphan sweep (`m.groups` keys ⊆ `nextOurs`). The sweep keeps memory bounded across alive-set churn and fixes the gh #89 stale-`--list` symptom. `ListGroups` and `DescribeGroups` filter by `isCoordinator` so a stale `m.groups` entry on a non-coordinator broker isn't visible to clients via the AdminClient's union across brokers.
 
+### Listeners, authentication, authorization (gh #124, #125, #126)
+
+Three orthogonal axes, Strimzi 1:1:
+
+- **`type`**: `internal` (in-cluster only) vs `external` (Gateway + cert-manager + per-broker hostnames). One listener per axis combination is normal — keep `plain` anonymous for in-cluster bench/UI traffic and add an `authed` SCRAM listener side-by-side.
+- **`tls`**: `false` / `true`. `mtls` authentication implies `tls: true`; everything else is independent.
+- **`authentication.type`**: `none` / `scram-sha-512` / `mtls` / `plain`. Each listener gets its own `auth.AuthEngine` selected via `AuthEngineSelector.For(listenerName)` in `internal/auth/auth.go`. Anonymous listeners use `AllowAllAuthEngine` (no SASL handshake, no principal); authenticated listeners use `RealAuthEngine` and pre-gate connections via `AuthEngine.RequiresPreAuth()` in `internal/protocol/dispatch.go` so a client must finish SASL before any non-handshake API is dispatched.
+
+**Authentication is per-listener; authorization is cluster-wide.** That split lives in three interfaces in `internal/auth/auth.go`:
+
+- `Authorizer.Authorize(principal, operation, resource)` — wired via `SKAFKA_AUTHORIZATION_TYPE` (`""` = none → `AllowAllAuthorizer`; `simple` = ACL-based → `RealAuthEngine`). `SKAFKA_SUPER_USERS` (comma-separated `User:foo,User:bar`) wraps the chosen authorizer in `SuperUserAuthorizer` for early-allow.
+- `QuotaChecker.CheckProduceQuota` / `CheckFetchQuota` — defaults to `NoQuotaChecker`; switches to `RealAuthEngine`'s quotas when auth is enabled. Quotas fire **regardless of authorization** — they're orthogonal.
+
+Produce/Fetch handlers route exclusively via `h.authorizer.Authorize(...)` + `h.quotas.CheckProduceQuota(...)` — they don't reach back into the per-listener engine. This is what lets `plain` (anonymous) and `authed` (SCRAM) listeners share the same ACL/quota policy.
+
+**Per-listener Metadata advertisement (gh #125)**: each `BrokerEndpoint` carries a `ListenerPorts map[string]int32`; `addressFor` looks up the port matching the request's listener so a client that bootstrapped on :9095 gets back :9095 in the Metadata response, not :9092. Without this, an authed-listener client got routed back to the anonymous listener and looped on SCRAM retry. The listener name on the connection is propagated via `connstate.ListenerName` (free-form string — no predefined `Internal`/`External`/`Authed` constants; the chart picks the names).
+
+**Quota debt-carry (gh #125)**: the token bucket carries negative balances forward as debt instead of clamping at 0. With clamping, N concurrent clients each saw a "full" bucket and burst at N×rate before throttle kicked in (the 16-vs-10 MiB/s gap observed under bench-perf). Removing the clamp matches KIP-13. Test: `TestQuotaMultiClientContention` in `internal/auth/quota_test.go`.
+
 ### KafkaTopic delete on NFS
 
 When a `KafkaTopic` CR is deleted, `metadata.deletionTimestamp` goes non-nil. The topic-watcher fires `TopicDeleted` *immediately* (rather than waiting for the K8s `Deleted` event after finalizers clear); the broker calls `engine.ClosePartition` for each partition to drop its open log + index file handles on the leader broker (followers don't have them open per the previous section). Without this, NFS silly-renames the open files into `.nfsXXXX` entries that EBUSY the operator's `unlinkat` on the parent directory forever (gh #76). The topic-watcher also routes the initial reconcile through `processEvent` so brokers coming up while CRs are already mid-deletion close their handles on startup, not just on watch events.
 
 ### Code map
 
-- `internal/protocol/` — Kafka wire protocol. `codec/` (frames, primitives, CRC32C, per-API request/response types under `codec/api/`), `dispatch.go`, `server.go` (TCP listener + TLS), and `handlers/` (one file per API: `produce.go`, `fetch.go`, `metadata.go`, `consumer_group.go` (incl. DeleteGroups gh #89), `list_offsets.go`, `admin.go`, `sasl.go`, `api_versions.go`, `init_producer_id.go` (gh #12)).
+- `internal/protocol/` — Kafka wire protocol. `codec/` (frames, primitives, CRC32C, per-API request/response types under `codec/api/`), `dispatch.go` (per-listener pre-auth gate via `engines.For(conn.Listener).RequiresPreAuth()`), `server.go` (multi-listener TCP/TLS bring-up driven by `Config.Listeners []ListenerConfig`), and `handlers/` (one file per API: `produce.go`, `fetch.go`, `metadata.go` (per-listener port advertisement, gh #125), `consumer_group.go` (incl. DeleteGroups gh #89), `list_offsets.go`, `admin.go`, `sasl.go` (per-listener engine selector, gh #124), `api_versions.go`, `init_producer_id.go` (gh #12)).
 - `internal/storage/` — `DiskStorageEngine` with segment files, manifest, watcher, and cleaner. Single-writer enforcement is `BrokerCoordinator.Owns` + epoch-prefixed segment filenames (the old per-partition flock was removed in Phase 4). `idempotence.go` + `producer_snapshot.go` carry the gh #12 idempotent-producer state — see "Idempotent producer" above. See "Storage hot path & file-handle ownership" for the group-commit / lazy-open / async-roll-finalize semantics — those are easy to miss if you read the engine code in isolation.
 - `internal/coordinator/` — Kafka consumer-group coordinator (group state, offset commits). Offsets persisted under `dataDir`. Group ownership comes from a `GroupAssignmentSource` — see "Consumer-group coordinator routing" above for the gh #92 hash-fallthrough. `txn_state.go` carries the gh #22 transactional-id rejoin map.
 - `internal/broker/` — broker glue: `Broker` struct, the on-broker `Coordinator` (assignment.json watcher with hash-fallthrough OwnsGroup/GroupCoordinator, gh #92), `controller_watch.go` (1s poll of controller Lease for current epoch), `self_fence.go`, `takeover.go`, `group_takeover.go` (incl. orphan sweep, gh #89), `group_hash.go` (gh #92 deterministic coordinator), `heartbeat_client.go`.
 - `internal/controller/` — controller-side logic (election, balancer, assignment writer, heartbeat server, k8s CR mirror).
-- `internal/auth/` — SCRAM-SHA-256/512, mTLS principal extraction, ACL evaluation, quotas. Loads from `/data/__cluster/credentials.json` and `acls.json` (written by the operator) with hot-reload via `ClusterFileWatcher`. Toggle off with `SKAFKA_AUTH_DISABLED=true`.
+- `internal/auth/` — SCRAM-SHA-256/512, mTLS principal extraction, ACL evaluation, quotas. Loads from `/data/__cluster/credentials.json` and `acls.json` (written by the operator) with hot-reload via `ClusterFileWatcher`. Toggle off with `SKAFKA_AUTH_DISABLED=true`. Public interfaces (gh #124/#126): `AuthEngine` (+ `RequiresPreAuth`), `AuthEngineSelector` (per-listener engine map), `Authorizer` (cluster-wide; `AllowAllAuthorizer` / `SuperUserAuthorizer` / `RealAuthEngine`), `QuotaChecker` (`NoQuotaChecker` / `RealAuthEngine`). Quota debt-carry algorithm in `quota.go` (gh #125).
 - `internal/k8s/` — broker-side K8s helpers: `BrokerRegistry` (watches the headless service for peer endpoints), `BrokerIdentity` (parses the ordinal out of the StatefulSet pod name), `TopicWatcher` (fires `TopicDeleted` on `deletionTimestamp` so the broker can close handles before the operator's finalizer reconciles), `ReadinessUpdater` (satisfies the `skafka.io/PartitionsReady` readiness gate once partition directories have been created on the PVC).
 - `internal/observability/` — OTLP metrics + tracing bootstrap (push-mode to Prometheus's native OTLP receiver), `/healthz` HTTP handler with rich runtime state, `byteopacity.go` tripwire counters.
 - `operator/api/v1alpha1/` — CRD types (kubebuilder annotations live here; `make manifests` regenerates `deploy/crds/*.yaml` and mirrors them to the Helm chart).
@@ -125,3 +144,9 @@ Per-partition data lives at `/data/<topic>/<partition>/` with epoch-prefixed seg
 ### Helm chart & deployment
 
 `deploy/helm/skafka/` is the source of truth for production config (replicas, controller-Lease tuning, storage class, image repos). The chart bundles its CRDs in `crds/` (auto-generated by `make manifests`). Helm intentionally does not upgrade CRDs across releases — see the chart's `README.md` for the upgrade procedure.
+
+**Listeners are a Strimzi-shape array (gh #126).** `.Values.listeners` is `[]listener` where each entry has its own `name` (free-form), `port`, `type` (`internal` / `external`), `tls`, `authentication.type`, and an optional `enabled` flag (absence = enabled — only `external` and `authed` ship as `enabled: false` defaults). Templates iterate this array to emit (a) the StatefulSet containerPorts + `SKAFKA_LISTENERS` JSON env, (b) headless + ClusterIP Service ports, (c) the NOTES.txt bootstrap-host output. Helpers in `_helpers.tpl`: `skafka.listenersJSON`, `skafka.findListener`, `skafka.firstByType`, `skafka.hasEnabledExternalListener`, `skafka.superUsersList`. **The KafkaCluster CR template still synthesizes the legacy single-listener shape** via `skafka.firstByType` for backwards-compat with the operator — a follow-up will refactor the operator side to consume the array natively.
+
+Cluster-wide authorization lives at `.Values.authorization.{type,superUsers}` (top-level, not nested under any listener). `type: ""` (default) leaves authorization off (`AllowAllAuthorizer`); `type: simple` enables ACL enforcement via `RealAuthEngine`. `superUsers` (list of `User:foo` strings) is emitted as `SKAFKA_SUPER_USERS` and wraps whatever authorizer the broker picked in `SuperUserAuthorizer`.
+
+**Storage substrate**: the chart accepts `storage.accessMode: ReadWriteOnce` + a local-path class for single-broker deployments (the k3s overlay does this — RWX-NFS was the source of perf-bench DeadlineExceeded errors during saturation tests). Multi-broker requires `ReadWriteMany` with NFSv4-class semantics (same-directory rename atomicity, fsync durability, close-to-open consistency); see NOTES.txt for the provider matrix.
