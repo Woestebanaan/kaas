@@ -42,6 +42,16 @@ type Splicer interface {
 	// to flush its predecessor byte chunks before calling sendfile
 	// (we can't sendfile through a bufio.Writer's pending buffer).
 	Flush() error
+
+	// IsKernelSplice reports whether Splice actually avoids the
+	// userspace copy (true for plaintext *net.TCPConn via sendfile,
+	// false for the TLS / generic-net.Conn copy-fallback path).
+	// Splicing-aware handlers use this to decide whether the splice
+	// path is worth the extra encoder cooperation — on the copy path
+	// they get the same wire output as the standard []byte route at
+	// the cost of an extra ReadAt, so it's only worth it on the
+	// kernel-splice path.
+	IsKernelSplice() bool
 }
 
 // NewSplicerFor picks the right Splicer for a connection. Plaintext
@@ -69,6 +79,8 @@ func (t *tcpSplicer) Write(p []byte) (int, error) {
 func (t *tcpSplicer) Flush() error {
 	return t.bw.Flush()
 }
+
+func (t *tcpSplicer) IsKernelSplice() bool { return true }
 
 func (t *tcpSplicer) Splice(file *os.File, offset int64, length int) error {
 	if file == nil {
@@ -129,6 +141,8 @@ func (c *copySplicer) Write(p []byte) (int, error) {
 func (c *copySplicer) Flush() error {
 	return c.bw.Flush()
 }
+
+func (c *copySplicer) IsKernelSplice() bool { return false }
 
 // copySpliceChunkSize is the read-buffer size for the ReadAt → Write
 // loop. 64 KiB matches our bufio.Writer's default buffer in serveConn,

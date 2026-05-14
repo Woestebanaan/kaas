@@ -30,6 +30,24 @@ func (f HandlerFunc) Handle(conn *connstate.ConnState, version int16, body []byt
 	return f(conn, version, body)
 }
 
+// SplicingHandler is an optional secondary interface that a Handler can
+// implement when it can build a response with embedded file-section
+// splice points. The dispatcher routes through HandleSplicing only when
+// (a) the handler implements this interface AND (b) ConnState.Splicer
+// reports IsKernelSplice() == true — i.e., on plaintext *net.TCPConn
+// where sendfile actually saves the userspace copy. Anywhere else
+// (TLS, test fakes, non-kernel-splice fallback) the standard Handle
+// path runs.
+//
+// HandleSplicing receives the full RequestHeader (which Handle doesn't)
+// because the splice path is responsible for writing its own
+// correlation-ID prefix + frame length onto the wire. Returns
+// ErrResponseWritten on success — the dispatcher propagates it so
+// serveConn skips writeFrame.
+type SplicingHandler interface {
+	HandleSplicing(conn *connstate.ConnState, hdr RequestHeader, body []byte, splicer Splicer) error
+}
+
 // versionRange describes the min/max API versions a handler supports.
 type versionRange struct {
 	min, max int16
@@ -115,6 +133,29 @@ func (d *Dispatcher) Dispatch(hdr RequestHeader, body []byte, connState *connsta
 			return append(prefix, responseBody...), nil
 		}
 		return errorResponseRaw(hdr.CorrelationID, ErrUnsupportedVersion), nil
+	}
+
+	// gh #130: if the handler implements SplicingHandler and the
+	// connection has a kernel-splice-capable Splicer, route through
+	// the splice path. The handler writes its own framed response
+	// directly to the splicer (correlation prefix + body + records
+	// bytes spliced via sendfile) and returns ErrResponseWritten on
+	// success. On error or when conditions don't match, fall through
+	// to the standard Handle path below.
+	if sh, ok := reg.handler.(SplicingHandler); ok && connState != nil && connState.Splicer != nil {
+		if sp, ok := connState.Splicer.(Splicer); ok && sp.IsKernelSplice() {
+			if err := sh.HandleSplicing(connState, hdr, body, sp); err != nil {
+				if errors.Is(err, ErrResponseWritten) {
+					return nil, err
+				}
+				// Anything else: treat as a transient failure of the
+				// splice path; fall back to the standard route so the
+				// client gets a normal response.
+			} else {
+				// HandleSplicing returned nil — we treat that as
+				// "handler chose not to splice" and fall through.
+			}
+		}
 	}
 
 	responseBody, err := reg.handler.Handle(connState, hdr.APIVersion, body)

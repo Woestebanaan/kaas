@@ -12,6 +12,16 @@ func NewWriter() *Writer {
 
 func (w *Writer) Bytes() []byte { return w.buf }
 
+// Reset truncates the buffer to zero length while preserving capacity
+// so the writer can be reused for additional encoding rounds without
+// reallocating. Added for the gh #130 splice path which alternates
+// between writing header bytes via codec.Writer and splicing records
+// directly to the wire — the writer is reused for each per-partition
+// chunk.
+func (w *Writer) Reset() {
+	w.buf = w.buf[:0]
+}
+
 func (w *Writer) WriteInt8(v int8) {
 	w.buf = append(w.buf, byte(v))
 }
