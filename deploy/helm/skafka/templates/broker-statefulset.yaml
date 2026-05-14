@@ -235,14 +235,20 @@ spec:
             {{- end }}
             {{- end }}
             {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
-            {{- if $external }}
-            # TLS listener for external clients. Hostname pattern is fmt-style
-            # with the pod ordinal as the single %d argument. The broker reads
-            # apps.kubernetes.io/pod-index from the downward-API label.
+            {{- if include "skafka.hasAnyTLSListener" . }}
+            # gh #131: shared TLS material across every tls:true listener
+            # (internal or external). The broker code in
+            # cmd/skafka/listeners.go reuses a single *tls.Config for all
+            # of them — per-listener cert files are a future extension.
             - name: SKAFKA_TLS_CERT_FILE
               value: /tls/tls.crt
             - name: SKAFKA_TLS_KEY_FILE
               value: /tls/tls.key
+            {{- end }}
+            {{- if $external }}
+            # External-listener machinery (per-broker advertised host via
+            # fmt-style hostname pattern + pod ordinal). Internal-only TLS
+            # deploys never set these.
             - name: SKAFKA_TLS_PORT
               value: "{{ $external.port }}"
             - name: POD_ORDINAL
@@ -287,30 +293,34 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}
-            {{- if $external }}
+            {{- if include "skafka.hasAnyTLSListener" . }}
             - name: tls
               mountPath: /tls
               readOnly: true
-            {{- if and $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
+            {{- end }}
+            {{- if and $external $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
             - name: tls-client-ca
               mountPath: /tls-client-ca
               readOnly: true
-            {{- end }}
             {{- end }}
           resources: {{- toYaml .Values.broker.resources | nindent 12 }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "skafka.pvcName" . }}
-        {{- if $external }}
+        {{- if include "skafka.hasAnyTLSListener" . }}
         - name: tls
           secret:
-            # Secret created by cert-manager from the Certificate resource.
-            # Single Secret shared across all broker pods.
-            secretName: {{ include "skafka.fullname" . }}-broker-tls
-        {{- if and $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
+            # Secret created by cert-manager. The external-listener path
+            # (operator-managed) populates `<fullname>-broker-tls`; the
+            # internal-listener path (chart-managed, gh #131) populates
+            # `<fullname>-broker-internal-tls`. External wins when both
+            # exist — its cert is the public-trust one and presumably has
+            # the broader SAN list.
+            secretName: {{ if $external }}{{ include "skafka.fullname" . }}-broker-tls{{ else }}{{ include "skafka.internalTLSSecretName" . }}{{ end }}
+        {{- end }}
+        {{- if and $external $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
         - name: tls-client-ca
           secret:
             secretName: {{ $external.clientCA.existingSecret }}
-        {{- end }}
         {{- end }}

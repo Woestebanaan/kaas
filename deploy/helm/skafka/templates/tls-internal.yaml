@@ -1,0 +1,62 @@
+{{- /*
+gh #131: chart-managed TLS for internal listeners. Distinct from the
+operator's external-listener path (KafkaCluster CR → cert-manager +
+per-broker Service + TLSRoute), which solves off-cluster routing. The
+internal-TLS case has no Gateway / no per-broker SNI — every broker
+pod presents the same self-signed cert covering the headless-service
+DNS names, and in-cluster clients trust the cert directly via PEM
+truststore.
+
+Self-signed Issuer + a single Certificate (no intermediate CA). The
+broker certs that cert-manager emits carry their own subject as both
+the leaf and the trust anchor for clients — clients mount the
+Secret's tls.crt as their PEM truststore.
+*/ -}}
+{{- if include "skafka.hasInternalTLSListener" . }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "skafka.fullname" . }}-selfsigned
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "skafka.fullname" . }}-broker-internal-tls
+  labels: {{- include "skafka.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "skafka.internalTLSSecretName" . }}
+  issuerRef:
+    name: {{ include "skafka.fullname" . }}-selfsigned
+    kind: Issuer
+  commonName: {{ include "skafka.fullname" . }}
+  dnsNames:
+    # ClusterIP service — used by clients that don't care which broker
+    # they hit first and round-robin through endpoints (typical bench
+    # producer / kafbat-ui).
+    - {{ include "skafka.fullname" . }}
+    - {{ include "skafka.fullname" . }}.{{ .Release.Namespace }}
+    - {{ include "skafka.fullname" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "skafka.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}
+    # Per-broker headless DNS — Kafka clients use Metadata to learn
+    # which broker leads each partition and then dial that broker
+    # directly. SAN-list has to cover every replica.
+    {{- $headless := include "skafka.headlessName" . }}
+    {{- $ns := .Release.Namespace }}
+    {{- $domain := .Values.clusterDomain | default "cluster.local" }}
+    {{- $name := include "skafka.fullname" . }}
+    {{- range $i, $e := until (int .Values.broker.replicaCount) }}
+    - {{ $name }}-{{ $i }}.{{ $headless }}.{{ $ns }}.svc.{{ $domain }}
+    {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  duration: 2160h   # 90 days — cert-manager auto-renews at renewBefore.
+  renewBefore: 360h # 15 days
+  usages:
+    - server auth
+    - client auth   # also valid for mTLS listeners that may use the same cert.
+{{- end }}

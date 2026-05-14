@@ -177,6 +177,49 @@ enabled — that would mean no Kafka traffic, which is never the intent.
 {{- end -}}
 
 {{/*
+skafka.hasInternalTLSListener — true (returns "1") if any enabled
+listener has type: internal + tls: true. Distinct from the external
+TLS path, which is reconciled by the operator from the KafkaCluster
+CR — the internal-TLS case is chart-managed end-to-end via a
+selfSigned cert-manager Issuer + Certificate (gh #131).
+*/}}
+{{- define "skafka.hasInternalTLSListener" -}}
+{{- $hit := "" -}}
+{{- range .Values.listeners -}}
+{{- if and (eq .type "internal") .tls (or (not (hasKey . "enabled")) .enabled) -}}
+{{- $hit = "1" -}}
+{{- end -}}
+{{- end -}}
+{{- $hit -}}
+{{- end -}}
+
+{{/*
+skafka.hasAnyTLSListener — true if any enabled listener has tls: true,
+regardless of type. Drives the volume mount + SKAFKA_TLS_CERT_FILE env
+in broker-statefulset.yaml — internal-TLS and external-TLS share the
+same broker-side cert loader (one *tls.Config across all listeners,
+per cmd/skafka/listeners.go).
+*/}}
+{{- define "skafka.hasAnyTLSListener" -}}
+{{- $hit := "" -}}
+{{- range .Values.listeners -}}
+{{- if and .tls (or (not (hasKey . "enabled")) .enabled) -}}
+{{- $hit = "1" -}}
+{{- end -}}
+{{- end -}}
+{{- $hit -}}
+{{- end -}}
+
+{{/*
+skafka.internalTLSSecretName — Secret name for the chart-managed
+internal-TLS cert. Cert-manager populates it with tls.crt + tls.key
+(no separate ca.crt; the self-signed leaf cert IS the trust anchor).
+*/}}
+{{- define "skafka.internalTLSSecretName" -}}
+{{- printf "%s-broker-internal-tls" (include "skafka.fullname" .) -}}
+{{- end -}}
+
+{{/*
 skafka.hasEnabledExternalListener — true if any listener has type:
 external + (enabled missing or true). Convenience predicate so
 templates don't have to range-fold themselves.

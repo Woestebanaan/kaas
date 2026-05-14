@@ -116,10 +116,15 @@ func HealthHandler(brokerID string, listeners []string, tls *TLSInfo, source Run
 // readiness flag and also requires EXTERNAL_HOSTNAME_PATTERN to be set
 // when the external listener is active — prevents incorrect Metadata
 // responses from reaching external clients during LB-IP discovery.
+//
+// gh #131: keys off SKAFKA_TLS_PORT (which the chart only emits for the
+// external listener) rather than SKAFKA_TLS_CERT_FILE — internal-only
+// TLS sets the cert but never an external hostname, and would otherwise
+// be stuck reporting unready forever.
 func ReadyHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		ready := readySnapshot.Load()
-		if os.Getenv("SKAFKA_TLS_CERT_FILE") != "" && os.Getenv("EXTERNAL_HOSTNAME_PATTERN") == "" {
+		if os.Getenv("SKAFKA_TLS_PORT") != "" && os.Getenv("EXTERNAL_HOSTNAME_PATTERN") == "" {
 			ready = false
 		}
 		w.Header().Set("content-type", "application/json")
