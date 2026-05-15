@@ -229,7 +229,7 @@ func setupStorageStack(ctx context.Context, cfg brokerConfig, id brokerIdentity)
 
 	var k8sTopics []topicSpec
 	if cfg.K8sMode {
-		k8sTopics = acquireK8sPartitions(ctx, id.K8sClient, cfg.Namespace, id.LeaseManager, engine, id.BrokerReg, id.BrokerID)
+		k8sTopics = acquireK8sPartitions(ctx, cfg.Namespace, engine)
 		// Clear the StatefulSet's skafka.io/PartitionsReady readiness gate
 		// now that the initial sweep has run. Without this the Pod's Ready
 		// condition stays False forever and it never joins the headless
@@ -720,7 +720,6 @@ func runBroker(ctx context.Context) {
 	id := setupBrokerIdentity(ctx, cfg)
 	brokerID := id.BrokerID
 	k8sClient := id.K8sClient
-	brokerReg := id.BrokerReg
 	brokerSource := id.BrokerSource
 	leaseManager := id.LeaseManager
 	k8sMode := cfg.K8sMode
@@ -776,7 +775,7 @@ func runBroker(ctx context.Context) {
 	// the controller (when this broker holds the Lease) recomputes the
 	// assignment for the new topic shape.
 	if k8sMode && dataDir != "" {
-		startTopicWatcher(ctx, namespace, b, engine, leaseManager, brokerReg, brokerID, k8sTopics, rt)
+		startTopicWatcher(ctx, namespace, b, engine, leaseManager, k8sTopics, rt)
 	}
 
 	wireTopicCRWriter(b, cfg)
@@ -821,10 +820,7 @@ type topicSpec struct {
 // path acquired ~50 Leases × 3 brokers and saturated the K8s API client
 // QPS budget by ~15×; without it, broker startup is much quieter and the
 // Lease-vs-CR split-brain on freshly-added topics is gone.
-func acquireK8sPartitions(ctx context.Context, k8sClient kubernetes.Interface, namespace string,
-	lm lease.LeaseManager, engine *storage.DiskStorageEngine, brokerReg *k8spkg.BrokerRegistry,
-	selfOrdinal int32) []topicSpec {
-
+func acquireK8sPartitions(ctx context.Context, namespace string, engine *storage.DiskStorageEngine) []topicSpec {
 	scheme := runtime.NewScheme()
 	if err := operatorv1.AddToScheme(scheme); err != nil {
 		slog.Warn("acquireK8sPartitions: register scheme", "err", err)
@@ -867,8 +863,6 @@ func startTopicWatcher(
 	b *broker.Broker,
 	engine *storage.DiskStorageEngine,
 	lm lease.LeaseManager,
-	brokerReg *k8spkg.BrokerRegistry,
-	selfOrdinal int32,
 	primed []topicSpec,
 	rt *clusterRuntime,
 ) {
