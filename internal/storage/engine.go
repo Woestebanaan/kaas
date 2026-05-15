@@ -1296,7 +1296,7 @@ func (e *DiskStorageEngine) ReadSegmentRef(topic string, partition int32, startO
 	if active.logFile == nil {
 		return nil, 0, 0, nil, false, nil
 	}
-	approxPos, _ := searchIndex(active.indexPath, active.baseOffset, startOffset)
+	approxPos := active.searchIndex(active.baseOffset, startOffset)
 	// approxPos is the largest indexed position whose batch starts at or
 	// before startOffset. If the index is empty and startOffset is past
 	// baseOffset, approxPos is 0 (start of file) and the caller would

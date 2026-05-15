@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 )
 
@@ -44,6 +46,21 @@ type activeSegment struct {
 	// scan held ps.mu for ~8 s on a 1 GiB segment, dominating p99 on the
 	// matched-substrate bench against Strimzi).
 	maxTimestamp int64
+
+	// idxMmap is the lazily-acquired mmap of indexFile. Apache Kafka
+	// uses MappedByteBuffer here; we use unix.Mmap. The bench at
+	// v0.1.145 showed 92% of remaining allocations came from
+	// os.ReadFile(indexPath) inside searchIndex, fired once per Fetch
+	// per partition. Mmap caches the bytes once and binary-search
+	// runs over them with zero allocation.
+	//
+	// Refresh policy: if the file has grown beyond idxMmapSize since
+	// the last mmap, remap. Concurrent producer appends grow the file
+	// past our snapshot, but binary search over a stale snapshot still
+	// returns a valid approxPos — the tail entries are missing, the
+	// scan-forward in the splice path finds the right batch anyway.
+	idxMmap     []byte
+	idxMmapSize int64
 }
 
 // segmentLogPath returns the .log file path for a segment.
@@ -174,6 +191,11 @@ func (s *activeSegment) openHandles() error {
 // partition.
 func (s *activeSegment) closeHandles() error {
 	var lerr, ierr error
+	if s.idxMmap != nil {
+		_ = unix.Munmap(s.idxMmap)
+		s.idxMmap = nil
+		s.idxMmapSize = 0
+	}
 	if s.logFile != nil {
 		lerr = s.logFile.Close()
 		s.logFile = nil
@@ -407,20 +429,30 @@ func readBatches(logPath string, approxPos int64, startOffset int64, maxBytes in
 
 // searchIndex binary-searches the index file for the largest position whose relative
 // offset is <= (targetOffset - segmentBaseOffset). Returns 0 if the index is empty.
+//
+// File-based path: used by closed-segment lookups where there's no live
+// activeSegment to cache against. For the splice hot path (active
+// segment), prefer (*activeSegment).searchIndex which mmaps the index
+// once and skips the per-call os.ReadFile.
 func searchIndex(indexPath string, segmentBaseOffset int64, targetOffset int64) (int64, error) {
 	data, err := os.ReadFile(indexPath)
 	if err != nil {
 		return 0, nil
 	}
+	return searchIndexBytes(data, segmentBaseOffset, targetOffset), nil
+}
 
+// searchIndexBytes runs the binary search over an in-memory copy of
+// index bytes. Shared between the file-based and mmap'd paths.
+func searchIndexBytes(data []byte, segmentBaseOffset int64, targetOffset int64) int64 {
 	n := len(data) / 8
 	if n == 0 {
-		return 0, nil
+		return 0
 	}
 
 	targetRel := int32(targetOffset - segmentBaseOffset)
 	if targetRel < 0 {
-		return 0, nil
+		return 0
 	}
 
 	lo, hi := 0, n-1
@@ -436,7 +468,49 @@ func searchIndex(indexPath string, segmentBaseOffset int64, targetOffset int64) 
 			hi = mid - 1
 		}
 	}
-	return result, nil
+	return result
+}
+
+// searchIndex on activeSegment uses an mmap'd snapshot of the index
+// file. The mmap is lazy: first call mmaps; subsequent calls reuse.
+// If the file has grown beyond the snapshot size, remap. Caller must
+// hold the partition's mu so concurrent refresh isn't racey.
+func (s *activeSegment) searchIndex(segmentBaseOffset int64, targetOffset int64) int64 {
+	if s == nil || s.indexFile == nil {
+		// Fallback: stat-and-read. Active segment without an open
+		// indexFile means we're pre-takeover; rare path.
+		out, _ := searchIndex(s.indexPath, segmentBaseOffset, targetOffset)
+		return out
+	}
+	// Cheap stat to detect growth-beyond-snapshot.
+	fi, err := s.indexFile.Stat()
+	if err != nil {
+		return 0
+	}
+	curSize := fi.Size()
+	if s.idxMmap != nil && curSize > s.idxMmapSize+4096 {
+		// Producer grew the index by more than ~512 entries since
+		// our snapshot. Remap to catch up. Small growth is tolerated
+		// because the missing tail entries don't affect the
+		// approxPos returned for offsets that ARE in the snapshot.
+		_ = unix.Munmap(s.idxMmap)
+		s.idxMmap = nil
+		s.idxMmapSize = 0
+	}
+	if s.idxMmap == nil {
+		if curSize == 0 {
+			return 0
+		}
+		data, mmErr := unix.Mmap(int(s.indexFile.Fd()), 0, int(curSize), unix.PROT_READ, unix.MAP_SHARED)
+		if mmErr != nil {
+			// Fall back to file-based path on mmap failure.
+			out, _ := searchIndex(s.indexPath, segmentBaseOffset, targetOffset)
+			return out
+		}
+		s.idxMmap = data
+		s.idxMmapSize = curSize
+	}
+	return searchIndexBytes(s.idxMmap, segmentBaseOffset, targetOffset)
 }
 
 // listSegments returns all segments in dir sorted by base offset, as segmentMeta.
