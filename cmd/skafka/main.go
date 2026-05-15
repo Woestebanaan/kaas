@@ -172,6 +172,158 @@ func setupBrokerIdentity(ctx context.Context, cfg brokerConfig) brokerIdentity {
 	}
 }
 
+// storageStack collects the storage + coordinator wiring produced by
+// setupStorageStack. Engine is nil when dataDir == "" (memory-storage
+// dev mode); Store is always non-nil. CoordMgr is always non-nil.
+// K8sTopics is populated only in K8s mode after acquireK8sPartitions runs.
+type storageStack struct {
+	Store     storage.StorageEngine
+	Engine    *storage.DiskStorageEngine
+	CoordMgr  *coordinator.Manager
+	K8sTopics []topicSpec
+}
+
+// setupStorageStack builds the on-disk storage engine + reaper + consumer-group
+// coordinator (or the in-memory fallback when SKAFKA_DATA_DIR is unset). Wires
+// the KubernetesLeaseManager's onStarted/onStopped callbacks to the engine's
+// takeover/relinquish methods now that the engine exists; in K8s mode it also
+// drives the initial acquireK8sPartitions sweep and clears the
+// PartitionsReady readiness gate so the Pod can join the headless service.
+//
+// Fatal storage / RBAC errors call os.Exit(1) — runBroker can't proceed
+// without a working storage backend.
+func setupStorageStack(ctx context.Context, cfg brokerConfig, id brokerIdentity) storageStack {
+	if cfg.DataDir == "" {
+		// Memory-storage dev mode. Same LocalGroupSource pattern as the
+		// disk path — single broker is always coordinator.
+		slog.Info("using in-memory storage")
+		brokerIDStr := fmt.Sprintf("skafka-%d", id.BrokerID)
+		groupSrc := broker.NewLocalGroupSource(brokerIDStr)
+		lookupBroker := func(_ string) (int32, string, int32, bool) {
+			return id.BrokerID, cfg.Host, cfg.PortNum, true
+		}
+		offsetStore := coordinator.NewOffsetStore("")
+		return storageStack{
+			Store:    broker.NewMemoryStorage(),
+			CoordMgr: coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore),
+		}
+	}
+
+	// Disk-backed storage.
+	// Phase 4 dropped the flock parameter — single-writer enforcement is
+	// now BrokerCoordinator.Owns + epoch-prefixed segment filenames.
+	storageCfg := applyStorageEnv(storage.DefaultConfig())
+	slog.Info("storage config",
+		"flushIntervalMessages", storageCfg.FlushIntervalMessages,
+		"segmentBytes", storageCfg.SegmentBytes,
+		"retentionMs", storageCfg.RetentionMs,
+		"fsyncMaxLatency", storageCfg.FsyncMaxLatency.String())
+	engine, err := storage.NewDiskStorageEngine(cfg.DataDir, id.LeaseManager, storageCfg)
+	if err != nil {
+		slog.Error("open disk storage", "dir", cfg.DataDir, "err", err)
+		os.Exit(1)
+	}
+
+	attachReaper(ctx, engine)
+	wireLeaseCallbacks(id.LeaseManager, engine)
+
+	var k8sTopics []topicSpec
+	if cfg.K8sMode {
+		k8sTopics = acquireK8sPartitions(ctx, id.K8sClient, cfg.Namespace, id.LeaseManager, engine, id.BrokerReg, id.BrokerID)
+		// Clear the StatefulSet's skafka.io/PartitionsReady readiness gate
+		// now that the initial sweep has run. Without this the Pod's Ready
+		// condition stays False forever and it never joins the headless
+		// service.
+		ru := k8spkg.NewReadinessUpdater(id.K8sClient, os.Getenv("MY_POD_NAME"), cfg.Namespace)
+		if err := ru.SetReady(ctx, true); err != nil {
+			slog.Warn("readiness: patching the broker's own Pod readiness gate failed (Pod won't transition to Ready and so won't join the headless service; clients can't reach this broker through DNS until the gate is set; check RBAC: the broker ServiceAccount needs patch on pods/status)",
+				"err", err)
+		}
+	}
+
+	// Phase 5: GroupAssignmentSource replaces the v2.6 per-group Lease
+	// wiring. LocalGroupSource is the stub — single broker is always
+	// coordinator until cluster_runtime hot-swaps in broker.Coordinator.
+	// k8s-mode lookupBroker walks brokerRegistry by parsing the trailing
+	// ordinal from the "skafka-N" identifier convention.
+	brokerIDStr := fmt.Sprintf("skafka-%d", id.BrokerID)
+	groupSrc := broker.NewLocalGroupSource(brokerIDStr)
+	var lookupBroker coordinator.BrokerLookup
+	if cfg.K8sMode {
+		lookupBroker = func(idStr string) (int32, string, int32, bool) {
+			ord := lease.ParseOrdinalFromIdentity(idStr)
+			for _, ep := range id.BrokerReg.All() {
+				if ep.NodeID == ord {
+					return ep.NodeID, ep.Host, ep.Port, true
+				}
+			}
+			return 0, "", 0, false
+		}
+	} else {
+		lookupBroker = func(_ string) (int32, string, int32, bool) {
+			return id.BrokerID, cfg.Host, cfg.PortNum, true
+		}
+	}
+	offsetStore := coordinator.NewOffsetStore(cfg.DataDir)
+	slog.Info("using disk storage", "dir", cfg.DataDir)
+	return storageStack{
+		Store:     engine,
+		Engine:    engine,
+		CoordMgr:  coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore),
+		K8sTopics: k8sTopics,
+	}
+}
+
+// attachReaper wires the gh #119 partition reaper to the engine. The
+// reaper rate-limits ClosePartition's slow close+RemoveAll work so it
+// can't compete with active Produce/Fetch on shared NFS. CR-existence
+// recheck is wired separately from cluster_runtime once topic-watcher
+// boots.
+func attachReaper(ctx context.Context, engine *storage.DiskStorageEngine) {
+	reaperRate := 5.0
+	if v := os.Getenv("SKAFKA_DELETION_RATE_PER_SEC"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			reaperRate = f
+		}
+	}
+	reaper := storage.NewPartitionReaper(storage.ReaperConfig{RatePerSec: reaperRate})
+
+	// Attach OTel instruments so reaper activity shows up in Grafana
+	// alongside Produce/Fetch. observability.Bootstrap already called
+	// otel.SetMeterProvider; pull a named meter off the global.
+	reaperMeter := otel.Meter("skafka-reaper")
+	enq, comp, abrt, rtry, gup, dur, merr := observability.NewReaperMetrics(reaperMeter)
+	if merr == nil {
+		reaper.WithMetrics(&storage.ReaperMetrics{
+			Enqueued: enq, Completed: comp, Aborted: abrt,
+			Retried: rtry, GivenUp: gup, Duration: dur,
+		})
+	} else {
+		slog.Warn("reaper metrics disabled", "err", merr)
+	}
+	engine.WithReaper(reaper)
+	go reaper.Run(ctx)
+}
+
+// wireLeaseCallbacks plugs the engine's takeover/relinquish methods into
+// the lease manager's onStarted/onStopped hooks. No-op for the local
+// (non-Kubernetes) lease manager.
+func wireLeaseCallbacks(lm lease.LeaseManager, engine *storage.DiskStorageEngine) {
+	km, ok := lm.(*lease.KubernetesLeaseManager)
+	if !ok {
+		return
+	}
+	km.SetOnStartedLeading(func(topic string, partition int32, epoch int64) {
+		if err := engine.TakeoverPartition(topic, partition, epoch); err != nil {
+			slog.Error("takeover: opening file handles + replaying recovery for partition we just won leadership of failed (this broker holds the lease but cannot serve Produce/Fetch for this partition; clients will see NOT_LEADER until the next assignment change or partition relinquish/retake)",
+				"topic", topic, "partition", partition, "epoch", epoch, "err", err)
+		}
+	})
+	km.SetOnStoppedLeading(func(topic string, partition int32) {
+		engine.RelinquishPartition(topic, partition)
+	})
+}
+
 func runBroker(ctx context.Context) {
 	cfg := loadBrokerConfig()
 	host := cfg.Host
@@ -190,137 +342,11 @@ func runBroker(ctx context.Context) {
 	leaseManager := id.LeaseManager
 	k8sMode := cfg.K8sMode
 
-	var (
-		coordMgr  *coordinator.Manager
-		k8sTopics []topicSpec
-	)
-
-	// --- Storage ---
-	var store storage.StorageEngine
-	var engine *storage.DiskStorageEngine
-	if dataDir != "" {
-		// Phase 4 dropped the flock parameter — single-writer enforcement is
-		// now BrokerCoordinator.Owns + epoch-prefixed segment filenames.
-		storageCfg := applyStorageEnv(storage.DefaultConfig())
-		slog.Info("storage config",
-			"flushIntervalMessages", storageCfg.FlushIntervalMessages,
-			"segmentBytes", storageCfg.SegmentBytes,
-			"retentionMs", storageCfg.RetentionMs,
-			"fsyncMaxLatency", storageCfg.FsyncMaxLatency.String())
-		var err error
-		engine, err = storage.NewDiskStorageEngine(dataDir, leaseManager, storageCfg)
-		if err != nil {
-			slog.Error("open disk storage", "dir", dataDir, "err", err)
-			os.Exit(1)
-		}
-
-		// gh #119: attach the partition reaper. ClosePartition then
-		// enqueues the slow close+os.RemoveAll work to a single
-		// rate-limited background goroutine so deletion can't compete
-		// with active Produce/Fetch for NFS metadata throughput. The
-		// CR-existence recheck is wired from cmd/skafka/cluster_runtime
-		// once the topic-watcher has booted (the registry it watches
-		// is the source of truth). Until then, the recheck defaults to
-		// "always false" — safe because the reaper only runs on
-		// partitions whose CR has already been observed deleted.
-		reaperRate := 5.0
-		if v := os.Getenv("SKAFKA_DELETION_RATE_PER_SEC"); v != "" {
-			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
-				reaperRate = f
-			}
-		}
-		reaper := storage.NewPartitionReaper(storage.ReaperConfig{
-			RatePerSec: reaperRate,
-		})
-		// gh #119 observability: attach OTel instruments so reaper
-		// activity shows up in Grafana alongside Produce/Fetch.
-		// observability.Bootstrap (run earlier in main) already called
-		// otel.SetMeterProvider — pull a named meter off the global.
-		reaperMeter := otel.Meter("skafka-reaper")
-		enq, comp, abrt, rtry, gup, dur, merr := observability.NewReaperMetrics(reaperMeter)
-		if merr == nil {
-			reaper.WithMetrics(&storage.ReaperMetrics{
-				Enqueued: enq, Completed: comp, Aborted: abrt,
-				Retried: rtry, GivenUp: gup, Duration: dur,
-			})
-		} else {
-			slog.Warn("reaper metrics disabled", "err", merr)
-		}
-		engine.WithReaper(reaper)
-		go reaper.Run(ctx)
-
-		// Wire storage callbacks into the k8s lease manager now that the engine exists.
-		if km, ok := leaseManager.(*lease.KubernetesLeaseManager); ok {
-			km.SetOnStartedLeading(func(topic string, partition int32, epoch int64) {
-				if err := engine.TakeoverPartition(topic, partition, epoch); err != nil {
-					slog.Error("takeover: opening file handles + replaying recovery for partition we just won leadership of failed (this broker holds the lease but cannot serve Produce/Fetch for this partition; clients will see NOT_LEADER until the next assignment change or partition relinquish/retake)",
-						"topic", topic, "partition", partition, "epoch", epoch, "err", err)
-				}
-			})
-			km.SetOnStoppedLeading(func(topic string, partition int32) {
-				engine.RelinquishPartition(topic, partition)
-			})
-		}
-
-		if k8sMode {
-			k8sTopics = acquireK8sPartitions(ctx, k8sClient, namespace, leaseManager, engine, brokerReg, brokerID)
-
-			// Satisfy the StatefulSet's skafka.io/PartitionsReady gate now that the
-			// initial partition acquisition pass has run. Without this patch the
-			// pod's Ready condition stays False forever and it never joins the
-			// headless service.
-			ru := k8spkg.NewReadinessUpdater(k8sClient, os.Getenv("MY_POD_NAME"), namespace)
-			if err := ru.SetReady(ctx, true); err != nil {
-				slog.Warn("readiness: patching the broker's own Pod readiness gate failed (Pod won't transition to Ready and so won't join the headless service; clients can't reach this broker through DNS until the gate is set; check RBAC: the broker ServiceAccount needs patch on pods/status)",
-					"err", err)
-			}
-		}
-
-		// Build coordinator manager. Phase 5: GroupAssignmentSource replaces
-		// the v2.6 per-group Lease wiring. Until the runtime
-		// internal/broker.Coordinator is end-to-end wired into main.go (a
-		// follow-up to phase4 step 5/6), use LocalGroupSource — single
-		// broker is always coordinator. k8s-mode lookupBroker walks the
-		// brokerRegistry by parsing the trailing ordinal from the
-		// "skafka-N" identifier convention.
-		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
-		groupSrc := broker.NewLocalGroupSource(brokerIDStr)
-		var lookupBroker coordinator.BrokerLookup
-		if k8sMode {
-			lookupBroker = func(id string) (int32, string, int32, bool) {
-				ord := lease.ParseOrdinalFromIdentity(id)
-				for _, ep := range brokerReg.All() {
-					if ep.NodeID == ord {
-						return ep.NodeID, ep.Host, ep.Port, true
-					}
-				}
-				return 0, "", 0, false
-			}
-		} else {
-			lookupBroker = func(_ string) (int32, string, int32, bool) {
-				return brokerID, host, portNum, true
-			}
-		}
-		offsetStore := coordinator.NewOffsetStore(dataDir)
-		coordMgr = coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore)
-
-		store = engine
-		slog.Info("using disk storage", "dir", dataDir)
-	} else {
-		store = broker.NewMemoryStorage()
-		slog.Info("using in-memory storage")
-
-		// In-memory mode: same LocalGroupSource pattern as the disk-backed
-		// path above. Phase 5: GroupAssignmentSource replaces v2.6 per-group
-		// Lease.
-		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
-		groupSrc := broker.NewLocalGroupSource(brokerIDStr)
-		lookupBroker := func(_ string) (int32, string, int32, bool) {
-			return brokerID, host, portNum, true
-		}
-		offsetStore := coordinator.NewOffsetStore("")
-		coordMgr = coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore)
-	}
+	stack := setupStorageStack(ctx, cfg, id)
+	store := stack.Store
+	engine := stack.Engine
+	coordMgr := stack.CoordMgr
+	k8sTopics := stack.K8sTopics
 
 	// --- Auth engine ---
 	var authEngine auth.AuthEngine = broker.NewAllowAllAuthEngine()
