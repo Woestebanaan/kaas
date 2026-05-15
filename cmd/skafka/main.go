@@ -415,6 +415,64 @@ func setupListeners(cfg brokerConfig, authEngine auth.AuthEngine, allowAll *brok
 	return listenerSetup{Configs: configs, Engines: initial, TLSActive: tlsActive}
 }
 
+// startBrokerHealth brings up the /healthz + /readyz HTTP server. The
+// readiness function checks (a) the TCP listener is bound and (b) the
+// optional storage reaper's queue isn't saturated (gh #118 — saturated
+// readiness flips 503 so kube-proxy routes around this pod until the
+// queue drains).
+func startBrokerHealth(ctx context.Context, cfg brokerConfig, id brokerIdentity, srv *protocol.Server, store storage.StorageEngine, rt *clusterRuntime, tlsActive bool) {
+	listeners := []string{"internal"}
+	var tlsInfo *observability.TLSInfo
+	if tlsActive {
+		listeners = append(listeners, "external")
+		tlsInfo = &observability.TLSInfo{
+			Enabled:      true,
+			ExternalHost: os.Getenv("EXTERNAL_HOSTNAME_PATTERN"),
+		}
+	}
+	var healthSource observability.RuntimeState
+	if rt != nil {
+		healthSource = &healthRuntimeState{rt: rt}
+	}
+	healthBrokerID := ""
+	if cfg.K8sMode {
+		healthBrokerID = fmt.Sprintf("skafka-%d", id.BrokerID)
+	}
+	const reaperBacklogReadyThreshold = 50
+	readinessFn := func() readinessStatus {
+		if srv.Addr() == "" {
+			return readinessStatus{Ready: false, Reason: "tcp_listener_not_bound"}
+		}
+		// Storage engine may not expose a reaper (memory storage /
+		// dev mode); only apply backpressure when one is wired.
+		type reaperHolder interface {
+			Reaper() *storage.PartitionReaper
+		}
+		if rh, ok := store.(reaperHolder); ok {
+			if r := rh.Reaper(); r != nil {
+				depth := r.QueueDepth()
+				if depth > reaperBacklogReadyThreshold {
+					return readinessStatus{
+						Ready:            false,
+						Reason:           "reaper_saturated",
+						ReaperBacklog:    depth,
+						BacklogThreshold: reaperBacklogReadyThreshold,
+					}
+				}
+			}
+		}
+		return readinessStatus{Ready: true}
+	}
+	startHealthServer(ctx, healthServerConfig{
+		addr:      envOr("SKAFKA_HEALTH_ADDR", ":8080"),
+		brokerID:  healthBrokerID,
+		listeners: listeners,
+		tls:       tlsInfo,
+		source:    healthSource,
+		readiness: readinessFn,
+	})
+}
+
 // setupAuthEngine returns the auth.AuthEngine for the broker. Default is
 // AllowAll (anonymous). When SKAFKA_DATA_DIR is set and SKAFKA_AUTH_DISABLED
 // is not "true", attempts to load RealAuthEngine from /data/__cluster/...
@@ -738,70 +796,7 @@ func runBroker(ctx context.Context) {
 		os.Exit(1)
 	}
 
-	// Health probe HTTP server (Kubernetes livenessProbe/readinessProbe).
-	// /healthz returns the v3 runtime state (Phase 10 plan schema);
-	// /readyz gates on the listener being bound.
-	healthAddr := envOr("SKAFKA_HEALTH_ADDR", ":8080")
-	// Names array for the /healthz "listeners" field — used by the
-	// dashboard. Mirrors the Server's listener set so a config error
-	// like "TLS listener configured but bind failed" still shows up
-	// in /healthz once Start() returns success.
-	listeners := []string{"internal"}
-	var tlsInfo *observability.TLSInfo
-	if tlsListenerActive {
-		listeners = append(listeners, "external")
-		tlsInfo = &observability.TLSInfo{
-			Enabled:      true,
-			ExternalHost: os.Getenv("EXTERNAL_HOSTNAME_PATTERN"),
-		}
-	}
-	var healthSource observability.RuntimeState
-	if rt != nil {
-		healthSource = &healthRuntimeState{rt: rt}
-	}
-	healthBrokerID := ""
-	if k8sMode {
-		healthBrokerID = fmt.Sprintf("skafka-%d", brokerID)
-	}
-	// gh #118: /readyz returns 503 when the broker is saturated
-	// behind a deletion drain (reaper queue depth > threshold).
-	// kube-proxy then removes this broker's pod IP from the skafka
-	// Service's endpoints so clients route to less-saturated peers
-	// until the queue drains. The TCP listener stays up; livenessProbe
-	// (on port 9092) still passes; only /readyz flips.
-	const reaperBacklogReadyThreshold = 50
-	readinessFn := func() readinessStatus {
-		if srv.Addr() == "" {
-			return readinessStatus{Ready: false, Reason: "tcp_listener_not_bound"}
-		}
-		// Storage engine may not expose a reaper (memory storage /
-		// dev mode); only apply backpressure when one is wired.
-		type reaperHolder interface {
-			Reaper() *storage.PartitionReaper
-		}
-		if rh, ok := store.(reaperHolder); ok {
-			if r := rh.Reaper(); r != nil {
-				depth := r.QueueDepth()
-				if depth > reaperBacklogReadyThreshold {
-					return readinessStatus{
-						Ready:            false,
-						Reason:           "reaper_saturated",
-						ReaperBacklog:    depth,
-						BacklogThreshold: reaperBacklogReadyThreshold,
-					}
-				}
-			}
-		}
-		return readinessStatus{Ready: true}
-	}
-	startHealthServer(ctx, healthServerConfig{
-		addr:      healthAddr,
-		brokerID:  healthBrokerID,
-		listeners: listeners,
-		tls:       tlsInfo,
-		source:    healthSource,
-		readiness: readinessFn,
-	})
+	startBrokerHealth(ctx, cfg, id, srv, store, rt, tlsListenerActive)
 
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
 	<-ctx.Done()
