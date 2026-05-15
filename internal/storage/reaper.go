@@ -286,6 +286,13 @@ func (r *PartitionReaper) reapWork(job reapJob) error {
 		// the committer's own goroutine, not the request hot path.
 		ps.stopCommitter()
 
+		// gh #136: drain in-flight rollSegment finalize goroutines so
+		// none of them re-create manifest.json AFTER the os.RemoveAll
+		// at the bottom of this function. Without this Wait, a
+		// recently-rolled segment's finalize can sneak in and write
+		// manifest.json into the dir the reaper just tore down.
+		ps.rollFinalize.Wait()
+
 		ps.mu.Lock()
 		if ps.active != nil {
 			if err := ps.active.close(); err != nil {

@@ -2,10 +2,7 @@ package storage
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/woestebanaan/skafka/tests/testutil/recordbatch"
 )
@@ -124,25 +121,10 @@ func TestReadSegmentRefClosedSegment(t *testing.T) {
 	}
 	// ClosePartition before TempDir cleanup so the per-partition
 	// committer goroutine stops and any rolled-but-not-yet-finalized
-	// segment writes drain. Relinquish only closes the active fd —
-	// not enough; t.TempDir's cleanup would intermittently fail with
-	// "directory not empty" because the committer or finalize
-	// goroutines still held files in the partition dir.
-	t.Cleanup(func() {
-		_ = e.ClosePartition("t", 0)
-		// Drain the unsupervised roll-finalize goroutine: it can
-		// re-create manifest.json in the partition dir AFTER
-		// ClosePartition's RemoveAll. Best-effort retry loop
-		// (typically settles in <50 ms; cap at 1 s).
-		partDir := filepath.Join(dir, "t", "0")
-		for i := 0; i < 20; i++ {
-			_ = os.RemoveAll(partDir)
-			if _, err := os.Stat(partDir); os.IsNotExist(err) {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	})
+	// segment writes drain. Post gh #136 fix, ClosePartition itself
+	// Waits on the rollFinalize WaitGroup, so no poll-loop workaround
+	// is needed here.
+	t.Cleanup(func() { _ = e.ClosePartition("t", 0) })
 
 	// Append enough batches to force a segment roll past the 4 KiB
 	// ceiling. Each value is 512 bytes so ~10 batches roll the segment.

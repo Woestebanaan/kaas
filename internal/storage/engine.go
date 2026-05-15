@@ -286,6 +286,18 @@ type partitionState struct {
 	// needing an actual hung filesystem.
 	syncOverride func() error
 
+	// gh #136: rollSegment spawns an unsupervised goroutine for the
+	// async finalize step (index fsync, close old, manifest checkpoint).
+	// Without tracking, ClosePartition / DeletePartition / the reaper
+	// can RemoveAll the partition dir BEFORE that goroutine writes
+	// manifest.json — the manifest then re-creates the dir under a
+	// surprised operator and the cleanup looks broken (gh #136 race;
+	// surfaced as a flaky TestReadSegmentRefClosedSegment cleanup).
+	// Every rollSegment goroutine does rollFinalize.Add(1) before
+	// spawn + Done() at exit; every teardown path Waits before its
+	// RemoveAll.
+	rollFinalize sync.WaitGroup
+
 	// producerStates tracks per-(producerID) idempotence state for
 	// Apache Kafka's idempotent-producer guarantees (gh #12 stage B):
 	// dedupe of in-window retries, OUT_OF_ORDER_SEQUENCE_NUMBER for
@@ -775,6 +787,9 @@ func (e *DiskStorageEngine) DeletePartition(topic string, partition int32) error
 
 	if ps != nil {
 		ps.stopCommitter()
+		// gh #136: drain in-flight rollSegment finalize goroutines so
+		// none of them re-create manifest.json AFTER the RemoveAll below.
+		ps.rollFinalize.Wait()
 		ps.mu.Lock()
 		if ps.active != nil {
 			_ = ps.active.close()
@@ -1164,8 +1179,16 @@ func (e *DiskStorageEngine) rollSegment(ctx context.Context, ps *partitionState)
 	// Detached goroutine outlives the parent ctx, so finalize starts
 	// its own root span (linked to the parent so traces correlate)
 	// rather than chaining a child off a span that's about to End().
+	//
+	// gh #136: tracked via ps.rollFinalize so ClosePartition /
+	// DeletePartition / the reaper can wait for in-flight finalizes
+	// to drain before they RemoveAll the partition dir — otherwise
+	// the finalize's persistManifestLocked re-creates the just-
+	// deleted dir behind the operator's back.
+	ps.rollFinalize.Add(1)
 	parentLink := trace.LinkFromContext(ctx)
 	go func(seg *activeSegment, dir string, link trace.Link) {
+		defer ps.rollFinalize.Done()
 		_, fSpan := observability.Tracer().Start(context.Background(),
 			"storage.segment_finalize",
 			trace.WithSpanKind(trace.SpanKindInternal),
@@ -1711,6 +1734,11 @@ func (e *DiskStorageEngine) ClosePartition(topic string, partition int32) error 
 
 	// Synchronous fallback (no reaper wired).
 	ps.stopCommitter()
+	// gh #136: drain in-flight rollSegment finalize goroutines BEFORE
+	// the caller's subsequent RemoveAll runs (operator-side or test-
+	// cleanup) so the finalize's persistManifestLocked can't re-create
+	// manifest.json after the dir is gone.
+	ps.rollFinalize.Wait()
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	if ps.active == nil {
