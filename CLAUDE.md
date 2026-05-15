@@ -36,8 +36,6 @@ skafka is a from-scratch Kafka-protocol-compatible broker that runs on Kubernete
 - **`cmd/skafka`** — the broker. Listeners are declared via the `SKAFKA_LISTENERS` JSON env (gh #126); the chart emits one entry per `.Values.listeners[]` item. Fixed ports: 8080 health, 9094 inter-broker heartbeat gRPC.
 - **`cmd/skafka-operator`** — a controller-runtime operator that reconciles 4 CRDs into on-disk config files (auth/topics) and Kubernetes plumbing (TLS routes, etc.).
 
-There are also two helper binaries for tests/diagnostics: `cmd/skafka-failover-probe` and `cmd/skafka-fsync-check`.
-
 ### Brokers are runtime-independent of the operator
 
 This is the most important architectural fact and is easy to misread from the directory layout. The operator is a **startup/admission** component, not a hot-path dependency:
