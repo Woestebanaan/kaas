@@ -183,6 +183,13 @@ func (s *activeSegment) openHandles() error {
 	if fi, err := s.indexFile.Stat(); err == nil {
 		s.lastIndexedLogPos = fi.Size() / 8 * 4096
 	}
+	// Tell the kernel reads on this fd are sequential. Linux uses this
+	// to double the read-ahead window (default 128 KiB → 256 KiB, then
+	// grows further with sustained sequential I/O). sendfile pulls from
+	// page cache; the more aggressively the kernel reads ahead, the
+	// less sendfile blocks on disk when the cache is cold. Best-effort
+	// — older kernels (pre-2.6.16) or non-Linux ignore.
+	_ = unix.Fadvise(int(s.logFile.Fd()), 0, 0, unix.FADV_SEQUENTIAL)
 	return nil
 }
 
