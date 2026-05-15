@@ -44,11 +44,13 @@ type SACredential struct {
 	Namespace string `json:"namespace"`
 }
 
-// CredQuotas holds per-user throughput limits.
+// CredQuotas holds per-user throughput limits. Field names match the
+// CRD's spec.quotas — both halves of credentials.json (operator writer
+// + broker reader) use the same JSON tags.
 type CredQuotas struct {
-	ProducerByteRate  *int64 `json:"producerByteRate,omitempty"`
-	ConsumerByteRate  *int64 `json:"consumerByteRate,omitempty"`
-	RequestPercentage *int32 `json:"requestPercentage,omitempty"`
+	ProducerMaxByteRatePerBroker *int64 `json:"producerMaxByteRatePerBroker,omitempty"`
+	ConsumerMaxByteRatePerBroker *int64 `json:"consumerMaxByteRatePerBroker,omitempty"`
+	RequestPercentage            *int32 `json:"requestPercentage,omitempty"`
 }
 
 func credentialsPath(dataDir string) string {

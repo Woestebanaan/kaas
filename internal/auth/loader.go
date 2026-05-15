@@ -35,9 +35,9 @@ type saJSON struct {
 }
 
 type quotasJSON struct {
-	ProducerByteRate  *int64 `json:"producerByteRate,omitempty"`
-	ConsumerByteRate  *int64 `json:"consumerByteRate,omitempty"`
-	RequestPercentage *int32 `json:"requestPercentage,omitempty"`
+	ProducerMaxByteRatePerBroker *int64 `json:"producerMaxByteRatePerBroker,omitempty"`
+	ConsumerMaxByteRatePerBroker *int64 `json:"consumerMaxByteRatePerBroker,omitempty"`
+	RequestPercentage            *int32 `json:"requestPercentage,omitempty"`
 }
 
 type loadedCred struct {
@@ -94,9 +94,9 @@ func (l *CredentialLoader) Reload() error {
 		c := &loadedCred{authType: u.AuthType}
 		if u.Quotas != nil {
 			c.quotas = &Quotas{
-				ProducerByteRate:  u.Quotas.ProducerByteRate,
-				ConsumerByteRate:  u.Quotas.ConsumerByteRate,
-				RequestPercentage: u.Quotas.RequestPercentage,
+				ProducerMaxByteRatePerBroker: u.Quotas.ProducerMaxByteRatePerBroker,
+				ConsumerMaxByteRatePerBroker: u.Quotas.ConsumerMaxByteRatePerBroker,
+				RequestPercentage:            u.Quotas.RequestPercentage,
 			}
 		}
 		switch u.AuthType {

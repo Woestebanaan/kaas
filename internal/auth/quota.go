@@ -93,12 +93,12 @@ func (q *QuotaEnforcer) getBucket(username string) *tokenBucket {
 		b = &tokenBucket{lastRefill: time.Now()}
 		if q.store != nil {
 			if quotas := q.store.LookupQuotas(username); quotas != nil {
-				if quotas.ProducerByteRate != nil {
-					b.producerRate = float64(*quotas.ProducerByteRate)
+				if quotas.ProducerMaxByteRatePerBroker != nil {
+					b.producerRate = float64(*quotas.ProducerMaxByteRatePerBroker)
 					b.producerTokens = b.producerRate
 				}
-				if quotas.ConsumerByteRate != nil {
-					b.consumerRate = float64(*quotas.ConsumerByteRate)
+				if quotas.ConsumerMaxByteRatePerBroker != nil {
+					b.consumerRate = float64(*quotas.ConsumerMaxByteRatePerBroker)
 					b.consumerTokens = b.consumerRate
 				}
 			}

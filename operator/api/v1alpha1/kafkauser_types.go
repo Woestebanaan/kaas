@@ -103,10 +103,15 @@ type ServiceAccountRef struct {
 }
 
 type KafkaUserQuotas struct {
+	// ProducerMaxByteRatePerBroker caps producer throughput at THIS broker
+	// only (Apache Kafka 3.7-style per-broker quota; KIP-13). With N brokers
+	// the effective cluster-wide ceiling is N × the configured value.
 	// +kubebuilder:validation:Minimum=0
-	ProducerByteRate *int64 `json:"producerByteRate,omitempty"`
+	ProducerMaxByteRatePerBroker *int64 `json:"producerMaxByteRatePerBroker,omitempty"`
+	// ConsumerMaxByteRatePerBroker caps consumer throughput at THIS broker
+	// only (same per-broker semantics as the producer field).
 	// +kubebuilder:validation:Minimum=0
-	ConsumerByteRate *int64 `json:"consumerByteRate,omitempty"`
+	ConsumerMaxByteRatePerBroker *int64 `json:"consumerMaxByteRatePerBroker,omitempty"`
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	RequestPercentage *int32 `json:"requestPercentage,omitempty"`

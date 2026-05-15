@@ -11,7 +11,7 @@ func (s *fixedQuotaStore) LookupTLS(_ string) (string, bool) { return "", false 
 func (s *fixedQuotaStore) LookupSA(_, _ string) bool         { return false }
 func (s *fixedQuotaStore) LookupQuotas(_ string) *Quotas {
 	p, c := s.producer, s.consumer
-	return &Quotas{ProducerByteRate: &p, ConsumerByteRate: &c}
+	return &Quotas{ProducerMaxByteRatePerBroker: &p, ConsumerMaxByteRatePerBroker: &c}
 }
 
 func TestQuotaUnderLimit(t *testing.T) {

@@ -159,11 +159,18 @@ spec:
                 type: object
               quotas:
                 properties:
-                  consumerByteRate:
+                  consumerMaxByteRatePerBroker:
+                    description: |-
+                      ConsumerMaxByteRatePerBroker caps consumer throughput at THIS broker
+                      only (same per-broker semantics as the producer field).
                     format: int64
                     minimum: 0
                     type: integer
-                  producerByteRate:
+                  producerMaxByteRatePerBroker:
+                    description: |-
+                      ProducerMaxByteRatePerBroker caps producer throughput at THIS broker
+                      only (Apache Kafka 3.7-style per-broker quota; KIP-13). With N brokers
+                      the effective cluster-wide ceiling is N × the configured value.
                     format: int64
                     minimum: 0
                     type: integer

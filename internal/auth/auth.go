@@ -28,10 +28,12 @@ const (
 )
 
 // Quotas holds per-user throughput limits loaded from credentials.json.
+// The byte-rate fields are PER BROKER (KIP-13 semantics): with N brokers
+// the effective cluster-wide ceiling is N × the configured value.
 type Quotas struct {
-	ProducerByteRate  *int64
-	ConsumerByteRate  *int64
-	RequestPercentage *int32
+	ProducerMaxByteRatePerBroker *int64
+	ConsumerMaxByteRatePerBroker *int64
+	RequestPercentage            *int32
 }
 
 // SASLExchange is the per-connection state machine for one SASL mechanism.

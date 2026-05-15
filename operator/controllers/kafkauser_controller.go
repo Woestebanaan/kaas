@@ -106,9 +106,9 @@ func (r *KafkaUserReconciler) buildCredential(ctx context.Context, user *v1alpha
 
 	if user.Spec.Quotas != nil {
 		cred.Quotas = &CredQuotas{
-			ProducerByteRate:  user.Spec.Quotas.ProducerByteRate,
-			ConsumerByteRate:  user.Spec.Quotas.ConsumerByteRate,
-			RequestPercentage: user.Spec.Quotas.RequestPercentage,
+			ProducerMaxByteRatePerBroker: user.Spec.Quotas.ProducerMaxByteRatePerBroker,
+			ConsumerMaxByteRatePerBroker: user.Spec.Quotas.ConsumerMaxByteRatePerBroker,
+			RequestPercentage:            user.Spec.Quotas.RequestPercentage,
 		}
 	}
 
