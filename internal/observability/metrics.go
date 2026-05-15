@@ -193,11 +193,20 @@ type Metrics struct {
 	K8sAPILatency metric.Float64Histogram // (operation, resource)
 }
 
-// NewMetrics creates all instruments on the given meter. Errors from individual
-// instrument creation are joined and returned.
+// latencyHist creates a seconds-unit Float64Histogram with the standard
+// latency bucket boundaries. Used pervasively below; helper exists
+// because the raw form was repeated ~12 times verbatim.
+func latencyHist(m metric.Meter, name, desc string) (metric.Float64Histogram, error) {
+	return m.Float64Histogram(name,
+		metric.WithDescription(desc),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...))
+}
+
+// NewMetrics creates all instruments on the given meter. Returns the
+// first error encountered during instrument construction.
 func NewMetrics(m metric.Meter) (*Metrics, error) {
 	mx := &Metrics{}
-	var err error
 
 	// gh #115 + gh #121 PR1: per-topic produce/fetch are ObservableCounters
 	// (always emit at scrape), not fire-and-forget Int64Counters.
@@ -205,240 +214,310 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	if err := registerTopicTrafficInstruments(m, mx.TopicTraffic); err != nil {
 		return nil, err
 	}
-	if mx.RequestLatency, err = m.Float64Histogram("skafka.request.latency",
-		metric.WithDescription("Kafka request handler latency"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+
+	registerers := []func(m metric.Meter, mx *Metrics) error{
+		registerRequestLatencyMetrics,
+		registerStorageLatencyMetrics,
+		registerControllerMetrics,
+		registerAssignmentMetrics,
+		registerHeartbeatMetrics,
+		registerCodecTripwireMetrics,
+		registerGroupAndConnectionMetrics,
+		registerAuthAndQuotaMetrics,
+		registerPerAPIErrorMetrics,
+		registerCleanerMetrics,
+		registerCompactorMetrics,
+		registerOTLPMetrics,
+		registerOperatorMetrics,
+		registerK8sAPIMetrics,
 	}
-	if mx.WriteLatency, err = m.Float64Histogram("skafka.storage.write.latency",
-		metric.WithDescription("Partition append latency"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	for _, r := range registerers {
+		if err := r(m, mx); err != nil {
+			return nil, err
+		}
 	}
-	if mx.ReadLatency, err = m.Float64Histogram("skafka.storage.read.latency",
-		metric.WithDescription("Partition read latency"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	return mx, nil
+}
+
+// registerRequestLatencyMetrics — per-request handler latency histogram.
+func registerRequestLatencyMetrics(m metric.Meter, mx *Metrics) (err error) {
+	mx.RequestLatency, err = latencyHist(m, "skafka.request.latency", "Kafka request handler latency")
+	return err
+}
+
+// registerStorageLatencyMetrics — Append / Read / Fsync histograms.
+func registerStorageLatencyMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
+	if mx.WriteLatency, err = latencyHist(m, "skafka.storage.write.latency", "Partition append latency"); err != nil {
+		return err
 	}
-	if mx.FsyncLatency, err = m.Float64Histogram("skafka.storage.fsync.latency",
-		metric.WithDescription("Segment fsync latency"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.ReadLatency, err = latencyHist(m, "skafka.storage.read.latency", "Partition read latency"); err != nil {
+		return err
 	}
+	if mx.FsyncLatency, err = latencyHist(m, "skafka.storage.fsync.latency", "Segment fsync latency"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// registerControllerMetrics — cluster controller failover counters.
+func registerControllerMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.ControllerFailovers, err = m.Int64Counter("skafka.controller.failovers",
 		metric.WithDescription("Times this broker won the cluster controller lease")); err != nil {
-		return nil, err
+		return err
 	}
-	if mx.ControllerFailoverDuration, err = m.Float64Histogram("skafka.controller.failover.duration",
-		metric.WithDescription("Seconds from winning the lease to the first AssignmentLoop write"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.ControllerFailoverDuration, err = latencyHist(m, "skafka.controller.failover.duration",
+		"Seconds from winning the lease to the first AssignmentLoop write"); err != nil {
+		return err
 	}
+	return nil
+}
+
+// registerAssignmentMetrics — AssignmentLoop write + push observability.
+func registerAssignmentMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.AssignmentChanges, err = m.Int64Counter("skafka.assignment.changes",
 		metric.WithDescription("AssignmentLoop recompute+write iterations")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.AssignmentFileWrites, err = m.Int64Counter("skafka.assignment.file.writes",
 		metric.WithDescription("AssignmentStore.Write attempts (result=ok|error)")); err != nil {
-		return nil, err
+		return err
 	}
-	if mx.AssignmentFileWriteLatency, err = m.Float64Histogram("skafka.assignment.file.write.latency",
-		metric.WithDescription("AssignmentStore.Write tmp+rename duration"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.AssignmentFileWriteLatency, err = latencyHist(m, "skafka.assignment.file.write.latency",
+		"AssignmentStore.Write tmp+rename duration"); err != nil {
+		return err
 	}
 	if mx.AssignmentPushes, err = m.Int64Counter("skafka.assignment.pushes",
 		metric.WithDescription("ASSIGNMENT_CHANGED broadcasts via heartbeat server")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.CRMirrorWrites, err = m.Int64Counter("skafka.assignment.cr.mirror.writes",
 		metric.WithDescription("KafkaClusterAssignments CR Status update attempts (result=ok|error)")); err != nil {
-		return nil, err
-	}
-	if mx.HeartbeatRTT, err = m.Float64Histogram("skafka.heartbeat.rtt",
-		metric.WithDescription("Broker→controller→broker heartbeat round-trip"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
-	}
-	if mx.HeartbeatMisses, err = m.Int64Counter("skafka.heartbeat.misses",
-		metric.WithDescription("Heartbeats not received within heartbeatTimeout")); err != nil {
-		return nil, err
-	}
-	if mx.SelfFenceEvents, err = m.Int64Counter("skafka.self.fence.events",
-		metric.WithDescription("Times this broker self-fenced due to stale heartbeat")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.AssignmentPolls, err = m.Int64Counter("skafka.assignment.polls",
 		metric.WithDescription("assignment.json mtime poll iterations (change_detected=true|false)")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.StaleAssignmentsRejected, err = m.Int64Counter("skafka.stale.assignments.rejected",
 		metric.WithDescription("assignment.json reads dropped because controllerEpoch was behind")); err != nil {
-		return nil, err
+		return err
 	}
+	return nil
+}
+
+// registerHeartbeatMetrics — broker↔controller heartbeat RTT + misses.
+func registerHeartbeatMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
+	if mx.HeartbeatRTT, err = latencyHist(m, "skafka.heartbeat.rtt",
+		"Broker→controller→broker heartbeat round-trip"); err != nil {
+		return err
+	}
+	if mx.HeartbeatMisses, err = m.Int64Counter("skafka.heartbeat.misses",
+		metric.WithDescription("Heartbeats not received within heartbeatTimeout")); err != nil {
+		return err
+	}
+	if mx.SelfFenceEvents, err = m.Int64Counter("skafka.self.fence.events",
+		metric.WithDescription("Times this broker self-fenced due to stale heartbeat")); err != nil {
+		return err
+	}
+	return nil
+}
+
+// registerCodecTripwireMetrics — MUST-stay-zero counters for codec
+// invariants. Bumped lines tell the alert: someone added record-level
+// decoding to the broker.
+func registerCodecTripwireMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.CodecRecordDecode, err = m.Int64Counter("skafka.codec.record.decode",
 		metric.WithDescription("Tripwire: code path decoded an individual record. MUST stay at zero — alert if non-zero")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.CodecBatchReencode, err = m.Int64Counter("skafka.codec.batch.reencode",
 		metric.WithDescription("Tripwire: code path re-encoded a RecordBatch. MUST stay at zero — alert if non-zero")); err != nil {
-		return nil, err
+		return err
 	}
+	return nil
+}
+
+// registerGroupAndConnectionMetrics — rebalance + connection counters.
+func registerGroupAndConnectionMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.GroupRebalances, err = m.Int64Counter("skafka.group.rebalances",
 		metric.WithDescription("Consumer group rebalance completions")); err != nil {
-		return nil, err
-	}
-	if mx.AuthSuccess, err = m.Int64Counter("skafka.auth.success",
-		metric.WithDescription("Successful SASL / mTLS authentications")); err != nil {
-		return nil, err
-	}
-	if mx.AuthFailure, err = m.Int64Counter("skafka.auth.failure",
-		metric.WithDescription("Failed authentication attempts")); err != nil {
-		return nil, err
-	}
-	if mx.ACLDeny, err = m.Int64Counter("skafka.acl.deny",
-		metric.WithDescription("Authorization denials")); err != nil {
-		return nil, err
-	}
-	if mx.QuotaThrottle, err = m.Int64Counter("skafka.quota.throttle",
-		metric.WithDescription("Requests that hit a quota and were throttled")); err != nil {
-		return nil, err
-	}
-	if mx.TLSHandshakes, err = m.Int64Counter("skafka.tls.handshakes",
-		metric.WithDescription("TLS handshakes completed")); err != nil {
-		return nil, err
-	}
-	if mx.CertReloads, err = m.Int64Counter("skafka.cert.reloads",
-		metric.WithDescription("TLS certificate hot-reloads (result=ok|error). gh #132: failures stay visible — cert-manager mid-rotation or stale Secret mounts surface as result=error and don't go silent.")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.Connections, err = m.Int64Counter("skafka.connections",
 		metric.WithDescription("New client connections accepted")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.ConnectionsOpen, err = m.Int64UpDownCounter("skafka.connections.open",
 		metric.WithDescription("Currently open client connections")); err != nil {
-		return nil, err
+		return err
 	}
-	// gh #132: per-topic Produce/Fetch error counters. Distinct from
-	// the TopicTraffic success counters so dashboards can show "X is
-	// failing" while the success counter has gone flat.
+	return nil
+}
+
+// registerAuthAndQuotaMetrics — auth success/failure, ACL denies, quota,
+// TLS handshakes + cert reloads.
+func registerAuthAndQuotaMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
+	if mx.AuthSuccess, err = m.Int64Counter("skafka.auth.success",
+		metric.WithDescription("Successful SASL / mTLS authentications")); err != nil {
+		return err
+	}
+	if mx.AuthFailure, err = m.Int64Counter("skafka.auth.failure",
+		metric.WithDescription("Failed authentication attempts")); err != nil {
+		return err
+	}
+	if mx.ACLDeny, err = m.Int64Counter("skafka.acl.deny",
+		metric.WithDescription("Authorization denials")); err != nil {
+		return err
+	}
+	if mx.QuotaThrottle, err = m.Int64Counter("skafka.quota.throttle",
+		metric.WithDescription("Requests that hit a quota and were throttled")); err != nil {
+		return err
+	}
+	if mx.TLSHandshakes, err = m.Int64Counter("skafka.tls.handshakes",
+		metric.WithDescription("TLS handshakes completed")); err != nil {
+		return err
+	}
+	if mx.CertReloads, err = m.Int64Counter("skafka.cert.reloads",
+		metric.WithDescription("TLS certificate hot-reloads (result=ok|error). gh #132: failures stay visible — cert-manager mid-rotation or stale Secret mounts surface as result=error and don't go silent.")); err != nil {
+		return err
+	}
+	return nil
+}
+
+// registerPerAPIErrorMetrics — gh #132 per-partition Produce/Fetch
+// error counters. Distinct from the TopicTraffic success counters so
+// dashboards can show "X is failing" while success has gone flat.
+func registerPerAPIErrorMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.ProduceErrors, err = m.Int64Counter("skafka.produce.errors",
 		metric.WithDescription("Per-partition Produce failures (labels: topic, error_code). Bumped on every error path — storage stalled, not leader, corrupt batch, auth denied, out-of-order sequence, fenced producer epoch."),
 		metric.WithUnit("{error}")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.FetchErrors, err = m.Int64Counter("skafka.fetch.errors",
 		metric.WithDescription("Per-partition Fetch failures (labels: topic, error_code). Bumped on every error path — not leader, read failure, auth denied."),
 		metric.WithUnit("{error}")); err != nil {
-		return nil, err
+		return err
 	}
-	// gh #121 PR3: cleaner + compactor instruments. Pre-PR3 nothing
-	// emitted from these paths — runtime visibility was log-grep only.
+	return nil
+}
+
+// registerCleanerMetrics — gh #121 PR3 retention cleaner observability.
+func registerCleanerMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.CleanerRuns, err = m.Int64Counter("skafka.cleaner.runs",
 		metric.WithDescription("Retention cleaner partition-pass completions (result=ok|error)")); err != nil {
-		return nil, err
+		return err
 	}
-	if mx.CleanerDuration, err = m.Float64Histogram("skafka.cleaner.duration",
-		metric.WithDescription("Wall-clock per retention cleaner partition pass"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.CleanerDuration, err = latencyHist(m, "skafka.cleaner.duration",
+		"Wall-clock per retention cleaner partition pass"); err != nil {
+		return err
 	}
 	if mx.CleanerSegmentsDeleted, err = m.Int64Counter("skafka.cleaner.segments.deleted",
 		metric.WithDescription("Segments deleted by the retention cleaner (reason=time|size)"),
 		metric.WithUnit("{segment}")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.CleanerBytesReclaimed, err = m.Int64Counter("skafka.cleaner.bytes.reclaimed",
 		metric.WithDescription("Bytes freed by retention deletes (reason=time|size). Approximates disk-pressure relief; on NFS the actual unlink may lag if another broker held the fd."),
 		metric.WithUnit("By")); err != nil {
-		return nil, err
+		return err
 	}
+	return nil
+}
+
+// registerCompactorMetrics — gh #121 PR3 log compactor observability.
+func registerCompactorMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.CompactionRuns, err = m.Int64Counter("skafka.compaction.runs",
 		metric.WithDescription("Log compactor partition-pass completions (result=ok|error|aborted)")); err != nil {
-		return nil, err
+		return err
 	}
-	if mx.CompactionDuration, err = m.Float64Histogram("skafka.compaction.duration",
-		metric.WithDescription("Wall-clock per log compactor partition pass"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.CompactionDuration, err = latencyHist(m, "skafka.compaction.duration",
+		"Wall-clock per log compactor partition pass"); err != nil {
+		return err
 	}
 	if mx.CompactionRecordsKept, err = m.Int64Counter("skafka.compaction.records.kept",
 		metric.WithDescription("Records surviving the compactor's keep-latest-per-key pass"),
 		metric.WithUnit("{record}")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.CompactionRecordsDropped, err = m.Int64Counter("skafka.compaction.records.dropped",
 		metric.WithDescription("Records superseded by a later write for the same key — the dedup win"),
 		metric.WithUnit("{record}")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.CompactionBytesIn, err = m.Int64Counter("skafka.compaction.bytes.in",
 		metric.WithDescription("Source-segment bytes scanned by the compactor (before dedup)"),
 		metric.WithUnit("By")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.CompactionBytesOut, err = m.Int64Counter("skafka.compaction.bytes.out",
 		metric.WithDescription("Replacement-segment bytes written by the compactor (after dedup). bytes.in - bytes.out is the size savings."),
 		metric.WithUnit("By")); err != nil {
-		return nil, err
+		return err
 	}
-	// gh #121 PR4: OTLP push observability. Wired via the exporter
-	// wrapper in bootstrap.go — these instruments are filled by the
-	// wrapper, not by application code. Note the self-referential
-	// loop: an OTLP push failure increments OTLPPushFailure, which
-	// is itself exported on the next push attempt. That's fine —
-	// dashboards see the failure on a one-period lag, which is the
-	// best you can do without an out-of-band channel.
+	return nil
+}
+
+// registerOTLPMetrics — gh #121 PR4 OTLP push self-observability. Wired
+// via the exporter wrapper in bootstrap.go. Note the self-referential
+// loop: a push failure increments OTLPPushFailure, which is itself
+// exported on the next push — dashboards see failures on a one-period
+// lag, which is the best you can do without an out-of-band channel.
+func registerOTLPMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.OTLPPushSuccess, err = m.Int64Counter("skafka.otlp.push.success",
 		metric.WithDescription("OTLP metric exports that succeeded")); err != nil {
-		return nil, err
+		return err
 	}
 	if mx.OTLPPushFailure, err = m.Int64Counter("skafka.otlp.push.failure",
 		metric.WithDescription("OTLP metric exports that failed (err_class=timeout|refused|other)")); err != nil {
-		return nil, err
+		return err
 	}
-	if mx.OTLPPushDuration, err = m.Float64Histogram("skafka.otlp.push.duration",
-		metric.WithDescription("Time spent in Exporter.Export — high values suggest backend pressure"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.OTLPPushDuration, err = latencyHist(m, "skafka.otlp.push.duration",
+		"Time spent in Exporter.Export — high values suggest backend pressure"); err != nil {
+		return err
 	}
-	// gh #121 PR5: operator reconciler observability. Lives on the
-	// shared Metrics struct so a broker-built test binary or the
-	// broker bootstrap also has the instruments available (no-op
-	// when the broker doesn't actually wrap reconcilers).
+	return nil
+}
+
+// registerOperatorMetrics — gh #121 PR5 operator reconciler observability.
+// Lives on the shared Metrics struct so a broker-built test binary also
+// has the instruments available (no-op when the broker doesn't wrap
+// reconcilers).
+func registerOperatorMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.OperatorReconciles, err = m.Int64Counter("skafka.operator.reconciles",
 		metric.WithDescription("Operator reconcile completions (kind=CR kind, result=ok|requeue|error)")); err != nil {
-		return nil, err
+		return err
 	}
-	if mx.OperatorReconcileDuration, err = m.Float64Histogram("skafka.operator.reconcile.duration",
-		metric.WithDescription("Operator Reconcile() wall-clock per call (kind=...)"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.OperatorReconcileDuration, err = latencyHist(m, "skafka.operator.reconcile.duration",
+		"Operator Reconcile() wall-clock per call (kind=...)"); err != nil {
+		return err
 	}
-	// gh #121 PR4.5: broker-side K8s API call observability.
+	return nil
+}
+
+// registerK8sAPIMetrics — gh #121 PR4.5 broker-side K8s API call observability.
+func registerK8sAPIMetrics(m metric.Meter, mx *Metrics) error {
+	var err error
 	if mx.K8sAPICalls, err = m.Int64Counter("skafka.k8s.api.calls",
 		metric.WithDescription("Apiserver calls from the broker (operation=Get|List|Watch|Patch|Update|Create, resource=KafkaTopic|EndpointSlice|Lease|Pod|KafkaClusterAssignments, result=ok|error)")); err != nil {
-		return nil, err
+		return err
 	}
-	if mx.K8sAPILatency, err = m.Float64Histogram("skafka.k8s.api.latency",
-		metric.WithDescription("Apiserver call wall-clock per (operation, resource)"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(latencySecondsBoundaries...)); err != nil {
-		return nil, err
+	if mx.K8sAPILatency, err = latencyHist(m, "skafka.k8s.api.latency",
+		"Apiserver call wall-clock per (operation, resource)"); err != nil {
+		return err
 	}
-	return mx, nil
+	return nil
 }
 
 // NewReaperMetrics constructs the gh #119 partition-reaper instrument
