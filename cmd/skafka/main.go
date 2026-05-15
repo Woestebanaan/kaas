@@ -324,6 +324,36 @@ func wireLeaseCallbacks(lm lease.LeaseManager, engine *storage.DiskStorageEngine
 	})
 }
 
+// setupAuthEngine returns the auth.AuthEngine for the broker. Default is
+// AllowAll (anonymous). When SKAFKA_DATA_DIR is set and SKAFKA_AUTH_DISABLED
+// is not "true", attempts to load RealAuthEngine from /data/__cluster/...
+// and starts a ClusterFileWatcher goroutine that calls Reload() on
+// credentials.json / acls.json changes. Falls back to AllowAll if the real
+// engine can't initialize.
+func setupAuthEngine(ctx context.Context, cfg brokerConfig, k8sClient kubernetes.Interface) auth.AuthEngine {
+	if cfg.DataDir == "" || os.Getenv("SKAFKA_AUTH_DISABLED") == "true" {
+		return broker.NewAllowAllAuthEngine()
+	}
+	real, err := auth.NewRealAuthEngine(cfg.DataDir, k8sClient)
+	if err != nil {
+		slog.Warn("auth engine init failed, falling back to AllowAll", "err", err)
+		return broker.NewAllowAllAuthEngine()
+	}
+	// Hot-reload credentials and ACLs on file change.
+	watcher := storage.NewClusterFileWatcher(
+		filepath.Join(cfg.DataDir, "__cluster", "acls.json"),
+		filepath.Join(cfg.DataDir, "__cluster", "credentials.json"),
+		func(_ string) { real.Reload() },
+		func(_ string) { real.Reload() },
+	)
+	go func() {
+		done := make(chan struct{})
+		go func() { <-ctx.Done(); close(done) }()
+		_ = watcher.Run(done)
+	}()
+	return real
+}
+
 func runBroker(ctx context.Context) {
 	cfg := loadBrokerConfig()
 	host := cfg.Host
@@ -348,29 +378,7 @@ func runBroker(ctx context.Context) {
 	coordMgr := stack.CoordMgr
 	k8sTopics := stack.K8sTopics
 
-	// --- Auth engine ---
-	var authEngine auth.AuthEngine = broker.NewAllowAllAuthEngine()
-	authDisabled := os.Getenv("SKAFKA_AUTH_DISABLED") == "true"
-	if dataDir != "" && !authDisabled {
-		real, err := auth.NewRealAuthEngine(dataDir, k8sClient)
-		if err != nil {
-			slog.Warn("auth engine init failed, falling back to AllowAll", "err", err)
-		} else {
-			authEngine = real
-			// Wire ClusterFileWatcher to hot-reload credentials and ACLs.
-			watcher := storage.NewClusterFileWatcher(
-				filepath.Join(dataDir, "__cluster", "acls.json"),
-				filepath.Join(dataDir, "__cluster", "credentials.json"),
-				func(_ string) { real.Reload() },
-				func(_ string) { real.Reload() },
-			)
-			go func() {
-				done := make(chan struct{})
-				go func() { <-ctx.Done(); close(done) }()
-				_ = watcher.Run(done)
-			}()
-		}
-	}
+	authEngine := setupAuthEngine(ctx, cfg, k8sClient)
 
 	b := broker.NewWithBrokerSource(
 		broker.Config{BrokerID: brokerID, Host: host, Port: portNum, ClusterID: clusterID},
