@@ -54,7 +54,8 @@ type versionRange struct {
 }
 
 type registration struct {
-	handler  Handler
+	handler  Handler // wrapped by middleware (used by the standard Handle path)
+	raw      Handler // un-wrapped handler reference; used to discover SplicingHandler
 	versions versionRange
 }
 
@@ -92,7 +93,11 @@ func (d *Dispatcher) SetAuthEngines(sel auth.AuthEngineSelector) {
 // so the hot path sees a pre-chained Handler — no closure rebuild
 // per Dispatch call.
 func (d *Dispatcher) Register(apiKey int16, min, max int16, h Handler) {
-	d.handlers[apiKey] = registration{handler: d.chain(apiKey, h), versions: versionRange{min, max}}
+	d.handlers[apiKey] = registration{
+		handler:  d.chain(apiKey, h),
+		raw:      h,
+		versions: versionRange{min, max},
+	}
 }
 
 // Dispatch decodes the request header, checks version support, calls the handler,
@@ -142,7 +147,13 @@ func (d *Dispatcher) Dispatch(hdr RequestHeader, body []byte, connState *connsta
 	// bytes spliced via sendfile) and returns ErrResponseWritten on
 	// success. On error or when conditions don't match, fall through
 	// to the standard Handle path below.
-	if sh, ok := reg.handler.(SplicingHandler); ok && connState != nil && connState.Splicer != nil {
+	//
+	// We probe `reg.raw` here, NOT `reg.handler` — middleware wraps
+	// Handler but doesn't preserve SplicingHandler, so the chained
+	// handler always asserts as Handler-only. Without this, splice
+	// silently never engaged because RequestObservability /
+	// RequestTracing in main.go bury the SplicingHandler interface.
+	if sh, ok := reg.raw.(SplicingHandler); ok && connState != nil && connState.Splicer != nil {
 		if sp, ok := connState.Splicer.(Splicer); ok && sp.IsKernelSplice() {
 			if err := sh.HandleSplicing(connState, hdr, body, sp); err != nil {
 				if errors.Is(err, ErrResponseWritten) {
