@@ -66,17 +66,49 @@ func main() {
 	runBroker(ctx)
 }
 
-func runBroker(ctx context.Context) {
-	host := envOr("SKAFKA_HOST", "0.0.0.0")
-	port := envOr("SKAFKA_PORT", "9092")
+// brokerConfig collects the env-derived configuration consumed by runBroker.
+// One struct here = one place to audit "what does this binary read from env?".
+// Pure-derivable from os.Environ() via loadBrokerConfig(); no side effects.
+type brokerConfig struct {
+	Host        string // SKAFKA_HOST          (default 0.0.0.0)
+	Port        string // SKAFKA_PORT          (default 9092 — string form, kept for logs)
+	PortNum     int32  // numeric form of Port
+	ClusterID   string // SKAFKA_CLUSTER_ID    (default skafka-local)
+	DataDir     string // SKAFKA_DATA_DIR      (empty = in-memory storage / dev mode)
+	Namespace   string // SKAFKA_NAMESPACE     (default "default")
+	HeadlessSvc string // SKAFKA_HEADLESS_SVC  (default skafka-headless)
+	K8sMode     bool   // true iff MY_POD_NAME is set (StatefulSet pod identity present)
+}
+
+// loadBrokerConfig reads broker config from the environment. Pure function:
+// inputs = current process env, output = brokerConfig, no I/O beyond env access.
+func loadBrokerConfig() brokerConfig {
+	portStr := envOr("SKAFKA_PORT", "9092")
 	portNum := int32(9092)
-	if p, err := strconv.Atoi(port); err == nil {
+	if p, err := strconv.Atoi(portStr); err == nil {
 		portNum = int32(p)
 	}
-	clusterID := envOr("SKAFKA_CLUSTER_ID", "skafka-local")
-	dataDir := os.Getenv("SKAFKA_DATA_DIR")
-	namespace := envOr("SKAFKA_NAMESPACE", "default")
-	headlessSvc := envOr("SKAFKA_HEADLESS_SVC", "skafka-headless")
+	return brokerConfig{
+		Host:        envOr("SKAFKA_HOST", "0.0.0.0"),
+		Port:        portStr,
+		PortNum:     portNum,
+		ClusterID:   envOr("SKAFKA_CLUSTER_ID", "skafka-local"),
+		DataDir:     os.Getenv("SKAFKA_DATA_DIR"),
+		Namespace:   envOr("SKAFKA_NAMESPACE", "default"),
+		HeadlessSvc: envOr("SKAFKA_HEADLESS_SVC", "skafka-headless"),
+		K8sMode:     os.Getenv("MY_POD_NAME") != "",
+	}
+}
+
+func runBroker(ctx context.Context) {
+	cfg := loadBrokerConfig()
+	host := cfg.Host
+	port := cfg.Port
+	portNum := cfg.PortNum
+	clusterID := cfg.ClusterID
+	dataDir := cfg.DataDir
+	namespace := cfg.Namespace
+	headlessSvc := cfg.HeadlessSvc
 
 	var (
 		leaseManager lease.LeaseManager
@@ -88,7 +120,7 @@ func runBroker(ctx context.Context) {
 		k8sTopics    []topicSpec
 	)
 
-	k8sMode := os.Getenv("MY_POD_NAME") != ""
+	k8sMode := cfg.K8sMode
 	if k8sMode {
 		var err error
 		k8sClient, err = buildK8sClient()
