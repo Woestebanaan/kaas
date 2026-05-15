@@ -1143,80 +1143,14 @@ func startHealthServer(ctx context.Context, cfg healthServerConfig) {
 	slog.Info("health server listening", "addr", cfg.addr)
 }
 
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func envOrInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-// applyStorageEnv overlays storage.Config with values from environment
-// variables. Recognised vars:
-//
-//   SKAFKA_FLUSH_INTERVAL_MESSAGES — durability/throughput dial. Mirrors
-//     Apache Kafka's log.flush.interval.messages topic config (gh #83).
-//     1 (default) = fsync per record; N > 1 = fsync every N records;
-//     0 = no message-driven flush (only segment roll).
-//
-//   SKAFKA_FSYNC_MAX_LATENCY_MS — fsync watchdog deadline (gh #95).
-//     30000 ms (default) = surface ErrStorageStalled if a single
-//     committer fsync exceeds 30 s. 0 disables the watchdog so Sync
-//     can block indefinitely (pre-#95 behaviour).
-//
-// Invalid values are logged and ignored so a typo doesn't crash the broker.
-func applyStorageEnv(cfg storage.Config) storage.Config {
-	if v := os.Getenv("SKAFKA_FLUSH_INTERVAL_MESSAGES"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			cfg.FlushIntervalMessages = n
-		} else {
-			slog.Warn("invalid SKAFKA_FLUSH_INTERVAL_MESSAGES, keeping default",
-				"value", v, "default", cfg.FlushIntervalMessages)
-		}
-	}
-	if v := os.Getenv("SKAFKA_FSYNC_MAX_LATENCY_MS"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			cfg.FsyncMaxLatency = time.Duration(n) * time.Millisecond
-		} else {
-			slog.Warn("invalid SKAFKA_FSYNC_MAX_LATENCY_MS, keeping default",
-				"value", v, "default", cfg.FsyncMaxLatency)
-		}
-	}
-	return cfg
-}
-
-// envSecondsOr reads an env var as an integer count of seconds and
-// returns it as a time.Duration. Empty / unparseable returns def. Used
-// for the Phase 8 controllerLease.* knobs; passing 0 to the cluster
-// runtime falls back to controller.New's hardcoded defaults.
-// cleanupPolicyAdapter satisfies storage.CleanupPolicySource by
-// shaving the typed broker.CleanupPolicy down to a plain string.
-// Keeps internal/storage from having to import internal/broker
-// (which would form a cycle: broker imports storage).
+// cleanupPolicyAdapter satisfies storage.CleanupPolicySource by shaving
+// the typed broker.CleanupPolicy down to a plain string. Keeps
+// internal/storage from having to import internal/broker (which would
+// form a cycle: broker imports storage).
 type cleanupPolicyAdapter struct {
 	r *broker.TopicRegistry
 }
 
 func (a cleanupPolicyAdapter) CleanupPolicy(topic string) string {
 	return string(a.r.CleanupPolicy(topic))
-}
-
-func envSecondsOr(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 {
-		return def
-	}
-	return time.Duration(n) * time.Second
 }
