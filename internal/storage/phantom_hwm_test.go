@@ -95,6 +95,101 @@ func TestTakeOverHealsPhantomHWM(t *testing.T) {
 	}
 }
 
+// TestTakeOverHealsPhantomHWMWithStaleClosedSegments is the gh #123
+// State B regression. The exact on-disk layout observed live:
+//
+//	00000000-00000000000000000000.log    (0 bytes) — stale epoch-0 closed segment
+//	00000000-00000000000000000000.index  (0 bytes)
+//	00000005-00000000000001483826.log    (0 bytes) — empty active at next epoch's base
+//	00000005-00000000000001483826.index  (0 bytes)
+//	manifest.json: {"epoch":16,"highWatermark":1483826,"logStartOffset":0}
+//
+// Before the gh #123 fix the existing heal's `len(ps.segments) == 0`
+// check returned false (there IS a closed segment, just an empty one),
+// so the partition stayed phantom-HWM. After the fix the detector
+// looks at on-disk bytes (all zero → heal fires) AND the heal drops
+// the stale 0-byte closed segment files from disk.
+func TestTakeOverHealsPhantomHWMWithStaleClosedSegments(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.FlushIntervalMessages = 0
+	e, err := NewDiskStorageEngine(dataDir, &neverLeaderLeases{}, cfg)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	if err := e.CreatePartition("phantom-b", 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	partDir := filepath.Join(dataDir, "phantom-b", "0")
+	// Wipe CreatePartition's output — we want a deliberately
+	// inconsistent layout that matches gh #123 State B.
+	entries, _ := os.ReadDir(partDir)
+	for _, ent := range entries {
+		_ = os.Remove(filepath.Join(partDir, ent.Name()))
+	}
+
+	const phantomHWM = int64(1_483_826)
+	// Stale epoch-0 closed segment (0 bytes).
+	staleLog := filepath.Join(partDir, "00000000-00000000000000000000.log")
+	staleIdx := filepath.Join(partDir, "00000000-00000000000000000000.index")
+	if err := os.WriteFile(staleLog, nil, 0o644); err != nil {
+		t.Fatalf("write stale log: %v", err)
+	}
+	if err := os.WriteFile(staleIdx, nil, 0o644); err != nil {
+		t.Fatalf("write stale idx: %v", err)
+	}
+	// Empty active at next epoch's baseOffset (0 bytes).
+	activeLog := filepath.Join(partDir, "00000005-00000000000001483826.log")
+	activeIdx := filepath.Join(partDir, "00000005-00000000000001483826.index")
+	if err := os.WriteFile(activeLog, nil, 0o644); err != nil {
+		t.Fatalf("write active log: %v", err)
+	}
+	if err := os.WriteFile(activeIdx, nil, 0o644); err != nil {
+		t.Fatalf("write active idx: %v", err)
+	}
+	// Manifest reflects the partial-purge state: logStart=0 but HWM=1.48M.
+	manifest := map[string]any{
+		"epoch":          16,
+		"highWatermark":  phantomHWM,
+		"logStartOffset": int64(0),
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(partDir, "manifest.json"), manifestBytes, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	// Re-open and take over.
+	e2, err := NewDiskStorageEngine(dataDir, &neverLeaderLeases{}, cfg)
+	if err != nil {
+		t.Fatalf("engine reopen: %v", err)
+	}
+	if _, err := e2.TakeOver(context.Background(), "phantom-b", 0, 17); err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+
+	// Heal invariants.
+	hwm, _ := e2.HighWatermark("phantom-b", 0)
+	logStart, _ := e2.LogStartOffset("phantom-b", 0)
+	if hwm != phantomHWM {
+		t.Errorf("HWM=%d, want %d", hwm, phantomHWM)
+	}
+	if logStart != phantomHWM {
+		t.Errorf("logStart=%d, want %d — heal didn't advance past stale closed seg", logStart, phantomHWM)
+	}
+	if hwm-logStart != 0 {
+		t.Errorf("HWM-logStart=%d, want 0 (partition empty after heal)", hwm-logStart)
+	}
+
+	// Stale closed-segment files should be unlinked.
+	if _, err := os.Stat(staleLog); !os.IsNotExist(err) {
+		t.Errorf("stale closed-segment log still on disk: %v (want NotExist)", err)
+	}
+	if _, err := os.Stat(staleIdx); !os.IsNotExist(err) {
+		t.Errorf("stale closed-segment index still on disk: %v (want NotExist)", err)
+	}
+}
+
 // TestTakeOverPreservesGenuineLogStartWhenSegmentsExist confirms the
 // gh #138 detector doesn't false-trigger when there are real closed
 // segments — that's the legitimate "logStart < HWM, records do exist

@@ -1625,29 +1625,43 @@ func (e *DiskStorageEngine) takeoverInternal(ctx context.Context, topic string, 
 		ps.highWaterAtomic.Store(hwm) // gh #134: mirror for lock-free reads
 		span.SetAttributes(attribute.Bool("recovered", true))
 
-		// gh #138: heal the "phantom HWM" state. Symptom: a previous
+		// gh #123: heal the "phantom HWM" state. Symptom: a previous
 		// retention-clean / DeleteRecords advanced past every record
 		// the partition held, but the manifest persist that should
-		// have followed was interrupted (NAS stall, broker SIGKILL).
-		// We end up with:
-		//   - no closed segments
-		//   - active segment file at baseOffset=X but logSize=0
-		//   - manifest claims logStartOffset < X, highWatermark = X
-		// On disk there are zero records, but Fetch(end_offset) -
-		// Fetch(start_offset) suggests millions exist. Heal by
-		// advancing logStart to match the empty active's baseOffset
-		// — that's the offset the next produce would land at anyway,
-		// and it makes HWM - logStart == 0 (the actual record count).
-		if len(ps.segments) == 0 && ps.active != nil && ps.active.logSize == 0 && ps.highWater > ps.logStart {
-			slog.Warn("storage: takeover detected phantom-HWM state (active segment empty, manifest logStart < HWM with no closed segments) — healing by advancing logStart to HWM",
-				"topic", topic,
-				"partition", partition,
-				"prev_logStart", ps.logStart,
-				"hwm", ps.highWater,
-				"active_baseOffset", ps.active.baseOffset)
+		// have followed was interrupted (NAS stall, broker SIGKILL,
+		// kubelet OOMKill). We end up with one of two on-disk shapes:
+		//
+		//   State A — no closed segments, active is 0 bytes at
+		//     baseOffset=X, manifest logStart < X, HWM = X.
+		//
+		//   State B — one or more 0-byte CLOSED segments left over
+		//     from a partial purge that never reached step-2 (drop
+		//     from in-memory + manifest persist), plus a 0-byte
+		//     active at the next epoch's baseOffset. manifest still
+		//     records the pre-purge logStart.
+		//
+		// In both shapes: Fetch(end_offset) - Fetch(start_offset)
+		// suggests millions of records exist but on-disk total log
+		// bytes is zero. Heal by advancing logStart to HWM (matches
+		// where the next produce would land) and dropping any 0-byte
+		// closed segments (dead weight; their files were left behind
+		// by the same interrupted purge).
+		if e.shouldHealPhantomHWM(ps) {
+			before := ps.logStart
+			closedDropped := e.dropEmptyClosedSegmentsLocked(ps)
 			ps.logStart = ps.highWater
 			ps.logStartAtomic.Store(ps.logStart)
-			span.SetAttributes(attribute.Bool("phantom_hwm_healed", true))
+			slog.Warn("storage: takeover detected phantom-HWM state (no on-disk log bytes but manifest claims logStart < HWM) — healing by advancing logStart to HWM and dropping empty closed segments",
+				"topic", topic,
+				"partition", partition,
+				"prev_logStart", before,
+				"hwm", ps.highWater,
+				"active_baseOffset", ps.active.baseOffset,
+				"closed_segments_dropped", closedDropped)
+			span.SetAttributes(
+				attribute.Bool("phantom_hwm_healed", true),
+				attribute.Int("phantom_hwm_closed_dropped", closedDropped),
+			)
 		}
 	}
 
@@ -1659,6 +1673,69 @@ func (e *DiskStorageEngine) takeoverInternal(ctx context.Context, topic string, 
 	}
 	span.SetAttributes(attribute.Int64("highwater", ps.highWater))
 	return ps.highWater, nil
+}
+
+// shouldHealPhantomHWM detects the gh #123 phantom-HWM partition state:
+// manifest claims HWM > logStart, but the partition's log files on disk
+// total to zero bytes. Catches both State A (no closed segments, empty
+// active) and State B (0-byte closed segments left by an interrupted
+// retention/DeleteRecords purge).
+//
+// Must be called with ps.mu held (the caller is takeoverInternal which
+// is locked by getPartitionLocked).
+func (e *DiskStorageEngine) shouldHealPhantomHWM(ps *partitionState) bool {
+	if ps.active == nil || ps.highWater <= ps.logStart {
+		return false
+	}
+	// Active segment must be empty.
+	if ps.active.logSize != 0 {
+		return false
+	}
+	// All closed segments must be empty too — anything non-zero means
+	// the manifest's HWM > logStart is legitimately backed by data.
+	for _, seg := range ps.segments {
+		fi, err := os.Stat(seg.logPath)
+		if err != nil {
+			// Missing closed-segment file is itself a sign of partial
+			// purge: the file got unlinked but the manifest wasn't
+			// updated. Treat as empty for heal purposes.
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			// Other stat error: don't heal, surface via the next read.
+			return false
+		}
+		if fi.Size() > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// dropEmptyClosedSegmentsLocked removes 0-byte (or missing) closed
+// segment files from disk AND drops their entries from ps.segments.
+// Idempotent. Returns the count of segments dropped.
+//
+// Used by the gh #123 phantom-HWM heal: those 0-byte closed segments
+// are dead weight from a partial purge — keeping them around would
+// confuse future cleaner passes and pollute /healthz inventory.
+//
+// Must be called with ps.mu held.
+func (e *DiskStorageEngine) dropEmptyClosedSegmentsLocked(ps *partitionState) int {
+	kept := ps.segments[:0]
+	dropped := 0
+	for _, seg := range ps.segments {
+		fi, err := os.Stat(seg.logPath)
+		if err != nil || fi.Size() == 0 {
+			_ = os.Remove(seg.logPath)
+			_ = os.Remove(seg.indexPath)
+			dropped++
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	ps.segments = kept
+	return dropped
 }
 
 // TakeOver implements the v3 StorageEngine contract. It claims write ownership
