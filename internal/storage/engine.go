@@ -793,6 +793,94 @@ func (e *DiskStorageEngine) DeletePartition(topic string, partition int32) error
 // assignment_watch.go's file-validation half. epoch==0 is the v2.6
 // compatibility sentinel ("no fence configured"), as is ps.epoch==0 (no
 // TakeOver has run since the partition was opened).
+// idempotenceClassifyLocked runs the gh #12 stage-B dedupe + sequence /
+// epoch checks under the caller's ps.mu. Returns terminated=true when
+// the Append should return immediately with (savedOffset, err); when
+// terminated=false the Append continues (idemAccept / idemNotIdempotent
+// cases). PID == -1 (non-idempotent producer) short-circuits to "not
+// idempotent" without touching the map.
+//
+// Caller MUST hold ps.mu — both the read of producerStates and any
+// recordIdempotenceOutcome that follows are mutex-guarded.
+func idempotenceClassifyLocked(ps *partitionState, prodInfo batchProducerInfo) (savedOffset int64, terminated bool, err error) {
+	if ps.producerStates == nil && prodInfo.producerID >= 0 {
+		ps.producerStates = make(map[int64]*producerEntry)
+	}
+	action, saved := classifyIdempotence(ps.producerStates, prodInfo)
+	switch action {
+	case idemDuplicate:
+		return saved, true, nil
+	case idemOutOfOrder:
+		return -1, true, ErrOutOfOrderSequence
+	case idemInvalidEpoch:
+		return -1, true, ErrInvalidProducerEpoch
+	}
+	// idemAccept / idemNotIdempotent: caller proceeds.
+	return -1, false, nil
+}
+
+// rollIfBeyondSegmentBytesLocked drains in-flight pwrites and rolls the
+// active segment when the next write would push it past SegmentBytes.
+// Must be called with ps.mu held; releases and re-acquires the lock
+// internally via ps.flushCond.Wait(). Resets pendingFlushRecords on
+// successful roll so the new active segment starts fresh.
+//
+// Returns ps.flushErr / ErrPartitionClosing if the drain-wait aborts;
+// the rollSegment error otherwise. The caller MUST surface the error
+// after releasing ps.mu (same shape as inline pre-extraction).
+func (e *DiskStorageEngine) rollIfBeyondSegmentBytesLocked(ctx context.Context, ps *partitionState, addedSize int) error {
+	if ps.active.logSize+int64(addedSize) < e.cfg.SegmentBytes {
+		return nil
+	}
+	for ps.completedWriteSeq < ps.nextWriteSeq && !ps.closing && ps.flushErr == nil {
+		ps.flushCond.Wait()
+	}
+	if ps.flushErr != nil {
+		return ps.flushErr
+	}
+	if ps.closing {
+		return ErrPartitionClosing
+	}
+	if err := e.rollSegment(ctx, ps); err != nil {
+		return err
+	}
+	ps.pendingFlushRecords = 0
+	return nil
+}
+
+// waitForFlushIfAcksAllLocked blocks the caller until the committer has
+// fsynced the batch our write seq belongs to, when acks=-1 (all). For
+// acks=0/1 returns immediately after non-blocking-signalling the
+// committer (the bytes are in the leader's page cache, which is what
+// Apache Kafka acks=1 means).
+//
+// Must be called with ps.mu held; releases / re-acquires via
+// ps.flushCond.Wait().
+func (ps *partitionState) waitForFlushIfAcksAllLocked(triggeredFlushSeq int64, acks int16) error {
+	if triggeredFlushSeq <= 0 {
+		return nil
+	}
+	// Non-blocking signal to committer (its next iteration picks up
+	// requestedFlushSeq).
+	select {
+	case ps.flushReqCh <- struct{}{}:
+	default:
+	}
+	if acks != -1 {
+		return nil
+	}
+	for ps.completedFlushSeq < triggeredFlushSeq && !ps.closing && ps.flushErr == nil {
+		ps.flushCond.Wait()
+	}
+	if ps.flushErr != nil {
+		return ps.flushErr
+	}
+	if ps.closing && ps.completedFlushSeq < triggeredFlushSeq {
+		return ErrPartitionClosing
+	}
+	return nil
+}
+
 func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition int32, epoch uint32, acks int16, rawBatch []byte) (int64, error) {
 	if len(rawBatch) == 0 {
 		hwm, _ := e.HighWatermark(topic, partition)
@@ -848,49 +936,20 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	// and during segment-roll-drain.
 
 	// gh #12 stage B: idempotence check before we touch the log.
-	// Runs on the partition mutex so dedupe + offset assignment +
-	// state advance are atomic with concurrent Appends. PID == -1
-	// (the wire sentinel for non-idempotent producers) skips this
-	// branch entirely.
-	if ps.producerStates == nil && prodInfo.producerID >= 0 {
-		ps.producerStates = make(map[int64]*producerEntry)
-	}
-	switch action, savedOffset := classifyIdempotence(ps.producerStates, prodInfo); action {
-	case idemDuplicate:
+	// classify runs under ps.mu so dedupe + offset assignment +
+	// state advance stay atomic with concurrent Appends.
+	if savedOffset, terminated, idemErr := idempotenceClassifyLocked(ps, prodInfo); terminated {
 		ps.mu.Unlock()
-		return savedOffset, nil
-	case idemOutOfOrder:
-		ps.mu.Unlock()
-		return -1, ErrOutOfOrderSequence
-	case idemInvalidEpoch:
-		ps.mu.Unlock()
-		return -1, ErrInvalidProducerEpoch
-	case idemAccept, idemNotIdempotent:
-		// fall through
+		return savedOffset, idemErr
 	}
 
 	// If reserving this batch would push the active segment past the
-	// configured size, roll FIRST. The roll needs to drain inflight
-	// pwrites to the old segment before swapping in the new one (so
-	// the old segment's fsync inside rollFast sees all the bytes).
-	if ps.active.logSize+int64(len(rawBatch)) >= e.cfg.SegmentBytes {
-		for ps.completedWriteSeq < ps.nextWriteSeq && !ps.closing && ps.flushErr == nil {
-			ps.flushCond.Wait()
-		}
-		if ps.flushErr != nil {
-			err := ps.flushErr
-			ps.mu.Unlock()
-			return -1, err
-		}
-		if ps.closing {
-			ps.mu.Unlock()
-			return -1, ErrPartitionClosing
-		}
-		if err := e.rollSegment(ctx, ps); err != nil {
-			ps.mu.Unlock()
-			return -1, err
-		}
-		ps.pendingFlushRecords = 0
+	// configured size, roll FIRST. rollIfBeyondSegmentBytesLocked drains
+	// inflight pwrites to the old segment before swapping in the new one
+	// (so the old segment's fsync inside rollFast sees all the bytes).
+	if err := e.rollIfBeyondSegmentBytesLocked(ctx, ps, len(rawBatch)); err != nil {
+		ps.mu.Unlock()
+		return -1, err
 	}
 
 	// Brokers own offsets. Producers ship baseOffset=0 (the wire convention);
@@ -1034,33 +1093,12 @@ func (e *DiskStorageEngine) Append(ctx context.Context, topic string, partition 
 	}
 	ps.flushCond.Broadcast()
 
-	if triggeredFlushSeq > 0 {
-		// We triggered a flush. Signal the committer (non-blocking;
-		// committer's next iteration picks up requestedFlushSeq).
-		select {
-		case ps.flushReqCh <- struct{}{}:
-		default:
-		}
-		// Only acks=-1 (all) requires waiting for the fsync to land on
-		// durable storage. acks=0/1 ack as soon as the bytes are in the
-		// leader's log (page cache), per Apache Kafka's contract — the
-		// committer still fsyncs in the background, the request just
-		// doesn't sit on it. This is what closed most of the throughput
-		// gap to Strimzi on the matched-substrate bench.
-		if acks == -1 {
-			for ps.completedFlushSeq < triggeredFlushSeq && !ps.closing && ps.flushErr == nil {
-				ps.flushCond.Wait()
-			}
-			if ps.flushErr != nil {
-				err := ps.flushErr
-				ps.mu.Unlock()
-				return -1, err
-			}
-			if ps.closing && ps.completedFlushSeq < triggeredFlushSeq {
-				ps.mu.Unlock()
-				return -1, ErrPartitionClosing
-			}
-		}
+	// acks-aware fsync wait (gh #132): acks=-1 (all) blocks until the
+	// committer reports completedFlushSeq >= triggeredFlushSeq; acks=0/1
+	// returns as soon as the bytes are in the leader's page cache.
+	if err := ps.waitForFlushIfAcksAllLocked(triggeredFlushSeq, acks); err != nil {
+		ps.mu.Unlock()
+		return -1, err
 	}
 	ps.mu.Unlock()
 
