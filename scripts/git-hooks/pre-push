@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Pre-push hook for skafka.
+#
+# Runs the same Go checks that CI runs (go vet + go test) so a failure
+# fails fast on `git push` instead of after the 4-5 minute GHA build.
+# CI still runs (image build is the artifact that matters); this just
+# stops the obvious typos from getting that far.
+#
+# Install with:  git config core.hooksPath scripts/git-hooks
+# Bypass with:   git push --no-verify
+#
+# What this DOES NOT do (intentionally):
+#   - Build Docker images: no local container runtime per env notes.
+#   - Run integration suites under tests/{controller-failover,stale-controller-race,kafka-compat}
+#     that need a richer environment than `go test ./...` provides.
+#   - Helm lint / manifest drift: cheap to run separately when relevant.
+
+set -euo pipefail
+
+# Safety: only fire inside the skafka repo. core.hooksPath is repo-local,
+# so this should always be true here, but guard against worktree surprises.
+if [ ! -f "go.mod" ] || ! grep -q "module github.com/woestebanaan/skafka" go.mod; then
+  exit 0
+fi
+
+echo "==> pre-push: go vet ./..."
+if ! go vet ./...; then
+  echo
+  echo "pre-push FAILED: go vet error above. Use \`git push --no-verify\` to skip."
+  exit 1
+fi
+
+echo "==> pre-push: go test ./... (timeout 180s)"
+if ! go test ./... -count=1 -timeout 180s; then
+  echo
+  echo "pre-push FAILED: go test error above. Use \`git push --no-verify\` to skip."
+  exit 1
+fi
+
+echo "==> pre-push: ok"
