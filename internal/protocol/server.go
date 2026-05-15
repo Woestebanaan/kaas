@@ -216,6 +216,24 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn, listenerTag connstat
 	defer s.wg.Done()
 	defer c.Close()
 
+	// TCP send-buffer tuning. Linux's tcp_wmem auto-tunes, but on
+	// sustained-throughput Fetch streams we want a larger floor so the
+	// kernel doesn't briefly stall the broker between sendfile-flushes
+	// of consecutive partitions. 1 MB matches Apache Kafka's
+	// "high-throughput" socket.send.buffer.bytes recommendation. Also
+	// nudge the read side for symmetry on the Produce path.
+	//
+	// Applies to the raw *net.TCPConn — for TLS, c is *tls.Conn which
+	// wraps a TCPConn we can't reach directly here, so we skip TLS
+	// (the underlying TCPConn still gets auto-tuned by the kernel).
+	if tcp, ok := c.(*net.TCPConn); ok {
+		_ = tcp.SetWriteBuffer(1 << 20) // 1 MiB
+		_ = tcp.SetReadBuffer(1 << 20)
+		// Nagle off (Go's default), but make it explicit so the intent
+		// survives an accidental net.Conn wrap somewhere up the stack.
+		_ = tcp.SetNoDelay(true)
+	}
+
 	state := &connstate.ConnState{Listener: listenerTag}
 	mx := observability.Global()
 
