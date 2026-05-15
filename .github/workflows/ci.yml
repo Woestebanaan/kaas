@@ -29,7 +29,15 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
+          # cache: false on purpose. setup-go's cache backend is GitHub-hosted
+          # which means every run downloads ~600 MB over the home internet
+          # before tests start (~2 min on a ~5 MB/s link). The ARC runner pods
+          # are patched in apps/arc-runners (k3s-cluster) to mount a node-local
+          # hostPath at /var/lib/arc-go-cache, and GOMODCACHE / GOCACHE env are
+          # set there, so the Go toolchain finds the warm caches in-pod with
+          # no network round-trip. First run populates; subsequent runs hit
+          # the warm cache.
+          cache: false
 
       - name: go vet
         run: go vet ./...
