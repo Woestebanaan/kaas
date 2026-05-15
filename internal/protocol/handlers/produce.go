@@ -139,11 +139,10 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 				// gh #115 / gh #121 PR1: bump per-topic atomic
 				// accumulators. ObservableCounter callback emits
 				// the cumulative at every scrape interval.
-				var cnt int64
-				if c := recordCountFromBatch(pd.Records); c > 0 {
-					cnt = int64(c)
-				}
-				mx.TopicTraffic.RecordProduce(td.Name, cnt, int64(len(pd.Records)))
+				// Multi-batch walker — Java producers usually send one batch per
+				// partition per Produce request, but the idempotent path can
+				// pack multiple in flight, so always walk the full payload.
+				mx.TopicTraffic.RecordProduce(td.Name, codec.CountRecordsInBatches(pd.Records), int64(len(pd.Records)))
 				pr.BaseOffset = baseOffset
 			}
 			topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
@@ -325,18 +324,3 @@ func validateProduceBatches(records []byte) bool {
 	return true
 }
 
-// recordCountFromBatch extracts numRecords from the RecordBatch header bytes.
-// Layout (from codec/types.go): [baseOffset:8][batchLength:4][ple:4][magic:1]
-// [crc:4][attrs:2][lastOffsetDelta:4][baseTimestamp:8][maxTimestamp:8]
-// [producerId:8][producerEpoch:2][baseSequence:4][numRecords:4].
-// numRecords starts at byte 57 (big-endian int32). Returns 0 when raw is shorter.
-func recordCountFromBatch(raw []byte) int {
-	const numRecordsOffset = 57
-	if len(raw) < numRecordsOffset+4 {
-		return 0
-	}
-	return int(int32(raw[numRecordsOffset])<<24 |
-		int32(raw[numRecordsOffset+1])<<16 |
-		int32(raw[numRecordsOffset+2])<<8 |
-		int32(raw[numRecordsOffset+3]))
-}

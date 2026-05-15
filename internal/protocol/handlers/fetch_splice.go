@@ -162,12 +162,18 @@ func (h *FetchHandler) HandleSplicing(conn *connstate.ConnState, hdr protocol.Re
 				}
 				topicResp.Partitions = append(topicResp.Partitions, pr)
 				sliceTable = append(sliceTable, fetchPartitionSlice{resp: pr, recordBytes: bytes, length: len(bytes)})
-				mx.TopicTraffic.RecordFetch(topic.Name, 0, int64(len(bytes)))
+				mx.TopicTraffic.RecordFetch(topic.Name, codec.CountRecordsInBatches(bytes), int64(len(bytes)))
 				continue
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 			sliceTable = append(sliceTable, fetchPartitionSlice{resp: pr, file: file, offset: offset, length: length, cleanup: cleanup})
-			mx.TopicTraffic.RecordFetch(topic.Name, 0, int64(length))
+			// Counts records by reading only batch HEADERS via pread (61
+			// bytes per batch) — the records payload stays on disk so the
+			// sendfile splice fast-path is not undone. Pre-fix the splice
+			// path passed records=0, leaving skafka_fetch_records_total
+			// frozen even under sustained fetch load.
+			spliceRecords, _ := codec.CountRecordsInBatchesAt(file, offset, length)
+			mx.TopicTraffic.RecordFetch(topic.Name, spliceRecords, int64(length))
 		}
 		resp.Responses = append(resp.Responses, topicResp)
 	}

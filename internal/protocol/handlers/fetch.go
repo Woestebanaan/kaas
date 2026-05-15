@@ -106,11 +106,11 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 				// accumulators. ObservableCounter callback emits
 				// the cumulative at every scrape — idle topics
 				// (and empty Fetch responses) still show up.
-				var cnt int64
-				if c := recordCountFromBatch(raw); c > 0 {
-					cnt = int64(c)
-				}
-				mx.TopicTraffic.RecordFetch(topic.Name, cnt, int64(len(raw)))
+				// Walks every batch in the response — recordCountFromBatch only
+				// read the first batch's header, so multi-batch Fetch responses
+				// undercounted (most consumers receive multi-batch responses
+				// once steady-state catches up).
+				mx.TopicTraffic.RecordFetch(topic.Name, codec.CountRecordsInBatches(raw), int64(len(raw)))
 			} else {
 				// gh #132: failures stay visible. The success counter
 				// going flat on its own looked indistinguishable from
