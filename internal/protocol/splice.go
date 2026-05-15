@@ -52,6 +52,15 @@ type Splicer interface {
 	// the cost of an extra ReadAt, so it's only worth it on the
 	// kernel-splice path.
 	IsKernelSplice() bool
+
+	// Cork / Uncork are batching hints to the kernel. Between paired
+	// calls, the implementation MAY accumulate output without sending
+	// (TCP_CORK on Linux for tcpSplicer; no-op for copySplicer). The
+	// Splicing handler brackets each Fetch response in Cork/Uncork so
+	// the alternating Write(header) + Splice(records) pattern doesn't
+	// produce one small TCP segment per header chunk.
+	Cork()
+	Uncork()
 }
 
 // NewSplicerFor picks the right Splicer for a connection. Plaintext
@@ -81,6 +90,37 @@ func (t *tcpSplicer) Flush() error {
 }
 
 func (t *tcpSplicer) IsKernelSplice() bool { return true }
+
+// Cork / Uncork toggle TCP_CORK on the underlying socket. Between
+// Cork() and Uncork() the kernel queues outbound bytes locally instead
+// of pushing them out as soon as they fit in a TCP segment; the
+// uncork either coalesces everything into one large MTU-filling
+// burst, or sends now if a full segment is already queued. Apache
+// Kafka's NIO transferTo path gets the same batching implicitly from
+// the JVM's buffered write semantics — we have to be explicit.
+//
+// Safe on errors: if the setsockopt fails (older kernel, non-TCP
+// socket somehow), we just don't cork. No correctness impact, only
+// throughput.
+func (t *tcpSplicer) Cork() {
+	rc, err := t.conn.SyscallConn()
+	if err != nil {
+		return
+	}
+	_ = rc.Control(func(fd uintptr) {
+		_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_CORK, 1)
+	})
+}
+
+func (t *tcpSplicer) Uncork() {
+	rc, err := t.conn.SyscallConn()
+	if err != nil {
+		return
+	}
+	_ = rc.Control(func(fd uintptr) {
+		_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_CORK, 0)
+	})
+}
 
 func (t *tcpSplicer) Splice(file *os.File, offset int64, length int) error {
 	if file == nil {
@@ -153,6 +193,8 @@ func (c *copySplicer) Flush() error {
 }
 
 func (c *copySplicer) IsKernelSplice() bool { return false }
+func (c *copySplicer) Cork()                {}
+func (c *copySplicer) Uncork()              {}
 
 // copySpliceChunkSize is the read-buffer size for the ReadAt → Write
 // loop. 64 KiB matches our bufio.Writer's default buffer in serveConn,

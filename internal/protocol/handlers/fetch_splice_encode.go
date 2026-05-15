@@ -44,6 +44,14 @@ func writeFetchResponseWithSplices(hdr protocol.RequestHeader, version int16, re
 		return fmt.Errorf("fetch splice: version %d not supported (need >= 12)", version)
 	}
 
+	// Bracket the whole response in TCP_CORK so the alternating
+	// Write(header) + Splice(records) pattern coalesces into full-
+	// MTU segments instead of N small packets per partition. Uncork
+	// at the end (defer) flushes whatever's buffered. No-op on the
+	// copy-splicer path.
+	splicer.Cork()
+	defer splicer.Uncork()
+
 	// Build the FULL response header + per-partition prefix bytes into
 	// a codec.Writer first. We need the total length to write the
 	// outermost int32 frame length prefix before any other byte goes
