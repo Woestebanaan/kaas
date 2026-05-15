@@ -26,6 +26,15 @@ func NewWriterWithCap(cap int) *Writer {
 
 func (w *Writer) Bytes() []byte { return w.buf }
 
+// WriteRaw appends bytes verbatim to the writer's buffer. No length
+// prefix, no encoding. Used by the gh #135 splice-fallback path to
+// merge materialised records bytes into the same buffer as the
+// surrounding response header bytes, so they flush to the socket in
+// a single Write call rather than one Write per partition.
+func (w *Writer) WriteRaw(b []byte) {
+	w.buf = append(w.buf, b...)
+}
+
 // Reset truncates the buffer to zero length while preserving capacity
 // so the writer can be reused for additional encoding rounds without
 // reallocating. Added for the gh #130 splice path which alternates

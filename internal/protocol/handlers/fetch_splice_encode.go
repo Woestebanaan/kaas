@@ -163,27 +163,32 @@ func writeFetchResponseWithSplices(hdr protocol.RequestHeader, version int16, re
 			}
 			emit.WriteUvarint(uint64(recLen) + 1)
 
-			// Flush header bytes accumulated so far, then emit the
-			// records section (splice from disk, OR write the
-			// materialised bytes if this partition fell back per
-			// gh #135). Reset the writer for the next partition's
-			// trailing tagged fields + next-partition header.
-			if _, err := splicer.Write(emit.Bytes()); err != nil {
-				return fmt.Errorf("fetch splice: write partition header: %w", err)
-			}
-			emit.Reset()
-
+			// Records section. Two cases:
+			//   - splice-eligible: flush accumulated header bytes
+			//     (sendfile can't share the bufio buffer with us),
+			//     then call splicer.Splice. After this the emit
+			//     buffer is empty for the trailing tagged fields.
+			//   - materialised (gh #135 fallback): append the records
+			//     bytes directly into the SAME emit buffer so they
+			//     fly out alongside the surrounding header bytes in
+			//     a single splicer.Write at the next splice boundary
+			//     (or end-of-response). This avoids the syscall
+			//     amplification that broke v0.1.143's first cut —
+			//     one flush-per-partition turned a one-shot Write
+			//     into 16+ syscalls per multi-partition fetch.
 			if sliceIdx < len(slices) {
 				s := &slices[sliceIdx]
 				switch {
 				case s.file != nil && s.length > 0:
+					if _, err := splicer.Write(emit.Bytes()); err != nil {
+						return fmt.Errorf("fetch splice: write partition header: %w", err)
+					}
+					emit.Reset()
 					if err := splicer.Splice(s.file, s.offset, s.length); err != nil {
 						return fmt.Errorf("fetch splice: splice partition %d: %w", p.PartitionIndex, err)
 					}
 				case len(s.recordBytes) > 0:
-					if _, err := splicer.Write(s.recordBytes); err != nil {
-						return fmt.Errorf("fetch splice: write fallback records partition %d: %w", p.PartitionIndex, err)
-					}
+					emit.WriteRaw(s.recordBytes)
 				}
 			}
 			sliceIdx++
