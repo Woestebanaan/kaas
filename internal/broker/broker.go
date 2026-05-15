@@ -337,6 +337,31 @@ func (b *Broker) RemoveTopic(name string) {
 
 // RegisterHandlers wires all API key handlers into d and returns d.
 func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
+	autoCreate := b.autoCreateConfig()
+	b.registerDataHandlers(d, autoCreate)
+	b.registerConsumerGroupHandlers(d)
+	b.registerTopicAdminHandlers(d)
+	b.registerSaslHandlers(d)
+	b.registerProducerIDHandlers(d)
+	b.registerTxnHandlers(d)
+	b.registerAclHandlers(d)
+	b.registerClusterAdminHandlers(d, autoCreate)
+	b.registerAPIVersionsHandler(d)
+	return d
+}
+
+// autoCreateConfig reads auto-create topic env config (gh #109). Defaults
+// match Apache 3.7 (true / 1). Used by both Metadata and DescribeConfigs.
+func (b *Broker) autoCreateConfig() handlers.AutoCreateTopicsConfig {
+	return handlers.AutoCreateTopicsConfig{
+		Enabled:       envBool("SKAFKA_AUTO_CREATE_TOPICS_ENABLE", true),
+		NumPartitions: int32(envOrIntBroker("SKAFKA_NUM_PARTITIONS", 1)),
+	}
+}
+
+// registerDataHandlers: Produce (0), Fetch (1), ListOffsets (2),
+// Metadata (3), DeleteRecords (21) — the data-plane APIs.
+func (b *Broker) registerDataHandlers(d *protocol.Dispatcher, autoCreate handlers.AutoCreateTopicsConfig) {
 	produceHandler := handlers.NewProduceHandler(b.store, b.leases, b.authorizer, b.quotas)
 	if b.brokerCoord != nil {
 		produceHandler = produceHandler.WithCoordinator(b.brokerCoord)
@@ -344,14 +369,16 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	d.Register(0, 3, 9, produceHandler)
 	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.authorizer, b.quotas))
 	d.Register(2, 1, 7, handlers.NewListOffsetsHandler(b.store, b.leases))
-	// Metadata: cap at v10. v11 removed IncludeClusterAuthorizedOperations,
-	// but the Java AdminClient happily selects our advertised max and then
-	// fails serialisation on its own side when the flag is set
+
+	// Metadata: cap at v10. v11 removed IncludeClusterAuthorizedOperations
+	// but the Java AdminClient happily selects our advertised max and
+	// then fails serialisation on its own side when the flag is set
 	// ("Attempted to write a non-default includeClusterAuthorizedOperations
-	// at version 12") — observed from kafbat-ui's brokers page. Capping at
-	// v10 keeps the flag available, which is what callers actually want.
-	// The only thing we give up is v11/v12 UUID-based topic IDs (a KRaft
-	// transition feature skafka does not need).
+	// at version 12") — observed from kafbat-ui's brokers page. Capping
+	// at v10 keeps the flag available, which is what callers actually want.
+	// We give up only v11/v12 UUID-based topic IDs (a KRaft transition
+	// feature skafka does not need).
+	//
 	// Metadata's leader source: prefer the v3 BrokerCoordinator
 	// (assignment.json-driven) when wired, fall back to the legacy
 	// per-partition LeaseManager. The Lease path can disagree with the
@@ -361,19 +388,23 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	if b.brokerCoord != nil {
 		leaderSrc = b.brokerCoord
 	}
-	// gh #109: read auto.create.topics.enable + num.partitions from
-	// env. Defaults match Apache 3.7 (true / 1). Only the CR-writer
-	// path drives auto-create — without TopicCRWriter wired (dev mode
-	// memory-only) the branch stays disabled even with env=true.
-	autoCreate := handlers.AutoCreateTopicsConfig{
-		Enabled:       envBool("SKAFKA_AUTO_CREATE_TOPICS_ENABLE", true),
-		NumPartitions: int32(envOrIntBroker("SKAFKA_NUM_PARTITIONS", 1)),
-	}
 	metadataHandler := handlers.NewMetadataHandlerWithSource(b.brokers, b.cfg.ClusterID, b.topics, leaderSrc)
 	if b.topicCRWriter != nil {
 		metadataHandler = metadataHandler.WithAutoCreate(autoCreate, b.topicCRWriter)
 	}
 	d.Register(3, 1, 10, metadataHandler)
+
+	deleteRecordsHandler := handlers.NewDeleteRecordsHandler(b.store)
+	if b.brokerCoord != nil {
+		deleteRecordsHandler = deleteRecordsHandler.WithCoordinator(b.brokerCoord)
+	}
+	d.Register(21, 0, 2, deleteRecordsHandler)
+}
+
+// registerConsumerGroupHandlers: OffsetCommit (8), OffsetFetch (9),
+// FindCoordinator (10), JoinGroup (11), Heartbeat (12), LeaveGroup (13),
+// SyncGroup (14), DescribeGroups (15), ListGroups (16), DeleteGroups (42).
+func (b *Broker) registerConsumerGroupHandlers(d *protocol.Dispatcher) {
 	d.Register(8, 2, 8, handlers.NewOffsetCommitHandler(b.coord))
 	d.Register(9, 1, 8, handlers.NewOffsetFetchHandler(b.coord))
 	d.Register(10, 0, 4, handlers.NewFindCoordinatorHandler(b.coord))
@@ -388,59 +419,68 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 	// deletion (per-member instead of per-group); skafka caps at v2
 	// until that path is wired.
 	d.Register(42, 0, 2, handlers.NewDeleteGroupsHandler(b.coord, b.authorizer))
-	d.Register(17, 0, 1, handlers.NewSaslHandshakeHandler())
-	// CreateTopics is capped at v6: v7 added the topic_id UUID
-	// (KIP-516) to CreatableTopicResult, which our encoder doesn't
-	// write — modern Java admin clients hit BufferUnderflowException
-	// reading the missing 16 bytes (gh #73). Same shape as the
-	// Metadata v10 cap above. Real fix is to encode topic_id and
-	// raise back to v7+.
+}
+
+// registerTopicAdminHandlers: CreateTopics (19), DeleteTopics (20).
+// Both caps at v6/v5 because newer versions require KIP-516 topic-id
+// (UUID) support that skafka's codec doesn't write yet.
+func (b *Broker) registerTopicAdminHandlers(d *protocol.Dispatcher) {
+	// CreateTopics capped at v6: v7 added the topic_id UUID (KIP-516)
+	// to CreatableTopicResult, which our encoder doesn't write —
+	// modern Java admin clients hit BufferUnderflowException reading
+	// the missing 16 bytes (gh #73).
 	createTopicsHandler := handlers.NewCreateTopicsHandler(b.topics)
 	if b.topicCRWriter != nil {
 		createTopicsHandler = createTopicsHandler.WithCRWriter(b.topicCRWriter)
 	}
 	d.Register(19, 0, 6, createTopicsHandler)
-	// DeleteTopics capped at v5: v6+ changed `topic_names: [STRING]` to
-	// `topics: [DeleteTopicState]` (name COMPACT_NULLABLE_STRING +
+
+	// DeleteTopics capped at v5: v6+ changed `topic_names: [STRING]`
+	// to `topics: [DeleteTopicState]` (name COMPACT_NULLABLE_STRING +
 	// topic_id UUID — KRaft topic-id KIP-516). The codec still expects
 	// the v0–v5 flat name array; advertising v6 made franz-go's
 	// kmsg.DeleteTopicsRequest send the new struct shape and skafka
 	// errored with "unexpected null compact string". Capping at v5
 	// keeps name-based deletes working for kafka-topics.sh, kafbat-ui,
-	// and Java AdminClient. v6 topic-id support is a separate parity
-	// task.
+	// and Java AdminClient.
 	deleteTopicsHandler := handlers.NewDeleteTopicsHandler(b.topics)
 	if b.topicCRWriter != nil {
 		deleteTopicsHandler = deleteTopicsHandler.WithCRWriter(b.topicCRWriter)
 	}
 	d.Register(20, 0, 5, deleteTopicsHandler)
-	deleteRecordsHandler := handlers.NewDeleteRecordsHandler(b.store)
-	if b.brokerCoord != nil {
-		deleteRecordsHandler = deleteRecordsHandler.WithCoordinator(b.brokerCoord)
-	}
-	d.Register(21, 0, 2, deleteRecordsHandler)
+}
+
+// registerSaslHandlers: SaslHandshake (17), SaslAuthenticate (36).
+func (b *Broker) registerSaslHandlers(d *protocol.Dispatcher) {
+	d.Register(17, 0, 1, handlers.NewSaslHandshakeHandler())
+	d.Register(36, 0, 2, handlers.NewSaslAuthenticateHandler(b.auth))
+}
+
+// registerProducerIDHandlers wires InitProducerId (22) plus all its
+// dependencies (TxnStateStore, FenceWatcher, broadcasting fencer,
+// txn-coordinator ownership). SIDE EFFECTS: sets b.txnStore and
+// b.fenceWatcher when their preconditions are met.
+func (b *Broker) registerProducerIDHandlers(d *protocol.Dispatcher) {
 	// gh #12 stage A: hand out a fresh PID/epoch so idempotent producers
 	// (default since Kafka 3.0) can complete their startup handshake.
 	// Sequence-number enforcement in Produce is stage B.
-	// gh #22: layer the TxnStateStore on top so non-empty
-	// transactional.id rejoins bump the epoch (and the storage-
-	// layer fence rejects the previous instance's writes).
+	// gh #22: layer the TxnStateStore on top so non-empty transactional.id
+	// rejoins bump the epoch (and the storage-layer fence rejects the
+	// previous instance's writes).
 	initPIDHandler := handlers.NewInitProducerIdHandler()
-	// Only wire the TxnStateStore when DataDir is a real on-disk
-	// path. MemoryStorage (local-dev / unit tests) returns
-	// "memory://" — joining "__cluster" onto it would create a
-	// stray "memory:/__cluster" directory in cwd. Production
-	// DiskStorageEngine returns an absolute path so this just
-	// skips the dev path.
+
+	// Only wire the TxnStateStore when DataDir is a real on-disk path.
+	// MemoryStorage (local-dev / unit tests) returns "memory://" —
+	// joining "__cluster" onto it would create a stray "memory:/__cluster"
+	// directory in cwd. Production DiskStorageEngine returns an absolute
+	// path so this just skips the dev path.
 	if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
 		clusterDir := filepath.Join(dataDir, "__cluster")
-		// numSlots is decoupled from the StatefulSet replica count
-		// (gh #108 follow-up): pinning to a fixed cluster-wide
-		// constant — Apache's transaction.state.log.num.partitions=50
-		// default — keeps the storage layout stable across scale
-		// operations. Override via SKAFKA_TXN_NUM_SLOTS if 50 is
-		// wrong for the cluster (set once at bootstrap; changes
-		// trigger a re-shard pass on every broker startup).
+		// numSlots decoupled from StatefulSet replica count (gh #108
+		// follow-up): pinning to Apache's transaction.state.log.num.
+		// partitions=50 default keeps the storage layout stable across
+		// scale operations. Override via SKAFKA_TXN_NUM_SLOTS if 50 is
+		// wrong for the cluster.
 		numSlots := 0 // 0 → DefaultNumSlots (50)
 		if v := os.Getenv("SKAFKA_TXN_NUM_SLOTS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -455,17 +495,17 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 				"clusterDir", clusterDir, "err", err)
 		}
 	}
+
 	// gh #30: cross-partition fence on every rejoin bump. Only
 	// DiskStorageEngine implements the fence interface; MemoryStorage
-	// has no per-partition producerStates to walk, so the cast just
-	// fails and the fence stays a no-op.
+	// has no per-partition producerStates to walk, so the cast fails
+	// and the fence stays a no-op.
 	//
-	// gh #108 phase 2: wrap the local fencer with a broadcasting
-	// fencer that also writes to this broker's outbound fence log
-	// under <dataDir>/__cluster/producer_fences/from-skafka-N.json.
-	// Peer brokers' FenceWatcher (started in StartFenceWatcher)
-	// poll the directory and apply each entry locally — closing
-	// the cross-broker zombie window without a new gRPC RPC.
+	// gh #108 phase 2: wrap the local fencer with a broadcasting fencer
+	// that also writes to this broker's outbound fence log. Peer
+	// brokers' FenceWatcher polls the directory and applies each entry
+	// locally — closing the cross-broker zombie window without a new
+	// gRPC RPC.
 	if fencer, ok := b.store.(handlers.ProducerEpochFencer); ok {
 		fencer := fencer // shadow for closure capture below
 		if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
@@ -485,23 +525,26 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 			initPIDHandler = initPIDHandler.WithFencer(fencer)
 		}
 	}
+
 	// gh #91: route InitProducerId for non-empty transactional.id to
 	// the txn-coordinator broker (hash of txnID into the StatefulSet
-	// broker set). Wiring is opt-in; in dev mode brokerCoord is the
-	// LocalLeaseManager-backed stub which does not implement
-	// TxnOwnership, so the cast fails and the gate stays disabled —
-	// exactly the same back-compat shape as WithFencer above.
+	// broker set). Opt-in: in dev mode brokerCoord is the
+	// LocalLeaseManager-backed stub which does not implement TxnOwnership.
 	if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
 		initPIDHandler = initPIDHandler.WithTxnOwnership(ownership)
 	}
 	d.Register(22, 0, 4, initPIDHandler)
-	// gh #23: AddPartitionsToTxn (key 24) v0–v3. Wired only when the
-	// txn store is up; otherwise the registration is skipped and
-	// clients see UNSUPPORTED_VERSION (negotiated via ApiVersions),
-	// which is honest given a missing store can't track per-txn
-	// partition lists. The handler reuses the gh #91 OwnsTxn gate
-	// for routing.
+}
+
+// registerTxnHandlers: AddPartitionsToTxn (24), AddOffsetsToTxn (25),
+// EndTxn (26), WriteTxnMarkers (27), TxnOffsetCommit (28). Most are
+// gated on b.txnStore being non-nil; clients otherwise see
+// UNSUPPORTED_VERSION via ApiVersions.
+func (b *Broker) registerTxnHandlers(d *protocol.Dispatcher) {
+	// AddPartitions / EndTxn / AddOffsets all require the txn store.
 	if b.txnStore != nil {
+		// gh #23: AddPartitionsToTxn (key 24) v0–v3. Handler reuses
+		// the gh #91 OwnsTxn gate for routing.
 		addPartHandler := handlers.NewAddPartitionsToTxnHandler(&txnPartitionStoreAdapter{store: b.txnStore})
 		if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
 			addPartHandler = addPartHandler.WithTxnOwnership(ownership)
@@ -509,35 +552,31 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 		d.Register(24, 0, 3, addPartHandler)
 
 		// gh #25/#26: EndTxn (key 26) v0–v3 — state-machine only.
-		// Marker control-batch writes to per-partition leaders land
-		// with WriteTxnMarkers (#27 follow-up) + read-committed
-		// isolation (#31). Until then EndTxn transitions the txn
-		// state and the Java producer's commitTransaction() /
-		// abortTransaction() returns success.
+		// Marker control-batch writes land with WriteTxnMarkers (#27
+		// follow-up) + read-committed isolation (#31). Until then
+		// EndTxn transitions the txn state and the Java producer's
+		// commitTransaction() / abortTransaction() returns success.
 		endTxnHandler := handlers.NewEndTxnHandler(&txnEndStoreAdapter{store: b.txnStore})
 		if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
 			endTxnHandler = endTxnHandler.WithTxnOwnership(ownership)
 		}
 		d.Register(26, 0, 3, endTxnHandler)
 
-		// gh #24: AddOffsetsToTxn (key 25) v0–v3. A transactional
-		// producer calls this before TxnOffsetCommit to tell the
-		// txn coordinator "I'll commit offsets for group G as part
-		// of this txn". The recorded group association drives the
-		// pending-offset commit/abort on EndTxn (via txnOffsetHook
-		// wired from cluster_runtime).
+		// gh #24: AddOffsetsToTxn (key 25) v0–v3. The recorded group
+		// association drives pending-offset commit/abort on EndTxn
+		// (via txnOffsetHook wired below).
 		addOffsetsHandler := handlers.NewAddOffsetsToTxnHandler(&txnGroupStoreAdapter{store: b.txnStore})
 		if ownership, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
 			addOffsetsHandler = addOffsetsHandler.WithTxnOwnership(ownership)
 		}
 		d.Register(25, 0, 3, addOffsetsHandler)
 	}
+
 	// gh #27: TxnOffsetCommit (key 28) v0–v3 — routes through the
-	// GROUP coordinator (not the txn coordinator). Wired from
-	// the consumer-group manager's existing OffsetCommit path. The
-	// handler stages offsets in the offset store's pending layer;
-	// they become visible to OffsetFetch when EndTxn(commit) fires
-	// via the TxnStateStore's txnOffsetHook.
+	// GROUP coordinator (not the txn coordinator). The handler stages
+	// offsets in the offset store's pending layer; they become visible
+	// to OffsetFetch when EndTxn(commit) fires via the TxnStateStore's
+	// txnOffsetHook.
 	if b.coord != nil {
 		d.Register(28, 0, 3, handlers.NewTxnOffsetCommitHandler(b.coord))
 		// Wire the gh #24/#27 hook: EndTxn(commit) materialises any
@@ -557,30 +596,41 @@ func (b *Broker) RegisterHandlers(d *protocol.Dispatcher) *protocol.Dispatcher {
 		wtmHandler = wtmHandler.WithOwnership(owns)
 	}
 	d.Register(27, 0, 1, wtmHandler)
+}
+
+// registerAclHandlers: DescribeAcls (29), CreateAcls (30), DeleteAcls (31).
+// All NOT_CONTROLLER stubs (ACLs are authored inline on each KafkaUser CR's
+// spec.authorization.acls list per gh #135).
+func (b *Broker) registerAclHandlers(d *protocol.Dispatcher) {
 	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
 	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
 	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())
+}
+
+// registerClusterAdminHandlers: DescribeConfigs (32), DescribeLogDirs (35),
+// DescribeCluster (60). The AdminClient + kafka-configs.sh / kafbat-ui /
+// kafka-cluster.sh probes hit these.
+func (b *Broker) registerClusterAdminHandlers(d *protocol.Dispatcher, autoCreate handlers.AutoCreateTopicsConfig) {
 	// gh #109: advertise the live broker config so kafka-configs.sh /
 	// kafbat-ui render the actual auto-create + num-partitions values.
 	d.Register(32, 0, 3, handlers.NewDescribeConfigsHandler(b.topics, b.brokers).
 		WithBrokerConfig(autoCreate.Enabled, autoCreate.NumPartitions))
 	d.Register(35, 0, 1, handlers.NewDescribeLogDirsHandler(b.store, b.topics))
-	d.Register(36, 0, 2, handlers.NewSaslAuthenticateHandler(b.auth))
 	// gh #102: DescribeCluster (key 60). AdminClient.describeCluster()
-	// and `kafka-cluster.sh --describe` need this; without it they
-	// return empty / "no controller". ControllerID falls back to
-	// Self().NodeID (every broker reports itself as controller),
+	// and `kafka-cluster.sh --describe` need this. ControllerID falls
+	// back to Self().NodeID (every broker reports itself as controller),
 	// matching the existing Metadata response (gh #85). Accurate
-	// controller-id reporting via ControllerWatch.CurrentHolder is
-	// a future enhancement once a pod-name → NodeID resolver is in
-	// place.
+	// controller-id reporting via ControllerWatch.CurrentHolder is a
+	// future enhancement once a pod-name → NodeID resolver is in place.
 	d.Register(60, 0, 1, handlers.NewDescribeClusterHandler(b.brokers, b.cfg.ClusterID))
+}
 
+// registerAPIVersionsHandler: ApiVersions (18). Must be registered LAST
+// because it snapshots d.SupportedVersions() and adjusts its own cap.
+func (b *Broker) registerAPIVersionsHandler(d *protocol.Dispatcher) {
 	supported := d.SupportedVersions()
 	supported[18] = [2]int16{0, 4}
 	d.Register(18, 0, 4, handlers.NewAPIVersionsHandler(supported))
-
-	return d
 }
 
 // K8sBrokerSource adapts a *k8s.BrokerRegistry to handlers.BrokerSource.
