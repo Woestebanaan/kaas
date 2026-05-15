@@ -473,6 +473,210 @@ func startBrokerHealth(ctx context.Context, cfg brokerConfig, id brokerIdentity,
 	})
 }
 
+// setupClusterRuntime boots the v3 cluster runtime (controller election,
+// assignment.json writer, heartbeat gRPC server, K8s CR mirror) and wires
+// the broker.Coordinator into the produce handler. Returns nil when the
+// preconditions aren't met (single-broker dev mode without K8s / dataDir
+// / engine — the broker stays on the legacy lease+lock fallback).
+//
+// Must be called BEFORE RegisterHandlers (the produce handler picks up
+// the BrokerCoordinator via WithCoordinator) and BEFORE the topic watcher
+// (the watcher's onEvent callback notifies the controller's AssignmentLoop
+// on KafkaTopic adds/modifies/deletes — gh #74).
+func setupClusterRuntime(ctx context.Context, cfg brokerConfig, id brokerIdentity, engine *storage.DiskStorageEngine, coordMgr *coordinator.Manager, b *broker.Broker) *clusterRuntime {
+	if !cfg.K8sMode || cfg.DataDir == "" || id.K8sClient == nil || engine == nil {
+		return nil
+	}
+	brokerIDStr := fmt.Sprintf("skafka-%d", id.BrokerID)
+	heartbeatAddr := envOr("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094")
+	peerPort := int32(9094)
+	if p, err := strconv.Atoi(envOr("SKAFKA_PEER_HEARTBEAT_PORT", "9094")); err == nil {
+		peerPort = int32(p)
+	}
+
+	// Build a controller-runtime client for the KafkaClusterAssignments
+	// CR mirror (Phase 6). Failures are non-fatal — the file on the
+	// PVC is the source of truth, the CR is kubectl-debugging convenience.
+	var crClient sigs_client.Client
+	crScheme := runtime.NewScheme()
+	if err := operatorv1.AddToScheme(crScheme); err == nil {
+		if cl, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: crScheme}); err == nil {
+			crClient = cl
+		} else {
+			slog.Warn("crmirror: build controller-runtime client", "err", err)
+		}
+	}
+
+	// Cluster name maps the broker back to its KafkaCluster CR. The Helm
+	// chart populates SKAFKA_CLUSTER_NAME via release-name templating; if
+	// unset, fall back to SKAFKA_CLUSTER_ID so old deploys without the new
+	// env var still work.
+	clusterName := envOr("SKAFKA_CLUSTER_NAME", cfg.ClusterID)
+
+	// Controller Lease tuning. Zero (or unparseable) → cluster_runtime
+	// falls back to controller.New defaults (15s/10s/2s). The Helm
+	// chart's broker.controllerLease.* block is the production source.
+	leaseDuration := envSecondsOr("SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS", 0)
+	renewDeadline := envSecondsOr("SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS", 0)
+	retryPeriod := envSecondsOr("SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS", 0)
+
+	rt := startClusterRuntime(ctx, clusterRuntimeConfig{
+		k8sClient:         id.K8sClient,
+		namespace:         cfg.Namespace,
+		brokerIDStr:       brokerIDStr,
+		dataDir:           cfg.DataDir,
+		engine:            engine,
+		coordMgr:          coordMgr,
+		topicRegistry:     b.Topics(),
+		brokerReg:         id.BrokerReg,
+		heartbeatAddr:     heartbeatAddr,
+		peerHeartbeatPort: peerPort,
+		crClient:          crClient,
+		clusterName:       clusterName,
+		leaseDuration:     leaseDuration,
+		renewDeadline:     renewDeadline,
+		retryPeriod:       retryPeriod,
+	})
+	b.UseCoordinator(rt.coord)
+	// Feed runtime state to the ObservableGauge callback registered by
+	// observability.Bootstrap. Until this runs, gauges report zero.
+	observability.SetGaugeSource(&runtimeGaugeSource{rt: rt})
+	return rt
+}
+
+// wireTopicCRWriter plugs admin-protocol CreateTopics/DeleteTopics into
+// the operator: every API request writes a KafkaTopic CR; the operator's
+// reconciler then materialises partition dirs on the shared PVC and every
+// broker's TopicWatcher fires Added — so a Metadata refresh from any peer
+// sees the new topic. Without this, admin-protocol topic ops are local
+// to a single broker.
+//
+// No-op outside K8s mode (no API server to write CRs against).
+func wireTopicCRWriter(b *broker.Broker, cfg brokerConfig) {
+	if !cfg.K8sMode {
+		return
+	}
+	topicCRScheme := runtime.NewScheme()
+	if err := operatorv1.AddToScheme(topicCRScheme); err != nil {
+		return
+	}
+	cl, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: topicCRScheme})
+	if err != nil {
+		slog.Warn("admin: build CR writer failed; CreateTopics will be local-only", "err", err)
+		return
+	}
+	// gh #106: optional ArgoCD integration. When ApplicationName is set,
+	// admin-protocol-created CRs get tracking-id + compare-options
+	// annotations so they coexist cleanly with git-managed CRs in the
+	// same ArgoCD Application's resource tree.
+	argoCfg := k8spkg.ArgoCDConfig{
+		Enabled:         os.Getenv("SKAFKA_ARGOCD_ENABLED") == "true",
+		ApplicationName: os.Getenv("SKAFKA_ARGOCD_APPLICATION_NAME"),
+		CompareOptions:  os.Getenv("SKAFKA_ARGOCD_COMPARE_OPTIONS"),
+		SyncOptions:     os.Getenv("SKAFKA_ARGOCD_SYNC_OPTIONS"),
+	}
+	// Default compare-options to IgnoreExtraneous when ArgoCD is on but
+	// the env was not explicitly set. Empty stays empty when set to "".
+	if argoCfg.Enabled {
+		if _, set := os.LookupEnv("SKAFKA_ARGOCD_COMPARE_OPTIONS"); !set {
+			argoCfg.CompareOptions = "IgnoreExtraneous"
+		}
+	}
+	b.UseTopicCRWriter(k8spkg.NewTopicCRWriter(cl, cfg.Namespace, argoCfg))
+}
+
+// setupDispatcher builds the request dispatcher: per-listener auth-engine
+// map, cluster-wide authorizer (gh #126), request-level observability +
+// tracing middleware, then registers all the Kafka API handlers. Returns
+// the dispatcher and the per-listener engine map that setupListeners may
+// later override.
+//
+// Order matters: middleware Use() calls must happen BEFORE RegisterHandlers
+// (the chain is applied at Register time).
+func setupDispatcher(ctx context.Context, authEngine auth.AuthEngine, allowAll *broker.AllowAllAuthEngine, b *broker.Broker) (*protocol.Dispatcher, auth.PerListenerAuthEngine) {
+	d := protocol.NewDispatcher()
+	// gh #124: per-listener engine selector. Until SKAFKA_LISTENERS is
+	// parsed (setupListeners), build a 3-entry map matching the legacy
+	// internal/external/authed triplet:
+	//   - internal: AllowAll unless SKAFKA_REQUIRE_SASL forces real
+	//   - external: same as internal (TLS is independent of auth)
+	//   - authed:   always real engine — SASL-required listener
+	// The "" fallback uses the plain pick so untagged connections
+	// (test harnesses) preserve the pre-#124 behaviour.
+	globalRequireSASL := os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
+	pickPlain := func() auth.AuthEngine {
+		if globalRequireSASL {
+			return authEngine
+		}
+		return allowAll
+	}
+	pickAuthed := func() auth.AuthEngine {
+		// Authed listener always requires SASL. Falls back to allowAll
+		// only when no real engine is wired (auth.enabled: false), in
+		// which case the listener doesn't carry meaningful policy
+		// anyway — every conn becomes ANONYMOUS regardless.
+		if _, isReal := authEngine.(*auth.RealAuthEngine); isReal {
+			return authEngine
+		}
+		return allowAll
+	}
+	listenerEngines := auth.PerListenerAuthEngine{
+		string(connstate.ListenerName("internal")): pickPlain(),
+		string(connstate.ListenerName("external")): pickPlain(),
+		string(connstate.ListenerName("authed")):   pickAuthed(),
+		"": pickPlain(),
+	}
+	d.SetAuthEngines(listenerEngines)
+	if b != nil {
+		b.SetAuthEngineSelector(listenerEngines)
+		applyClusterAuthorizer(b, authEngine)
+	}
+	// gh #121: request-level observability is a uniform middleware so
+	// every API key gets a latency histogram. Must Use() before
+	// RegisterHandlers — the chain is applied at Register time.
+	d.Use(protocol.RequestObservability())
+	// gh #121 PR4: per-request OTel span around every handler. Tracing
+	// is the inner ring — RequestObservability wraps around it so the
+	// latency histogram captures the tracing-middleware overhead too.
+	d.Use(protocol.RequestTracing())
+	b.RegisterHandlers(d)
+	// gh #108 phase 2: cross-broker producer-fence broadcast.
+	// No-op in dev-mode (memory storage).
+	b.StartFenceWatcher(ctx)
+	return d, listenerEngines
+}
+
+// applyClusterAuthorizer wires the gh #126 cluster-wide authorizer when
+// SKAFKA_AUTHORIZATION_TYPE=simple is set AND the broker has a real auth
+// engine (auth.enabled: true). SKAFKA_SUPER_USERS wraps the simple
+// authorizer with an early-allow set — Strimzi's `authorization.superUsers`
+// semantic.
+func applyClusterAuthorizer(b *broker.Broker, authEngine auth.AuthEngine) {
+	if os.Getenv("SKAFKA_AUTHORIZATION_TYPE") != "simple" {
+		return
+	}
+	real, ok := authEngine.(*auth.RealAuthEngine)
+	if !ok {
+		slog.Warn("SKAFKA_AUTHORIZATION_TYPE=simple set but no RealAuthEngine wired — falling back to AllowAll. Set auth.enabled: true in the chart to load credentials.json / acls.json.")
+		return
+	}
+	var authz auth.Authorizer = real
+	if raw := os.Getenv("SKAFKA_SUPER_USERS"); raw != "" {
+		var supers []string
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				supers = append(supers, s)
+			}
+		}
+		if len(supers) > 0 {
+			authz = auth.NewSuperUserAuthorizer(supers, real)
+			slog.Info("authorization configured", "type", "simple", "super_users", supers)
+		}
+	}
+	b.SetAuthorizer(authz)
+	slog.Info("authorization configured (cluster-wide)", "type", "simple")
+}
+
 // setupAuthEngine returns the auth.AuthEngine for the broker. Default is
 // AllowAll (anonymous). When SKAFKA_DATA_DIR is set and SKAFKA_AUTH_DISABLED
 // is not "true", attempts to load RealAuthEngine from /data/__cluster/...
@@ -565,74 +769,7 @@ func runBroker(ctx context.Context) {
 		slog.Info("retention + compaction cleaner started")
 	}
 
-	// v3 cluster runtime must boot BEFORE RegisterHandlers so the
-	// BrokerCoordinator is available for the produce handler to pick up
-	// via WithCoordinator. In single-broker dev mode (no k8sClient or
-	// no dataDir) the runtime isn't started and the broker stays on
-	// the legacy lease+lock fallback path.
-	//
-	// It also boots before the topic watcher so the watcher's onEvent
-	// callback can notify the controller's AssignmentLoop on KafkaTopic
-	// adds/modifies/deletes — fixes the gap where new topics never made
-	// it into assignment.json (gh #74).
-	var rt *clusterRuntime
-	if k8sMode && dataDir != "" && k8sClient != nil && engine != nil {
-		brokerIDStr := fmt.Sprintf("skafka-%d", brokerID)
-		heartbeatAddr := envOr("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094")
-		peerPort := int32(9094)
-		if p, err := strconv.Atoi(envOr("SKAFKA_PEER_HEARTBEAT_PORT", "9094")); err == nil {
-			peerPort = int32(p)
-		}
-
-		// Build a controller-runtime client for the KafkaClusterAssignments
-		// CR mirror (Phase 6). Failures are non-fatal — the file on the
-		// PVC is the source of truth, the CR is kubectl-debugging convenience.
-		var crClient sigs_client.Client
-		crScheme := runtime.NewScheme()
-		if err := operatorv1.AddToScheme(crScheme); err == nil {
-			if cl, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: crScheme}); err == nil {
-				crClient = cl
-			} else {
-				slog.Warn("crmirror: build controller-runtime client", "err", err)
-			}
-		}
-
-		// Cluster name maps the broker back to its KafkaCluster CR. The Helm
-		// chart populates SKAFKA_CLUSTER_NAME via release-name templating; if
-		// unset, fall back to SKAFKA_CLUSTER_ID (the value we already pass for
-		// Metadata responses) so old deploys without the new env var still work.
-		clusterName := envOr("SKAFKA_CLUSTER_NAME", clusterID)
-
-		// Controller Lease tuning. Zero (or unparseable) → cluster_runtime
-		// falls back to controller.New defaults (15s/10s/2s). The Helm
-		// chart's broker.controllerLease.* block is the production source.
-		leaseDuration := envSecondsOr("SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS", 0)
-		renewDeadline := envSecondsOr("SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS", 0)
-		retryPeriod := envSecondsOr("SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS", 0)
-
-		rt = startClusterRuntime(ctx, clusterRuntimeConfig{
-			k8sClient:         k8sClient,
-			namespace:         namespace,
-			brokerIDStr:       brokerIDStr,
-			dataDir:           dataDir,
-			engine:            engine,
-			coordMgr:          coordMgr,
-			topicRegistry:     b.Topics(),
-			brokerReg:         brokerReg,
-			heartbeatAddr:     heartbeatAddr,
-			peerHeartbeatPort: peerPort,
-			crClient:          crClient,
-			clusterName:       clusterName,
-			leaseDuration:     leaseDuration,
-			renewDeadline:     renewDeadline,
-			retryPeriod:       retryPeriod,
-		})
-		b.UseCoordinator(rt.coord)
-		// Phase 10 Gap #3c: feed runtime state to the ObservableGauge
-		// callback registered by observability.Bootstrap. Until this
-		// runs, gauges report zero.
-		observability.SetGaugeSource(&runtimeGaugeSource{rt: rt})
-	}
+	rt := setupClusterRuntime(ctx, cfg, id, engine, coordMgr, b)
 
 	// Watch KafkaTopic CRs so topics created after startup become visible
 	// without a broker restart, partition expansions are picked up, and
@@ -642,146 +779,10 @@ func runBroker(ctx context.Context) {
 		startTopicWatcher(ctx, namespace, b, engine, leaseManager, brokerReg, brokerID, k8sTopics, rt)
 	}
 
-	// gh #51: wire the KafkaTopic CR writer so admin-protocol
-	// CreateTopics/DeleteTopics calls (Kafbat, kafka-topics.sh, Java
-	// AdminClient) write the CR. Operator reconciles → partition dirs
-	// on the shared PVC + every broker's TopicWatcher fires Added,
-	// so a Metadata refresh from any peer sees the new topic. Without
-	// this writer, admin-protocol topic ops are local to one broker.
-	if k8sMode {
-		topicCRScheme := runtime.NewScheme()
-		if err := operatorv1.AddToScheme(topicCRScheme); err == nil {
-			if cl, err := sigs_client.New(mustRestConfig(), sigs_client.Options{Scheme: topicCRScheme}); err == nil {
-				// gh #106: optional ArgoCD integration. When
-				// SKAFKA_ARGOCD_APPLICATION_NAME is set, admin-
-				// protocol-created CRs get tracking-id +
-				// (optionally) compare-options annotations so
-				// they coexist cleanly with git-managed CRs in
-				// the same ArgoCD Application's resource tree.
-				// Empty applicationName (the default) produces
-				// plain CRs with no argocd.argoproj.io/* annotations.
-				// SKAFKA_ARGOCD_COMPARE_OPTIONS defaults to
-				// "IgnoreExtraneous" via the chart, but is empty
-				// when the chart isn't injecting it (running
-				// outside the helm template) — explicit
-				// fallback handled below.
-				argoCfg := k8spkg.ArgoCDConfig{
-					Enabled:         os.Getenv("SKAFKA_ARGOCD_ENABLED") == "true",
-					ApplicationName: os.Getenv("SKAFKA_ARGOCD_APPLICATION_NAME"),
-					CompareOptions:  os.Getenv("SKAFKA_ARGOCD_COMPARE_OPTIONS"),
-					SyncOptions:     os.Getenv("SKAFKA_ARGOCD_SYNC_OPTIONS"),
-				}
-				// Default compare-options to IgnoreExtraneous when
-				// ArgoCD integration is on but the env var was not
-				// explicitly set. Empty stays empty when the env
-				// var was set to "" deliberately (operators wanting
-				// tracking-id without drift suppression). SyncOptions
-				// defaults to empty (no annotation) — opt-in only,
-				// since the common case is already covered by
-				// IgnoreExtraneous.
-				if argoCfg.Enabled {
-					if _, set := os.LookupEnv("SKAFKA_ARGOCD_COMPARE_OPTIONS"); !set {
-						argoCfg.CompareOptions = "IgnoreExtraneous"
-					}
-				}
-				b.UseTopicCRWriter(k8spkg.NewTopicCRWriter(cl, namespace, argoCfg))
-			} else {
-				slog.Warn("admin: build CR writer failed; CreateTopics will be local-only", "err", err)
-			}
-		}
-	}
+	wireTopicCRWriter(b, cfg)
 
-	d := protocol.NewDispatcher()
-	// gh #124 part 1: per-listener engine selector replaces the global
-	// SKAFKA_REQUIRE_SASL flag + the hardcoded `Listener == Authed`
-	// branch in dispatch.go. Until part 2 lands the listener list,
-	// build a 3-entry map matching the legacy internal/external/authed
-	// triplet:
-	//   - internal: AllowAll unless SKAFKA_REQUIRE_SASL forces real
-	//   - external: same as internal (TLS is independent of auth here)
-	//   - authed:   always the real engine — SASL-required listener
-	// The `""` fallback uses the broker-wide default so untagged
-	// connections (test harnesses) preserve the pre-#124 behaviour.
 	allowAll := broker.NewAllowAllAuthEngine()
-	globalRequireSASL := os.Getenv("SKAFKA_REQUIRE_SASL") == "true"
-	pickPlain := func() auth.AuthEngine {
-		if globalRequireSASL {
-			return authEngine
-		}
-		return allowAll
-	}
-	pickAuthed := func() auth.AuthEngine {
-		// Authed listener always requires SASL. Falls back to allowAll
-		// only when no real engine is wired (auth.enabled: false), in
-		// which case the listener doesn't carry meaningful policy
-		// anyway — every conn becomes ANONYMOUS regardless.
-		if _, isReal := authEngine.(*auth.RealAuthEngine); isReal {
-			return authEngine
-		}
-		return allowAll
-	}
-	listenerEngines := auth.PerListenerAuthEngine{
-		string(connstate.ListenerName("internal")): pickPlain(),
-		string(connstate.ListenerName("external")): pickPlain(),
-		string(connstate.ListenerName("authed")):   pickAuthed(),
-		"":                                  pickPlain(),
-	}
-	d.SetAuthEngines(listenerEngines)
-	if b != nil {
-		b.SetAuthEngineSelector(listenerEngines)
-		// gh #126: cluster-wide authorization. When the chart emits
-		// SKAFKA_AUTHORIZATION_TYPE=simple, RealAuthEngine's ACL
-		// path becomes the cluster-wide Authorizer for every
-		// connection regardless of which listener accepted it.
-		// SKAFKA_SUPER_USERS (comma-separated principal names) wraps
-		// the simple authorizer with an early-allow set — Strimzi's
-		// `authorization.superUsers` semantic. When the env is
-		// unset / "none", the default AllowAllAuthorizer stays
-		// wired and no ACLs run (matches Strimzi's "missing
-		// authorization property = no restrictions").
-		authzType := os.Getenv("SKAFKA_AUTHORIZATION_TYPE")
-		if authzType == "simple" {
-			if real, ok := authEngine.(*auth.RealAuthEngine); ok {
-				var authz auth.Authorizer = real
-				if raw := os.Getenv("SKAFKA_SUPER_USERS"); raw != "" {
-					var supers []string
-					for _, s := range strings.Split(raw, ",") {
-						if s = strings.TrimSpace(s); s != "" {
-							supers = append(supers, s)
-						}
-					}
-					if len(supers) > 0 {
-						authz = auth.NewSuperUserAuthorizer(supers, real)
-						slog.Info("authorization configured",
-							"type", "simple",
-							"super_users", supers)
-					}
-				}
-				b.SetAuthorizer(authz)
-				if authzType == "simple" {
-					slog.Info("authorization configured (cluster-wide)", "type", "simple")
-				}
-			} else {
-				slog.Warn("SKAFKA_AUTHORIZATION_TYPE=simple set but no RealAuthEngine wired — falling back to AllowAll. Set auth.enabled: true in the chart to load credentials.json / acls.json.")
-			}
-		}
-	}
-	// gh #121 PR2.5: request-level observability is a uniform middleware
-	// so every API key gets a latency histogram, not just the two
-	// handlers that happened to remember the boilerplate. Must Use()
-	// before RegisterHandlers — the chain is applied at Register time.
-	d.Use(protocol.RequestObservability())
-	// gh #121 PR4: per-request OTel span around every handler. Sampled
-	// by the global tracer provider (default 10% via Bootstrap).
-	// Tracing is the inner ring — RequestObservability wraps around
-	// it so the latency histogram captures the tracing-middleware
-	// overhead too, giving an honest "wall-clock to serve" number.
-	d.Use(protocol.RequestTracing())
-	b.RegisterHandlers(d)
-	// gh #108 phase 2: cross-broker producer-fence broadcast. Started
-	// after handlers register so the watcher's storage engine and
-	// outbound fence log are wired. No-op in dev-mode (memory storage).
-	b.StartFenceWatcher(ctx)
+	d, listenerEngines := setupDispatcher(ctx, authEngine, allowAll, b)
 
 	ls := setupListeners(cfg, authEngine, allowAll, listenerEngines, &brokerSource)
 	listenerCfgs := ls.Configs
