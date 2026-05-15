@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/sys/unix"
 
 	"github.com/woestebanaan/skafka/internal/lease"
 	"github.com/woestebanaan/skafka/internal/observability"
@@ -1290,10 +1289,6 @@ func (e *DiskStorageEngine) ReadSegmentRef(topic string, partition int32, startO
 		if openErr != nil {
 			return nil, 0, 0, nil, false, nil
 		}
-		// FADV_SEQUENTIAL on the closed-segment read fd: aggressive
-		// read-ahead for the sendfile that follows. Closed segments
-		// are read sequentially by definition (no random seeks).
-		_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_SEQUENTIAL)
 		return f, approxPos, int(wantLen), func() { _ = f.Close() }, true, nil
 	}
 
