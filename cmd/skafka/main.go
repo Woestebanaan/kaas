@@ -100,6 +100,78 @@ func loadBrokerConfig() brokerConfig {
 	}
 }
 
+// brokerIdentity gathers the per-mode wiring runBroker needs after it has
+// decided whether this process is a Kubernetes StatefulSet pod or a
+// local-dev singleton. K8sClient and BrokerReg are nil in local-dev mode;
+// LeaseManager is always non-nil (a stub in local-dev).
+//
+// LeaseManager's onStarted/onStopped callbacks are placeholders here —
+// runBroker wires them in after the storage engine exists (KubernetesLeaseManager
+// wraps engine.TakeoverPartition / engine.RelinquishPartition).
+type brokerIdentity struct {
+	BrokerID     int32
+	K8sClient    kubernetes.Interface
+	BrokerReg    *k8spkg.BrokerRegistry
+	BrokerSource handlers.BrokerSource
+	LeaseManager lease.LeaseManager
+}
+
+// setupBrokerIdentity dispatches to the K8s or local-dev path based on
+// cfg.K8sMode. Fatal env / API errors call os.Exit(1) here (same as the
+// inline code did before extraction) — runBroker can't proceed without
+// identity in K8s mode.
+func setupBrokerIdentity(ctx context.Context, cfg brokerConfig) brokerIdentity {
+	if !cfg.K8sMode {
+		slog.Info("local-dev mode (single broker)")
+		return brokerIdentity{
+			BrokerID:     0,
+			LeaseManager: broker.NewLocalLeaseManager(),
+			BrokerSource: handlers.BrokerInfo{NodeID: 0, Host: cfg.Host, Port: cfg.PortNum, ClusterID: cfg.ClusterID},
+		}
+	}
+
+	k8sClient, err := buildK8sClient()
+	if err != nil {
+		slog.Error("build k8s client", "err", err)
+		os.Exit(1)
+	}
+	identity, err := k8spkg.NewBrokerIdentity(cfg.Namespace, cfg.HeadlessSvc, cfg.PortNum)
+	if err != nil {
+		slog.Error("broker identity", "err", err)
+		os.Exit(1)
+	}
+
+	self := k8spkg.BrokerEndpoint{NodeID: identity.Ordinal, Host: identity.Host, Port: cfg.PortNum, Ready: true}
+	brokerReg := k8spkg.NewBrokerRegistry(self, identity.DNS, nil)
+	go func() {
+		if err := brokerReg.Watch(ctx, k8sClient, cfg.Namespace, cfg.HeadlessSvc); err != nil && ctx.Err() == nil {
+			slog.Error("endpoint watcher: stopped before ctx cancellation (broker has lost EndpointSlice watch and will not see peer broker join/leave events until restart; assignment-based ownership decisions still work because the controller writes assignment.json independently)",
+				"err", err)
+		}
+	}()
+
+	src := broker.NewK8sBrokerSource(brokerReg)
+	if pattern := os.Getenv("EXTERNAL_HOSTNAME_PATTERN"); pattern != "" {
+		src.ExtHostPattern = pattern
+		extPort := int32(9093)
+		if p, err := strconv.Atoi(envOr("SKAFKA_TLS_PORT", "9093")); err == nil {
+			extPort = int32(p)
+		}
+		src.ExtPort = extPort
+	}
+
+	slog.Info("kubernetes mode",
+		"pod", identity.PodName, "ordinal", identity.Ordinal, "namespace", cfg.Namespace)
+
+	return brokerIdentity{
+		BrokerID:     identity.Ordinal,
+		K8sClient:    k8sClient,
+		BrokerReg:    brokerReg,
+		BrokerSource: src,
+		LeaseManager: lease.NewKubernetesLeaseManager(k8sClient, cfg.Namespace, identity.PodName, nil, nil),
+	}
+}
+
 func runBroker(ctx context.Context) {
 	cfg := loadBrokerConfig()
 	host := cfg.Host
@@ -108,64 +180,20 @@ func runBroker(ctx context.Context) {
 	clusterID := cfg.ClusterID
 	dataDir := cfg.DataDir
 	namespace := cfg.Namespace
-	headlessSvc := cfg.HeadlessSvc
+	_ = cfg.HeadlessSvc // consumed inside setupBrokerIdentity
+
+	id := setupBrokerIdentity(ctx, cfg)
+	brokerID := id.BrokerID
+	k8sClient := id.K8sClient
+	brokerReg := id.BrokerReg
+	brokerSource := id.BrokerSource
+	leaseManager := id.LeaseManager
+	k8sMode := cfg.K8sMode
 
 	var (
-		leaseManager lease.LeaseManager
-		brokerSource handlers.BrokerSource
-		brokerID     int32
-		k8sClient    kubernetes.Interface
-		brokerReg    *k8spkg.BrokerRegistry
-		coordMgr     *coordinator.Manager
-		k8sTopics    []topicSpec
+		coordMgr  *coordinator.Manager
+		k8sTopics []topicSpec
 	)
-
-	k8sMode := cfg.K8sMode
-	if k8sMode {
-		var err error
-		k8sClient, err = buildK8sClient()
-		if err != nil {
-			slog.Error("build k8s client", "err", err)
-			os.Exit(1)
-		}
-
-		identity, err := k8spkg.NewBrokerIdentity(namespace, headlessSvc, portNum)
-		if err != nil {
-			slog.Error("broker identity", "err", err)
-			os.Exit(1)
-		}
-		brokerID = identity.Ordinal
-
-		self := k8spkg.BrokerEndpoint{NodeID: identity.Ordinal, Host: identity.Host, Port: portNum, Ready: true}
-		brokerReg = k8spkg.NewBrokerRegistry(self, identity.DNS, nil)
-		go func() {
-			if err := brokerReg.Watch(ctx, k8sClient, namespace, headlessSvc); err != nil && ctx.Err() == nil {
-				slog.Error("endpoint watcher: stopped before ctx cancellation (broker has lost EndpointSlice watch and will not see peer broker join/leave events until restart; assignment-based ownership decisions still work because the controller writes assignment.json independently)",
-					"err", err)
-			}
-		}()
-		src := broker.NewK8sBrokerSource(brokerReg)
-		if pattern := os.Getenv("EXTERNAL_HOSTNAME_PATTERN"); pattern != "" {
-			src.ExtHostPattern = pattern
-			extPort := int32(9093)
-			if p, err := strconv.Atoi(envOr("SKAFKA_TLS_PORT", "9093")); err == nil {
-				extPort = int32(p)
-			}
-			src.ExtPort = extPort
-		}
-		brokerSource = src
-
-		// Callbacks are wired after DiskStorageEngine is created; use placeholders for now.
-		leaseManager = lease.NewKubernetesLeaseManager(k8sClient, namespace, identity.PodName, nil, nil)
-
-		slog.Info("kubernetes mode",
-			"pod", identity.PodName, "ordinal", identity.Ordinal, "namespace", namespace)
-	} else {
-		brokerID = 0
-		leaseManager = broker.NewLocalLeaseManager()
-		brokerSource = handlers.BrokerInfo{NodeID: 0, Host: host, Port: portNum, ClusterID: clusterID}
-		slog.Info("local-dev mode (single broker)")
-	}
 
 	// --- Storage ---
 	var store storage.StorageEngine
