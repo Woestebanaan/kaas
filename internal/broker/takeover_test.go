@@ -53,6 +53,9 @@ func (r *recordingStorage) Read(_ context.Context, _ string, _ int32, _ int64, _
 }
 func (r *recordingStorage) HighWatermark(_ string, _ int32) (int64, error)  { return 0, nil }
 func (r *recordingStorage) LogStartOffset(_ string, _ int32) (int64, error) { return 0, nil }
+func (r *recordingStorage) OffsetForLeaderEpoch(_ string, _ int32, _ int32) (int32, int64, error) {
+	return -1, -1, nil
+}
 func (r *recordingStorage) CreatePartition(_ string, _ int32) error         { return nil }
 func (r *recordingStorage) DeletePartition(_ string, _ int32) error         { return nil }
 func (r *recordingStorage) PartitionSize(_ string, _ int32) int64           { return 0 }

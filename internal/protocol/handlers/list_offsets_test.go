@@ -46,6 +46,9 @@ func (stubStorage) Relinquish(_ string, _ int32) error { return nil }
 func (stubStorage) DeleteRecords(_ string, _ int32, _ int64) (int64, error) {
 	return 0, nil
 }
+func (stubStorage) OffsetForLeaderEpoch(_ string, _ int32, _ int32) (int32, int64, error) {
+	return -1, -1, nil
+}
 
 var _ storage.StorageEngine = stubStorage{}
 

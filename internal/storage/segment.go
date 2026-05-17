@@ -18,7 +18,12 @@ import (
 
 // segmentMeta describes a closed (read-only) segment.
 type segmentMeta struct {
-	baseOffset   int64
+	baseOffset int64
+	// epoch is the leader-epoch under which this segment was written
+	// (parsed from the {epoch:08x}-… filename prefix). Legacy
+	// non-prefixed segments report epoch=0. Needed for the gh #101
+	// OffsetForLeaderEpoch lookup; otherwise it's diagnostic-only.
+	epoch        int64
 	maxTimestamp int64 // highest maxTimestamp in this segment; 0 if unknown
 	logPath      string
 	indexPath    string
@@ -541,12 +546,13 @@ func listSegments(dir string) ([]segmentMeta, error) {
 			continue
 		}
 		stem := strings.TrimSuffix(e.Name(), ".log")
-		baseOffset, ok := parseSegmentStem(stem)
+		baseOffset, epoch, ok := parseSegmentStem(stem)
 		if !ok {
 			continue
 		}
 		segs = append(segs, segmentMeta{
 			baseOffset: baseOffset,
+			epoch:      epoch,
 			logPath:    filepath.Join(dir, e.Name()),
 			indexPath:  filepath.Join(dir, stem+".index"),
 		})
@@ -555,27 +561,28 @@ func listSegments(dir string) ([]segmentMeta, error) {
 	return segs, nil
 }
 
-// parseSegmentStem extracts the baseOffset from either a legacy stem
-// (`00000000000000000123`) or an epoch-prefixed stem (`00000005-00000000000000000123`).
-func parseSegmentStem(stem string) (int64, bool) {
+// parseSegmentStem extracts the (baseOffset, epoch) pair from either a
+// legacy stem (`00000000000000000123`, epoch=0) or an epoch-prefixed
+// stem (`00000005-00000000000000000123`). The epoch is needed by the
+// gh #101 OffsetForLeaderEpoch lookup; pre-#101 the second return was
+// thrown away.
+func parseSegmentStem(stem string) (int64, int64, bool) {
 	if dash := strings.IndexByte(stem, '-'); dash >= 0 {
-		// Epoch-prefixed format. Validate the epoch is a hex number; we
-		// don't currently use it on the read path (epoch is stored in
-		// the manifest), but a non-hex prefix means this isn't our file.
-		if _, err := strconv.ParseUint(stem[:dash], 16, 32); err != nil {
-			return 0, false
+		epoch, err := strconv.ParseUint(stem[:dash], 16, 32)
+		if err != nil {
+			return 0, 0, false
 		}
 		bo, err := strconv.ParseInt(stem[dash+1:], 10, 64)
 		if err != nil {
-			return 0, false
+			return 0, 0, false
 		}
-		return bo, true
+		return bo, int64(epoch), true
 	}
 	bo, err := strconv.ParseInt(stem, 10, 64)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	return bo, true
+	return bo, 0, true
 }
 
 // segmentMaxTimestamp scans a .log file and returns the highest maxTimestamp seen.

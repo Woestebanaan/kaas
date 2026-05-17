@@ -9,23 +9,25 @@ import (
 
 func TestParseSegmentStem(t *testing.T) {
 	cases := []struct {
-		stem string
-		want int64
-		ok   bool
+		stem      string
+		wantBase  int64
+		wantEpoch int64
+		ok        bool
 	}{
-		{"00000000000000000000", 0, true},                   // legacy zero
-		{"00000000000000000123", 123, true},                 // legacy non-zero
-		{"00000005-00000000000000000123", 123, true},        // epoch-prefixed
-		{"deadbeef-00000000000000999999", 999999, true},     // hex epoch
-		{"GG-123", 0, false},                                // not hex (G is invalid)
-		{"foo", 0, false},                                   // not a stem at all
-		{"00000000-foo", 0, false},                          // good prefix, bad offset
-		{"-00000000000000000000", 0, false},                 // empty epoch portion
+		{"00000000000000000000", 0, 0, true},               // legacy zero
+		{"00000000000000000123", 123, 0, true},             // legacy non-zero
+		{"00000005-00000000000000000123", 123, 5, true},    // epoch-prefixed
+		{"deadbeef-00000000000000999999", 999999, 0xdeadbeef, true},
+		{"GG-123", 0, 0, false},                            // not hex (G is invalid)
+		{"foo", 0, 0, false},                               // not a stem at all
+		{"00000000-foo", 0, 0, false},                      // good prefix, bad offset
+		{"-00000000000000000000", 0, 0, false},             // empty epoch portion
 	}
 	for _, tc := range cases {
-		got, ok := parseSegmentStem(tc.stem)
-		if ok != tc.ok || got != tc.want {
-			t.Errorf("parseSegmentStem(%q) = (%d,%v), want (%d,%v)", tc.stem, got, ok, tc.want, tc.ok)
+		gotBase, gotEpoch, ok := parseSegmentStem(tc.stem)
+		if ok != tc.ok || gotBase != tc.wantBase || gotEpoch != tc.wantEpoch {
+			t.Errorf("parseSegmentStem(%q) = (base=%d, epoch=%d, ok=%v), want (base=%d, epoch=%d, ok=%v)",
+				tc.stem, gotBase, gotEpoch, ok, tc.wantBase, tc.wantEpoch, tc.ok)
 		}
 	}
 }

@@ -121,6 +121,16 @@ func (m *MemoryStorage) LogStartOffset(_ string, _ int32) (int64, error) {
 	return 0, nil
 }
 
+// OffsetForLeaderEpoch is a no-op in dev mode: MemoryStorage doesn't
+// model epochs (single-process, no controller failover), so the
+// answer is always "nothing to truncate to" — sentinel (-1, -1, nil).
+// Java consumers connected to dev-mode brokers won't issue this in
+// practice (it requires a non-zero leader_epoch from a Fetch / Metadata
+// response, and MemoryStorage never bumps epoch above 0).
+func (m *MemoryStorage) OffsetForLeaderEpoch(_ string, _ int32, _ int32) (int32, int64, error) {
+	return -1, -1, nil
+}
+
 // PartitionSize is always 0 in memory storage; there are no segment files.
 func (m *MemoryStorage) PartitionSize(_ string, _ int32) int64 { return 0 }
 

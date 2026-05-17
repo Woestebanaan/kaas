@@ -45,6 +45,18 @@ var (
 	// but is the correct response if it does.
 	ErrInvalidProducerEpoch = errors.New("storage: invalid producer epoch")
 
+	// ErrEpochFenced (gh #101) — caller's requested leader_epoch is
+	// HIGHER than the broker's current epoch for the partition. The
+	// caller hasn't seen the controller transition that lowered them.
+	// OffsetForLeaderEpoch (API 23) maps this to FENCED_LEADER_EPOCH.
+	ErrEpochFenced = errors.New("storage: leader epoch fenced")
+	// ErrEpochTooOld (gh #101) — caller's requested leader_epoch is
+	// older than every retained segment. Apache returns (-1, -1) with
+	// no error here; we surface it so the handler can decide whether
+	// to translate to UNKNOWN_LEADER_EPOCH (Apache's choice for the
+	// "nothing to truncate to" case).
+	ErrEpochTooOld = errors.New("storage: leader epoch older than retained log")
+
 	// ErrStorageStalled fires when the partition committer's fsync
 	// exceeds Config.FsyncMaxLatency (gh #95). The underlying RWX
 	// backend is unreachable / unresponsive — typically a crashed NFS
@@ -94,6 +106,13 @@ type StorageEngine interface {
 	Read(ctx context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]byte, error)
 	HighWatermark(topic string, partition int32) (int64, error)
 	LogStartOffset(topic string, partition int32) (int64, error)
+	// OffsetForLeaderEpoch implements KIP-101 (gh #101): for a Java
+	// consumer that holds leader_epoch E, return (resultEpoch,
+	// endOffset) marking the offset just past the last record at
+	// epoch E. Backs API key 23. See the DiskStorageEngine method
+	// comment for the full semantics including ErrEpochFenced /
+	// ErrEpochTooOld sentinels.
+	OffsetForLeaderEpoch(topic string, partition int32, leaderEpoch int32) (resultEpoch int32, endOffset int64, err error)
 	// DeleteRecords advances the partition's log start offset to (at
 	// least) targetOffset, making earlier records invisible to Fetch.
 	// targetOffset == -1 is a sentinel for "current high watermark"
@@ -1150,8 +1169,15 @@ func (e *DiskStorageEngine) rollSegment(ctx context.Context, ps *partitionState)
 
 	closed := segmentMeta{
 		baseOffset: ps.active.baseOffset,
-		logPath:    ps.active.logPath,
-		indexPath:  ps.active.indexPath,
+		// gh #101: the closed segment carries the epoch under which
+		// its records were written, so OffsetForLeaderEpoch can find
+		// the boundary at which a higher epoch took over. Without
+		// this the field would be zero-valued for runtime-rolled
+		// segments (listSegments() only re-populates it from the
+		// filename when reopening from disk).
+		epoch:     ps.active.epoch,
+		logPath:   ps.active.logPath,
+		indexPath: ps.active.indexPath,
 		// gh #132: use the running maxTimestamp from activeSegment instead
 		// of re-scanning the closed log. The scan held ps.mu for seconds
 		// on a 1 GiB segment and was the dominant p99 spike on the
@@ -1503,6 +1529,76 @@ func (e *DiskStorageEngine) HighWatermark(topic string, partition int32) (int64,
 	// was stuck on a stalled NAS fsync — propagating the storage stall
 	// up into the metrics pipeline and silencing ALL skafka metrics.
 	return ps.highWaterAtomic.Load(), nil
+}
+
+// OffsetForLeaderEpoch implements KIP-101 (gh #101): given a requested
+// leader_epoch E for a partition, return (resultEpoch, endOffset)
+// pointing one past the last record written under epoch E. Java
+// consumers call this on assign(), after every Fetch carrying a
+// leader_epoch field, and during seekToTimestamp.
+//
+// Semantics (mirrors Apache 3.7):
+//
+//   - E < oldest retained epoch → (-1, -1, ErrEpochTooOld). Records
+//     under E have aged out; the consumer's safe move is to truncate
+//     to the log start.
+//   - E older than current AND a closed segment exists at epoch > E:
+//     (firstSeg.epoch, firstSeg.baseOffset, nil). The handler returns
+//     this verbatim so the consumer truncates to the segment boundary
+//     where the next epoch took over.
+//   - E == current epoch → (current, HighWatermark, nil). No
+//     truncation needed; the consumer already has the right epoch.
+//   - E > current epoch → (-1, -1, ErrEpochFenced). The handler maps
+//     this to FENCED_LEADER_EPOCH.
+//
+// Skafka is RF=1 (CLAUDE.md non-goal: replication) so the classic
+// "uncommitted-at-old-leader" failure mode this API was designed for
+// can't happen. The lookup is still served correctly so the Java
+// consumer's epoch-aware client paths don't stall on UNSUPPORTED_VERSION.
+func (e *DiskStorageEngine) OffsetForLeaderEpoch(topic string, partition int32, leaderEpoch int32) (resultEpoch int32, endOffset int64, err error) {
+	ps, ok := e.getPartition(topic, partition)
+	if !ok {
+		return -1, -1, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	current := int32(ps.epoch)
+	requested := leaderEpoch
+
+	if requested > current {
+		// Caller's epoch is from the future — fenced. The caller hasn't
+		// yet seen the controller transition that drops them to a
+		// lower epoch.
+		return -1, -1, ErrEpochFenced
+	}
+	if requested == current {
+		// Same epoch — return current high watermark. Apache returns
+		// log_end_offset here, but RF=1 collapses HWM == LEO so the
+		// two are equivalent.
+		return current, ps.highWater, nil
+	}
+
+	// requested < current: walk closed segments looking for the first
+	// one with epoch > requested. That segment's baseOffset is the
+	// offset at which the higher epoch took over.
+	for _, s := range ps.segments {
+		if s.epoch > int64(requested) {
+			return int32(s.epoch), s.baseOffset, nil
+		}
+	}
+	// No closed segment with a higher epoch; check the active. If the
+	// active's epoch is higher (the case where requested < current and
+	// nothing has rolled since the epoch bump), the active's baseOffset
+	// is the boundary.
+	if ps.active != nil && ps.active.epoch > int64(requested) {
+		return int32(ps.active.epoch), ps.active.baseOffset, nil
+	}
+	// requested epoch is too old (segments retained under it have aged
+	// out, and the current epoch isn't higher either — shouldn't happen
+	// given requested < current, but the loop's empty-result path covers
+	// it for safety).
+	return -1, -1, ErrEpochTooOld
 }
 
 // PartitionSize sums the sizes of all files in the partition directory

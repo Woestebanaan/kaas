@@ -451,6 +451,13 @@ func (b *Broker) registerDataHandlers(d *protocol.Dispatcher, autoCreate handler
 	d.Register(0, 3, 9, produceHandler)
 	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.authorizer, b.quotas))
 	d.Register(2, 1, 7, handlers.NewListOffsetsHandler(b.store, b.leases))
+	// OffsetForLeaderEpoch (key 23, v0–v4) — KIP-101 epoch-aware
+	// truncation lookup (gh #101). The handler defers to the storage
+	// engine which walks epoch-prefixed segments. Skafka is RF=1 so
+	// the underlying failure mode this API was designed for can't
+	// happen, but the lookup is still served so Java consumers'
+	// epoch-aware paths don't stall on UNSUPPORTED_VERSION.
+	d.Register(23, 0, 4, handlers.NewOffsetForLeaderEpochHandler(b.store))
 
 	// Metadata: cap at v10. v11 removed IncludeClusterAuthorizedOperations
 	// but the Java AdminClient happily selects our advertised max and
