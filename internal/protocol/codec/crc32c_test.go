@@ -55,10 +55,13 @@ func TestCRC32CEmptyInput(t *testing.T) {
 }
 
 func TestCRC32CSingleByte(t *testing.T) {
-	// Sanity: computing twice gives the same result.
-	data := []byte{0xAB}
-	if ComputeCRC(data) != ComputeCRC(data) {
-		t.Error("CRC32C is non-deterministic")
+	// Flipping a single bit in the input must produce a different CRC. A
+	// polynomial with poor mixing (or a bug that returns the input verbatim)
+	// would let neighbouring single-byte inputs collide.
+	a := ComputeCRC([]byte{0xAB})
+	b := ComputeCRC([]byte{0xAA})
+	if a == b {
+		t.Errorf("CRC32C(0xAB) == CRC32C(0xAA) = %08x; expected single-bit sensitivity", a)
 	}
 }
 
