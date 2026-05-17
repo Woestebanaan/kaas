@@ -20,12 +20,15 @@ rules:
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]
     verbs: [get, list, watch]
-  # CRD watches — read-only for KafkaUser (operator translates spec.authorization
-  # inline into acls.json under /data/__cluster/; brokers only consume the file).
+  # KafkaUser: brokers watch + patch quotas. The watch covers the
+  # operator's spec.authorization → acls.json translation (brokers
+  # only consume that file); update/patch cover the admin-protocol
+  # path (gh #103 phase 2) where AlterClientQuotas writes spec.quotas
+  # back to the CR so runtime mutations survive restart.
   # gh #135: kafkaacls + kafkausergroups removed.
   - apiGroups: [skafka.io]
     resources: [kafkausers]
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, update, patch]
   # KafkaTopic: brokers watch + manage. The watch covers the
   # operator-driven path (kubectl apply -f); create/delete cover
   # the admin-protocol path (gh #51) where Kafbat / kafka-topics.sh

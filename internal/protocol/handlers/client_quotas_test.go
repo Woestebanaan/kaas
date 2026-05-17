@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/woestebanaan/skafka/internal/auth"
@@ -200,6 +202,181 @@ func TestAlterClientQuotasValidateOnlySkipsMutation(t *testing.T) {
 	if got == nil || got.ProducerMaxByteRatePerBroker == nil || *got.ProducerMaxByteRatePerBroker != 100 {
 		t.Errorf("after validate-only alter, producer rate=%v, want 100 (store value)", got)
 	}
+}
+
+// recordingCRWriter is a stub KafkaUserWriter that captures every
+// UpdateQuotas call so tests can assert what the handler wrote.
+// Optional `err` field forces a failure.
+type recordingCRWriter struct {
+	calls []recordedQuotaCall
+	err   error
+}
+
+type recordedQuotaCall struct {
+	username string
+	quotas   *auth.Quotas
+}
+
+func (w *recordingCRWriter) UpdateQuotas(_ context.Context, username string, q *auth.Quotas) error {
+	w.calls = append(w.calls, recordedQuotaCall{username: username, quotas: q})
+	return w.err
+}
+
+// TestAlterClientQuotasWritesToCR confirms gh #103 phase 2: when a
+// KafkaUserWriter is wired, every successful alter triggers a CR
+// write-back AND the in-memory map is updated. Both surfaces have to
+// agree — that's the contract that makes "kubectl edit kafkauser/alice"
+// + "kafka-configs.sh --alter --entity-name alice" coexist.
+func TestAlterClientQuotasWritesToCR(t *testing.T) {
+	store := &staticQuotaStore{users: map[string]*auth.Quotas{
+		"alice": {ProducerMaxByteRatePerBroker: ptrI64(100)},
+	}}
+	qe := auth.NewQuotaEnforcer(store)
+	writer := &recordingCRWriter{}
+	alter := NewAlterClientQuotasHandler(qe, allowAuth{}).WithCRWriter(writer)
+
+	w := codec.NewWriter()
+	w.WriteArray(1, func() {
+		w.WriteArray(1, func() {
+			w.WriteString("user")
+			w.WriteNullableString("alice", false)
+		})
+		w.WriteArray(1, func() {
+			w.WriteString("producer_byte_rate")
+			w.WriteFloat64(7777)
+			w.WriteInt8(0)
+		})
+	})
+	w.WriteInt8(0)
+
+	if _, err := alter.Handle(&connstate.ConnState{}, 0, w.Bytes()); err != nil {
+		t.Fatalf("alter: %v", err)
+	}
+	if len(writer.calls) != 1 || writer.calls[0].username != "alice" {
+		t.Fatalf("CR writer calls=%+v, want one call for alice", writer.calls)
+	}
+	q := writer.calls[0].quotas
+	if q == nil || q.ProducerMaxByteRatePerBroker == nil || *q.ProducerMaxByteRatePerBroker != 7777 {
+		t.Errorf("CR writer received quotas=%+v, want producer=7777", q)
+	}
+	// In-memory state must also reflect the alter (closed loop with
+	// the operator: writer hits CR → operator reconciles → file watcher
+	// reloads → next describe matches. In the test we shortcut the
+	// reconcile and just trust the in-memory override.)
+	got := qe.DescribeUserQuota("alice")
+	if got == nil || *got.ProducerMaxByteRatePerBroker != 7777 {
+		t.Errorf("in-memory quota after alter=%+v, want producer=7777", got)
+	}
+}
+
+// TestAlterClientQuotasSkipsInMemoryOnCRFailure verifies the gh #103
+// phase 2 atomicity invariant: a CR write-back failure must leave the
+// in-memory override unchanged, otherwise restart would surface a
+// confusing revert ("I set this 5 minutes ago, but the broker reverted
+// it" because in-memory had 7777 while the CR had 100). Restart reads
+// from the CR, so the in-memory map must not run ahead of it.
+func TestAlterClientQuotasSkipsInMemoryOnCRFailure(t *testing.T) {
+	store := &staticQuotaStore{users: map[string]*auth.Quotas{
+		"alice": {ProducerMaxByteRatePerBroker: ptrI64(100)},
+	}}
+	qe := auth.NewQuotaEnforcer(store)
+	writer := &recordingCRWriter{err: errors.New("apiserver borked")}
+	alter := NewAlterClientQuotasHandler(qe, allowAuth{}).WithCRWriter(writer)
+
+	w := codec.NewWriter()
+	w.WriteArray(1, func() {
+		w.WriteArray(1, func() {
+			w.WriteString("user")
+			w.WriteNullableString("alice", false)
+		})
+		w.WriteArray(1, func() {
+			w.WriteString("producer_byte_rate")
+			w.WriteFloat64(7777)
+			w.WriteInt8(0)
+		})
+	})
+	w.WriteInt8(0)
+
+	body, err := alter.Handle(&connstate.ConnState{}, 0, w.Bytes())
+	if err != nil {
+		t.Fatalf("alter: %v", err)
+	}
+	r := codec.NewReader(body)
+	_, _ = r.ReadInt32() // throttle
+	r.ReadArray(func() error {
+		ec, _ := r.ReadInt16()
+		if ec != -1 { // UNKNOWN_SERVER_ERROR
+			t.Errorf("entry err=%d, want -1 (UNKNOWN_SERVER_ERROR)", ec)
+		}
+		_, _, _ = r.ReadNullableString()
+		r.ReadArray(func() error {
+			r.ReadString()
+			r.ReadNullableString()
+			return nil
+		})
+		return nil
+	})
+	// Store-backed value must still be the effective one.
+	got := qe.DescribeUserQuota("alice")
+	if got == nil || *got.ProducerMaxByteRatePerBroker != 100 {
+		t.Errorf("after failed CR alter, in-memory=%+v, want producer=100 (CR rollback invariant)", got)
+	}
+}
+
+// TestAlterClientQuotasUserNotFoundReturnsInvalidRequest covers the
+// "typo in --entity-name" case: KafkaUser CR doesn't exist → write-back
+// returns ErrKafkaUserNotFound, handler surfaces INVALID_REQUEST with
+// an actionable message. AdminClient prints both for the operator.
+func TestAlterClientQuotasUserNotFoundReturnsInvalidRequest(t *testing.T) {
+	qe := auth.NewQuotaEnforcer(&staticQuotaStore{users: map[string]*auth.Quotas{}})
+	writer := &recordingCRWriter{err: ErrKafkaUserNotFound}
+	alter := NewAlterClientQuotasHandler(qe, allowAuth{}).WithCRWriter(writer)
+
+	w := codec.NewWriter()
+	w.WriteArray(1, func() {
+		w.WriteArray(1, func() {
+			w.WriteString("user")
+			w.WriteNullableString("ghost", false)
+		})
+		w.WriteArray(1, func() {
+			w.WriteString("producer_byte_rate")
+			w.WriteFloat64(1)
+			w.WriteInt8(0)
+		})
+	})
+	w.WriteInt8(0)
+
+	body, err := alter.Handle(&connstate.ConnState{}, 0, w.Bytes())
+	if err != nil {
+		t.Fatalf("alter: %v", err)
+	}
+	r := codec.NewReader(body)
+	_, _ = r.ReadInt32()
+	r.ReadArray(func() error {
+		ec, _ := r.ReadInt16()
+		if ec != 42 { // ErrInvalidRequest
+			t.Errorf("entry err=%d, want 42 (INVALID_REQUEST)", ec)
+		}
+		msg, _, _ := r.ReadNullableString()
+		if msg == "" || !contains(msg, "KafkaUser") {
+			t.Errorf("error message=%q, want mention of KafkaUser", msg)
+		}
+		r.ReadArray(func() error {
+			r.ReadString()
+			r.ReadNullableString()
+			return nil
+		})
+		return nil
+	})
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAlterClientQuotasRejectsNonUserEntity confirms compound or non-

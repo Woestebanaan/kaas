@@ -152,6 +152,10 @@ type Broker struct {
 	// updates only the local TopicRegistry, which is invisible to
 	// peer brokers (broken in multi-broker production).
 	topicCRWriter handlers.TopicCRWriter
+	// kafkaUserCRWriter persists AlterClientQuotas mutations to
+	// KafkaUser CRs (gh #103 phase 2). Wired by UseKafkaUserCRWriter
+	// from main.go; nil leaves AlterClientQuotas in-memory-only.
+	kafkaUserCRWriter handlers.KafkaUserWriter
 
 	// txnStore is the per-broker TxnStateStore wired into both
 	// InitProducerId (gh #22 epoch fence) and AddPartitionsToTxn
@@ -347,6 +351,15 @@ func (b *Broker) Topics() *TopicRegistry {
 // peer brokers in production.
 func (b *Broker) UseTopicCRWriter(w handlers.TopicCRWriter) {
 	b.topicCRWriter = w
+}
+
+// UseKafkaUserCRWriter wires the optional KafkaUser-CR writer for the
+// AlterClientQuotas handler (gh #103 phase 2). Must be called BEFORE
+// RegisterHandlers so the admin handler can pick it up via WithCRWriter.
+// Without this, AlterClientQuotas mutations live in QuotaEnforcer's
+// in-memory override map and die on broker restart.
+func (b *Broker) UseKafkaUserCRWriter(w handlers.KafkaUserWriter) {
+	b.kafkaUserCRWriter = w
 }
 
 // UseCoordinator wires the v3 BrokerCoordinator into the broker. Must be
@@ -664,7 +677,11 @@ func (b *Broker) registerClusterAdminHandlers(d *protocol.Dispatcher, autoCreate
 	// map; broker restart drops them. CR-write-back (phase 2) keeps
 	// operator-set quotas durable across restart.
 	d.Register(48, 0, 1, handlers.NewDescribeClientQuotasHandler(b.quotaMgr, b.authorizer))
-	d.Register(49, 0, 1, handlers.NewAlterClientQuotasHandler(b.quotaMgr, b.authorizer))
+	alterClientQuotas := handlers.NewAlterClientQuotasHandler(b.quotaMgr, b.authorizer)
+	if b.kafkaUserCRWriter != nil {
+		alterClientQuotas = alterClientQuotas.WithCRWriter(b.kafkaUserCRWriter)
+	}
+	d.Register(49, 0, 1, alterClientQuotas)
 }
 
 // registerAPIVersionsHandler: ApiVersions (18). Must be registered LAST

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/woestebanaan/skafka/internal/auth"
@@ -8,6 +10,21 @@ import (
 	"github.com/woestebanaan/skafka/internal/protocol/codec"
 	"github.com/woestebanaan/skafka/internal/protocol/codec/api"
 )
+
+// KafkaUserWriter persists AlterClientQuotas mutations to the KafkaUser
+// CR (gh #103 phase 2). Optional — when wired, .Handle calls
+// UpdateQuotas synchronously per entry; when nil, mutations live only
+// in QuotaEnforcer's in-memory override map and die on broker restart.
+// Implemented by internal/k8s.KafkaUserWriter.
+type KafkaUserWriter interface {
+	UpdateQuotas(ctx context.Context, username string, q *auth.Quotas) error
+}
+
+// ErrKafkaUserNotFound is the sentinel KafkaUserWriter impls return
+// when the named KafkaUser CR doesn't exist. The handler maps this to
+// the wire-level error code so a typo in --entity-name surfaces as
+// "user not found" rather than a generic UNKNOWN_SERVER_ERROR.
+var ErrKafkaUserNotFound = errors.New("kafka user CR not found")
 
 // ---- KIP-546 client-quota wire surface (gh #103) ----
 //
@@ -185,10 +202,23 @@ func quotaValuesFromAuth(q *auth.Quotas) []api.QuotaValue {
 type AlterClientQuotasHandler struct {
 	quotas     QuotaManager
 	authorizer auth.Authorizer
+	// crw persists mutations to the KafkaUser CR so they survive
+	// broker restart. Nil keeps the handler in-memory-only mode —
+	// useful for local-dev and tests where there's no apiserver.
+	crw KafkaUserWriter
 }
 
 func NewAlterClientQuotasHandler(q QuotaManager, az auth.Authorizer) *AlterClientQuotasHandler {
 	return &AlterClientQuotasHandler{quotas: q, authorizer: az}
+}
+
+// WithCRWriter wires the CR-write-back path (gh #103 phase 2). The
+// returned handler patches KafkaUser.spec.quotas on every successful
+// alter; the operator's reconciler then materialises the change into
+// credentials.json on the shared PVC, closing the GitOps loop.
+func (h *AlterClientQuotasHandler) WithCRWriter(crw KafkaUserWriter) *AlterClientQuotasHandler {
+	h.crw = crw
+	return h
 }
 
 func (h *AlterClientQuotasHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
@@ -257,7 +287,33 @@ func (h *AlterClientQuotasHandler) Handle(conn *connstate.ConnState, version int
 			continue
 		}
 		if !req.ValidateOnly {
-			h.quotas.SetUserQuota(username, quotasOrNil(next))
+			effective := quotasOrNil(next)
+			// CR write goes first: a write-back failure must NOT
+			// leave the in-memory map ahead of the persisted CR.
+			// On restart the CR is the source of truth — diverging
+			// here would surface as a confusing post-restart revert.
+			if h.crw != nil {
+				if err := h.crw.UpdateQuotas(context.Background(), username, effective); err != nil {
+					code := int16(codec.ErrUnknownServerError)
+					msg := err.Error()
+					if errors.Is(err, ErrKafkaUserNotFound) {
+						// The KafkaUser CR has to exist before quotas
+						// can be set. Mirroring "create user, then set
+						// quotas" is the operator's job; surface a
+						// distinct error so kafka-configs.sh prints
+						// something actionable.
+						code = int16(codec.ErrInvalidRequest)
+						msg = fmt.Sprintf("KafkaUser %q does not exist; create the CR first", username)
+					}
+					resp.Entries = append(resp.Entries, api.AlterQuotaEntryResponse{
+						ErrorCode:    code,
+						ErrorMessage: msg,
+						Entity:       e.Entity,
+					})
+					continue
+				}
+			}
+			h.quotas.SetUserQuota(username, effective)
 		}
 		resp.Entries = append(resp.Entries, api.AlterQuotaEntryResponse{
 			Entity: e.Entity,
