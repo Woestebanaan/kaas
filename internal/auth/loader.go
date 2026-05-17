@@ -167,3 +167,19 @@ func (l *CredentialLoader) LookupQuotas(username string) *Quotas {
 	}
 	return c.quotas
 }
+
+// ListAllQuotas implements QuotaLister (gh #103). Returns a snapshot
+// of (username → quotas) for every user that has any quota configured.
+// Users without a quotas block in credentials.json are omitted.
+func (l *CredentialLoader) ListAllQuotas() map[string]*Quotas {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[string]*Quotas)
+	for u, c := range l.byUsername {
+		if c == nil || c.quotas == nil {
+			continue
+		}
+		out[u] = c.quotas
+	}
+	return out
+}

@@ -125,8 +125,11 @@ type Broker struct {
 	authorizer auth.Authorizer
 	// gh #126: quotas are also cluster-wide. Per-user throughput caps
 	// don't depend on which listener a producer connected through.
-	quotas  auth.QuotaChecker
-	topics  *TopicRegistry
+	quotas auth.QuotaChecker
+	// gh #103: runtime quota mutation surface (KIP-546). Wired by
+	// main.go when a *auth.QuotaEnforcer is available; nil otherwise.
+	quotaMgr handlers.QuotaManager
+	topics   *TopicRegistry
 	brokers handlers.BrokerSource
 	coord   *coordinator.Manager // nil in local-dev mode (consumer-group manager)
 
@@ -186,6 +189,7 @@ func New(
 		// that need authz checks call the setters themselves.
 		authorizer: pickDefaultAuthorizer(authEng),
 		quotas:     pickDefaultQuotaChecker(authEng),
+		quotaMgr:   pickDefaultQuotaManager(authEng),
 		topics:     NewTopicRegistry(),
 		brokers:    info,
 	}
@@ -214,6 +218,22 @@ func pickDefaultQuotaChecker(eng auth.AuthEngine) auth.QuotaChecker {
 	return auth.NewNoQuotaChecker()
 }
 
+// pickDefaultQuotaManager wires the KIP-546 runtime-mutation surface
+// (gh #103) for any AuthEngine that exposes its QuotaEnforcer. Today
+// that's *RealAuthEngine via its Quotas() accessor. AllowAll / test
+// stubs return nil so the two quota admin handlers degrade gracefully.
+func pickDefaultQuotaManager(eng auth.AuthEngine) handlers.QuotaManager {
+	type quotaAccessor interface {
+		Quotas() *auth.QuotaEnforcer
+	}
+	if qa, ok := eng.(quotaAccessor); ok {
+		if qe := qa.Quotas(); qe != nil {
+			return qe
+		}
+	}
+	return nil
+}
+
 // SetAuthorizer overrides the default cluster-wide authorizer (gh #126).
 // Production main.go uses this to wire a SuperUserAuthorizer{simple ACL}
 // when `spec.kafka.authorization.type: simple`. Tests can wire fakes.
@@ -221,6 +241,14 @@ func (b *Broker) SetAuthorizer(a auth.Authorizer) { b.authorizer = a }
 
 // SetQuotaChecker overrides the default cluster-wide quota checker (gh #126).
 func (b *Broker) SetQuotaChecker(q auth.QuotaChecker) { b.quotas = q }
+
+// SetQuotaManager wires the runtime-mutation surface for KIP-546
+// (DescribeClientQuotas / AlterClientQuotas, gh #103). Nil leaves
+// the broker without the admin-quota APIs — the two handlers will
+// degrade to "no entries" on describe and INVALID_REQUEST on alter.
+// Production main.go passes the same *auth.QuotaEnforcer that
+// SetQuotaChecker received.
+func (b *Broker) SetQuotaManager(q handlers.QuotaManager) { b.quotaMgr = q }
 
 // NewWithBrokerSource creates a Broker with a dynamic multi-broker source and
 // an optional coordinator (nil disables consumer group coordination).
@@ -239,6 +267,7 @@ func NewWithBrokerSource(
 		auth:       auth.NewSingleAuthEngine(authEng),
 		authorizer: pickDefaultAuthorizer(authEng),
 		quotas:     pickDefaultQuotaChecker(authEng),
+		quotaMgr:   pickDefaultQuotaManager(authEng),
 		topics:     NewTopicRegistry(),
 		brokers:    brokers,
 		coord:      coord,
@@ -629,6 +658,13 @@ func (b *Broker) registerClusterAdminHandlers(d *protocol.Dispatcher, autoCreate
 	// controller-id reporting via ControllerWatch.CurrentHolder is a
 	// future enhancement once a pod-name → NodeID resolver is in place.
 	d.Register(60, 0, 1, handlers.NewDescribeClusterHandler(b.brokers, b.cfg.ClusterID))
+
+	// KIP-546 dynamic quota management (gh #103). v0 non-flexible, v1
+	// flexible. Mutations land in QuotaEnforcer's in-memory override
+	// map; broker restart drops them. CR-write-back (phase 2) keeps
+	// operator-set quotas durable across restart.
+	d.Register(48, 0, 1, handlers.NewDescribeClientQuotasHandler(b.quotaMgr, b.authorizer))
+	d.Register(49, 0, 1, handlers.NewAlterClientQuotasHandler(b.quotaMgr, b.authorizer))
 }
 
 // registerAPIVersionsHandler: ApiVersions (18). Must be registered LAST

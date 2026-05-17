@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 )
 
 type Reader struct {
@@ -72,6 +73,18 @@ func (r *Reader) ReadInt64() (int64, error) {
 }
 
 // ReadUvarint reads an unsigned variable-length integer (protobuf encoding).
+// ReadFloat64 reads a big-endian IEEE-754 double. Used by KIP-546
+// quota APIs (DescribeClientQuotas / AlterClientQuotas) which carry
+// rates as float64 on the wire.
+func (r *Reader) ReadFloat64() (float64, error) {
+	if err := r.require(8); err != nil {
+		return 0, err
+	}
+	v := binary.BigEndian.Uint64(r.buf[r.pos:])
+	r.pos += 8
+	return math.Float64frombits(v), nil
+}
+
 func (r *Reader) ReadUvarint() (uint64, error) {
 	var x uint64
 	var s uint

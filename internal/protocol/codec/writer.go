@@ -1,6 +1,9 @@
 package codec
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"math"
+)
 
 type Writer struct {
 	buf []byte
@@ -59,6 +62,13 @@ func (w *Writer) WriteInt32(v int32) {
 
 func (w *Writer) WriteInt64(v int64) {
 	w.buf = binary.BigEndian.AppendUint64(w.buf, uint64(v))
+}
+
+// WriteFloat64 emits a big-endian IEEE-754 double. Used by KIP-546
+// quota APIs (DescribeClientQuotas / AlterClientQuotas) which carry
+// rates as float64 on the wire.
+func (w *Writer) WriteFloat64(v float64) {
+	w.buf = binary.BigEndian.AppendUint64(w.buf, math.Float64bits(v))
 }
 
 // WriteUvarint writes an unsigned variable-length integer.

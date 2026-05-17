@@ -31,6 +31,11 @@ const (
 	ErrRebalanceInProgress         ErrorCode = 27
 	ErrTopicAuthorizationFailed    ErrorCode = 29
 	ErrGroupAuthorizationFailed    ErrorCode = 30
+	// ErrClusterAuthorizationFailed (31) — principal lacks the
+	// requested Cluster-scoped permission. AdminClient surfaces it
+	// as ClusterAuthorizationException. Used by DescribeClientQuotas
+	// / AlterClientQuotas (gh #103) and other cluster-admin APIs.
+	ErrClusterAuthorizationFailed  ErrorCode = 31
 	ErrUnsupportedSaslMechanism    ErrorCode = 33
 	ErrUnsupportedVersion          ErrorCode = 35
 	ErrTopicAlreadyExists          ErrorCode = 36
