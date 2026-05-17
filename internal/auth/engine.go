@@ -67,6 +67,11 @@ func (e *RealAuthEngine) Reload() {
 // Quotas returns the quota enforcer for use by produce/fetch handlers.
 func (e *RealAuthEngine) Quotas() *QuotaEnforcer { return e.quotas }
 
+// Creds returns the credential loader. Exposes the SCRAM-credential
+// describe surface (gh #104, KIP-554) and the quota-list surface
+// (gh #103) to handlers without a separate dependency-injection knob.
+func (e *RealAuthEngine) Creds() *CredentialLoader { return e.creds }
+
 // CheckProduceQuota delegates to the quota enforcer.
 func (e *RealAuthEngine) CheckProduceQuota(p Principal, bytes int) int32 {
 	return e.quotas.CheckProduce(p, bytes)

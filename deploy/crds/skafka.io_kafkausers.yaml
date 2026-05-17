@@ -65,6 +65,31 @@ spec:
                     - key
                     - name
                     type: object
+                  scram:
+                    description: |-
+                      Scram is the runtime-rotation path for type=scram-sha-512 (gh #104,
+                      KIP-554 AlterUserScramCredentials API). When set, the operator uses
+                      the supplied (salt, storedKey, serverKey, iterations) verbatim and
+                      skips the Password → PBKDF2 derivation. The wire-level admin path
+                      computes these from the client-supplied SaltedPassword and patches
+                      this field; clients receive the rotated credential via the same
+                      AdminClient call that wrote it (Apache's model: the rotator knows
+                      the new password locally and doesn't need a Secret to learn it).
+                    properties:
+                      iterations:
+                        type: integer
+                      salt:
+                        type: string
+                      serverKey:
+                        type: string
+                      storedKey:
+                        type: string
+                    required:
+                    - iterations
+                    - salt
+                    - serverKey
+                    - storedKey
+                    type: object
                   serviceAccountRef:
                     description: Used when type=kubernetes-serviceaccount
                     properties:

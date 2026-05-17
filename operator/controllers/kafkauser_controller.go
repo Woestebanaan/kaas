@@ -114,6 +114,24 @@ func (r *KafkaUserReconciler) buildCredential(ctx context.Context, user *v1alpha
 
 	switch auth.Type {
 	case "scram-sha-512":
+		// gh #104: Scram field takes precedence over Password. The
+		// runtime-rotation path (AlterUserScramCredentials, KIP-554)
+		// writes pre-derived (salt, storedKey, serverKey, iterations)
+		// directly to spec.authentication.scram. When present, we
+		// pass it through to credentials.json verbatim and skip the
+		// Password → PBKDF2 derivation — the broker already did the
+		// derivation from the wire-level SaltedPassword. No client
+		// Secret update either: the rotator already knows the new
+		// password locally (Apache's model).
+		if auth.Scram != nil {
+			cred.Scram = &ScramCredential{
+				Salt:       auth.Scram.Salt,
+				StoredKey:  auth.Scram.StoredKey,
+				ServerKey:  auth.Scram.ServerKey,
+				Iterations: auth.Scram.Iterations,
+			}
+			return cred, "", nil
+		}
 		// gh #136: password Secret is now optional. Behaviour:
 		//   - auth.Password != nil → read from the user-supplied input
 		//     Secret (current behaviour; useful when an external

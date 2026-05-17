@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 
@@ -76,6 +77,69 @@ func (w *KafkaUserWriter) UpdateQuotas(ctx context.Context, username string, q *
 	}
 
 	u.Spec.Quotas = translateQuotasToCR(q)
+	if err := observability.RecordK8sCall(ctx, "Update", "KafkaUser", func() error {
+		return w.client.Update(ctx, &u)
+	}); err != nil {
+		return fmt.Errorf("update KafkaUser %s/%s: %w", w.namespace, username, err)
+	}
+	return nil
+}
+
+// UpsertScramCredential patches .spec.authentication.scram on the
+// KafkaUser CR named username (gh #104, KIP-554). The operator's
+// reconciler honours the Scram field over Password — see
+// kafkauser_controller.go — so the next reconcile materialises the
+// new credential into credentials.json on the shared PVC and every
+// broker's CredentialLoader hot-reloads.
+//
+// Pre-condition: the KafkaUser CR exists with .spec.authentication.type
+// = "scram-sha-512". This handler doesn't auto-create the CR — the
+// operator's credential-issuance pipeline owns the lifecycle. A typo
+// in --entity-name surfaces as ErrKafkaUserNotFound.
+func (w *KafkaUserWriter) UpsertScramCredential(ctx context.Context, username string, salt, storedKey, serverKey []byte, iterations int) error {
+	var u v1alpha1.KafkaUser
+	if err := observability.RecordK8sCall(ctx, "Get", "KafkaUser", func() error {
+		return w.client.Get(ctx, types.NamespacedName{Namespace: w.namespace, Name: username}, &u)
+	}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", ErrKafkaUserNotFound, username)
+		}
+		return fmt.Errorf("get KafkaUser %s/%s: %w", w.namespace, username, err)
+	}
+	if u.Spec.Authentication.Type != "scram-sha-512" {
+		return fmt.Errorf("KafkaUser %q is type %q; SCRAM-SHA-512 alter requires the same type", username, u.Spec.Authentication.Type)
+	}
+	u.Spec.Authentication.Scram = &v1alpha1.KafkaUserScramCredential{
+		Salt:       base64.StdEncoding.EncodeToString(salt),
+		StoredKey:  base64.StdEncoding.EncodeToString(storedKey),
+		ServerKey:  base64.StdEncoding.EncodeToString(serverKey),
+		Iterations: iterations,
+	}
+	if err := observability.RecordK8sCall(ctx, "Update", "KafkaUser", func() error {
+		return w.client.Update(ctx, &u)
+	}); err != nil {
+		return fmt.Errorf("update KafkaUser %s/%s: %w", w.namespace, username, err)
+	}
+	return nil
+}
+
+// DeleteScramCredential clears .spec.authentication.scram on the
+// KafkaUser CR (gh #104). The operator's reconciler then falls back
+// to the Password-derive path on next reconcile — so deleting the
+// runtime credential reverts to the GitOps-managed Secret if one is
+// configured, or generates a fresh random password otherwise (gh #136
+// behavior).
+func (w *KafkaUserWriter) DeleteScramCredential(ctx context.Context, username string) error {
+	var u v1alpha1.KafkaUser
+	if err := observability.RecordK8sCall(ctx, "Get", "KafkaUser", func() error {
+		return w.client.Get(ctx, types.NamespacedName{Namespace: w.namespace, Name: username}, &u)
+	}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", ErrKafkaUserNotFound, username)
+		}
+		return fmt.Errorf("get KafkaUser %s/%s: %w", w.namespace, username, err)
+	}
+	u.Spec.Authentication.Scram = nil
 	if err := observability.RecordK8sCall(ctx, "Update", "KafkaUser", func() error {
 		return w.client.Update(ctx, &u)
 	}); err != nil {

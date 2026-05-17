@@ -156,6 +156,12 @@ type Broker struct {
 	// KafkaUser CRs (gh #103 phase 2). Wired by UseKafkaUserCRWriter
 	// from main.go; nil leaves AlterClientQuotas in-memory-only.
 	kafkaUserCRWriter handlers.KafkaUserWriter
+	// gh #104: SCRAM-credential describe + alter store/writer (KIP-554).
+	// scramStore is *auth.CredentialLoader via SCRAMCredentialStore;
+	// scramCRWriter shares the same impl as kafkaUserCRWriter
+	// (different methods on internal/k8s.KafkaUserWriter).
+	scramStore    handlers.SCRAMCredentialStore
+	scramCRWriter handlers.SCRAMCredentialWriter
 
 	// txnStore is the per-broker TxnStateStore wired into both
 	// InitProducerId (gh #22 epoch fence) and AddPartitionsToTxn
@@ -194,6 +200,7 @@ func New(
 		authorizer: pickDefaultAuthorizer(authEng),
 		quotas:     pickDefaultQuotaChecker(authEng),
 		quotaMgr:   pickDefaultQuotaManager(authEng),
+		scramStore: pickDefaultSCRAMStore(authEng),
 		topics:     NewTopicRegistry(),
 		brokers:    info,
 	}
@@ -238,6 +245,22 @@ func pickDefaultQuotaManager(eng auth.AuthEngine) handlers.QuotaManager {
 	return nil
 }
 
+// pickDefaultSCRAMStore exposes the read-side of KIP-554
+// DescribeUserScramCredentials (gh #104). Same shape as
+// pickDefaultQuotaManager but pulls the CredentialLoader instead.
+// AllowAll / dev mode returns nil and the handler stays unregistered.
+func pickDefaultSCRAMStore(eng auth.AuthEngine) handlers.SCRAMCredentialStore {
+	type credsAccessor interface {
+		Creds() *auth.CredentialLoader
+	}
+	if ca, ok := eng.(credsAccessor); ok {
+		if c := ca.Creds(); c != nil {
+			return c
+		}
+	}
+	return nil
+}
+
 // SetAuthorizer overrides the default cluster-wide authorizer (gh #126).
 // Production main.go uses this to wire a SuperUserAuthorizer{simple ACL}
 // when `spec.kafka.authorization.type: simple`. Tests can wire fakes.
@@ -272,6 +295,7 @@ func NewWithBrokerSource(
 		authorizer: pickDefaultAuthorizer(authEng),
 		quotas:     pickDefaultQuotaChecker(authEng),
 		quotaMgr:   pickDefaultQuotaManager(authEng),
+		scramStore: pickDefaultSCRAMStore(authEng),
 		topics:     NewTopicRegistry(),
 		brokers:    brokers,
 		coord:      coord,
@@ -360,6 +384,22 @@ func (b *Broker) UseTopicCRWriter(w handlers.TopicCRWriter) {
 // in-memory override map and die on broker restart.
 func (b *Broker) UseKafkaUserCRWriter(w handlers.KafkaUserWriter) {
 	b.kafkaUserCRWriter = w
+}
+
+// UseSCRAMCredentialStore wires the read side of KIP-554
+// DescribeUserScramCredentials (gh #104). Pass *auth.CredentialLoader
+// in production; tests can substitute fakes. Nil disables the handler
+// entirely so an ApiVersions probe doesn't advertise key 50.
+func (b *Broker) UseSCRAMCredentialStore(s handlers.SCRAMCredentialStore) {
+	b.scramStore = s
+}
+
+// UseSCRAMCredentialCRWriter wires the write side of KIP-554
+// AlterUserScramCredentials (gh #104). Pass the same KafkaUserWriter
+// that UseKafkaUserCRWriter received; the K8s-package writer
+// implements both interfaces with disjoint methods.
+func (b *Broker) UseSCRAMCredentialCRWriter(w handlers.SCRAMCredentialWriter) {
+	b.scramCRWriter = w
 }
 
 // UseCoordinator wires the v3 BrokerCoordinator into the broker. Must be
@@ -682,6 +722,19 @@ func (b *Broker) registerClusterAdminHandlers(d *protocol.Dispatcher, autoCreate
 		alterClientQuotas = alterClientQuotas.WithCRWriter(b.kafkaUserCRWriter)
 	}
 	d.Register(49, 0, 1, alterClientQuotas)
+
+	// KIP-554 SCRAM-credential rotation (gh #104). v0 flexible. Describe
+	// reads from the CredentialLoader (auth.SCRAMCredentialStore);
+	// Alter writes to the KafkaUser CR via the same writer used for
+	// quotas — different methods on the same impl.
+	if b.scramStore != nil {
+		d.Register(50, 0, 0, handlers.NewDescribeUserScramCredentialsHandler(b.scramStore, b.authorizer))
+	}
+	alterScram := handlers.NewAlterUserScramCredentialsHandler(b.authorizer)
+	if b.scramCRWriter != nil {
+		alterScram = alterScram.WithCRWriter(b.scramCRWriter)
+	}
+	d.Register(51, 0, 0, alterScram)
 }
 
 // registerAPIVersionsHandler: ApiVersions (18). Must be registered LAST

@@ -82,10 +82,30 @@ type KafkaUserAuthentication struct {
 	Type string `json:"type"`
 	// Used when type=scram-sha-512
 	Password *SecretKeyRef `json:"password,omitempty"`
+	// Scram is the runtime-rotation path for type=scram-sha-512 (gh #104,
+	// KIP-554 AlterUserScramCredentials API). When set, the operator uses
+	// the supplied (salt, storedKey, serverKey, iterations) verbatim and
+	// skips the Password → PBKDF2 derivation. The wire-level admin path
+	// computes these from the client-supplied SaltedPassword and patches
+	// this field; clients receive the rotated credential via the same
+	// AdminClient call that wrote it (Apache's model: the rotator knows
+	// the new password locally and doesn't need a Secret to learn it).
+	Scram *KafkaUserScramCredential `json:"scram,omitempty"`
 	// Used when type=tls
 	CertificateRef *LocalObjectRef `json:"certificateRef,omitempty"`
 	// Used when type=kubernetes-serviceaccount
 	ServiceAccountRef *ServiceAccountRef `json:"serviceAccountRef,omitempty"`
+}
+
+// KafkaUserScramCredential carries SCRAM-SHA-512 credentials in their
+// already-derived form (so the operator skips PBKDF2). All fields are
+// base64-encoded raw bytes. Matches the credentials.json ScramCredential
+// shape verbatim so the operator's serialiser can pass it through.
+type KafkaUserScramCredential struct {
+	Salt       string `json:"salt"`
+	StoredKey  string `json:"storedKey"`
+	ServerKey  string `json:"serverKey"`
+	Iterations int    `json:"iterations"`
 }
 
 type SecretKeyRef struct {

@@ -141,6 +141,34 @@ func (l *CredentialLoader) LookupSCRAM(username string) (storedKey, serverKey, s
 	return c.storedKey, c.serverKey, c.salt, c.iterations, true
 }
 
+// SCRAMInfo is the safe-to-expose subset of a SCRAM credential —
+// mechanism + iteration count without the salt or key material.
+// Apache exposes the same shape on DescribeUserScramCredentials
+// (gh #104, KIP-554); leaking the salt or stored_key would let a
+// privileged operator harvest credentials for offline attack.
+type SCRAMInfo struct {
+	Mechanism  string // "SCRAM-SHA-512"
+	Iterations int
+}
+
+// ListAllSCRAMUsers returns the safe-to-expose credential metadata for
+// every user whose authType is SCRAM. Used by
+// DescribeUserScramCredentialsHandler when the request omits a user
+// list (== "describe all"). Stable across calls; safe to call from the
+// admin hot path (acquires the loader's read lock once).
+func (l *CredentialLoader) ListAllSCRAMUsers() map[string]SCRAMInfo {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[string]SCRAMInfo)
+	for u, c := range l.byUsername {
+		if c == nil || c.authType != "scram-sha-512" {
+			continue
+		}
+		out[u] = SCRAMInfo{Mechanism: "SCRAM-SHA-512", Iterations: c.iterations}
+	}
+	return out
+}
+
 // LookupTLS returns the username for a given TLS certificate CN.
 func (l *CredentialLoader) LookupTLS(cn string) (username string, ok bool) {
 	l.mu.RLock()

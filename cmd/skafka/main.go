@@ -583,10 +583,14 @@ func wireTopicCRWriter(b *broker.Broker, cfg brokerConfig) {
 		}
 	}
 	b.UseTopicCRWriter(k8spkg.NewTopicCRWriter(cl, cfg.Namespace, argoCfg))
-	// gh #103 phase 2: AlterClientQuotas writes back to KafkaUser CRs
-	// so runtime quota mutations survive broker restart. Shares the
-	// same controller-runtime client + scheme as the topic writer.
-	b.UseKafkaUserCRWriter(k8spkg.NewKafkaUserWriter(cl, cfg.Namespace))
+	// gh #103 phase 2 + gh #104: the K8s KafkaUserWriter implements
+	// both the handlers.KafkaUserWriter (AlterClientQuotas) and the
+	// handlers.SCRAMCredentialWriter (AlterUserScramCredentials)
+	// interfaces — same struct, disjoint methods, shared controller-
+	// runtime client + scheme.
+	userWriter := k8spkg.NewKafkaUserWriter(cl, cfg.Namespace)
+	b.UseKafkaUserCRWriter(userWriter)
+	b.UseSCRAMCredentialCRWriter(userWriter)
 }
 
 // setupDispatcher builds the request dispatcher: per-listener auth-engine
