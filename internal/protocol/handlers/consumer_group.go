@@ -352,3 +352,115 @@ func (h *DeleteGroupsHandler) Handle(conn *connstate.ConnState, version int16, b
 	api.EncodeDeleteGroupsResponse(w, resp, version)
 	return w.Bytes(), nil
 }
+
+// ---- OffsetDelete (gh #100, API key 47) ----
+
+type OffsetDeleteHandler struct {
+	coord      *coordinator.Manager
+	authorizer auth.Authorizer
+}
+
+func NewOffsetDeleteHandler(coord *coordinator.Manager, authorizer auth.Authorizer) *OffsetDeleteHandler {
+	return &OffsetDeleteHandler{coord: coord, authorizer: authorizer}
+}
+
+// Handle implements OffsetDelete (API key 47, v0). Drops specific
+// (topic, partition) committed offsets for a consumer group without
+// deleting the whole group. Apache reserves this for AdminClient
+// .deleteConsumerGroupOffsets() and kafka-consumer-groups.sh
+// --delete-offsets; the typical caller is an operator principal
+// resetting specific partitions on a paused group.
+//
+// Error layering:
+//   - Group-level (top of response) — GROUP_AUTHORIZATION_FAILED,
+//     COORDINATOR_NOT_AVAILABLE, NOT_COORDINATOR, GROUP_ID_NOT_FOUND,
+//     NON_EMPTY_GROUP. Abort the request with no per-partition results.
+//   - Per-partition — TOPIC_AUTHORIZATION_FAILED (handler-level),
+//     UNKNOWN_TOPIC_OR_PARTITION (coordinator-level, for partitions
+//     with no committed offset). Emitted only when the group-level
+//     code is 0.
+func (h *OffsetDeleteHandler) Handle(conn *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	r := codec.NewReader(body)
+	req, err := api.DecodeOffsetDeleteRequest(r, version)
+	if err != nil {
+		return nil, fmt.Errorf("offset delete decode: %w", err)
+	}
+
+	resp := &api.OffsetDeleteResponse{}
+	respond := func() ([]byte, error) {
+		w := codec.NewWriter()
+		api.EncodeOffsetDeleteResponse(w, resp, version)
+		return w.Bytes(), nil
+	}
+
+	// Group Delete ACL. The operator-tool flow is gated on
+	// "Delete on group" the same way DeleteGroups is (gh #89), so a
+	// principal holding only Read can't accidentally drop offsets.
+	principal := principalFrom(conn)
+	if h.authorizer != nil {
+		if !h.authorizer.Authorize(principal, auth.Resource{Type: "group", Name: req.GroupID, PatternType: "literal"}, auth.OpDelete) {
+			resp.ErrorCode = int16(codec.ErrGroupAuthorizationFailed)
+			return respond()
+		}
+	}
+
+	if h.coord == nil {
+		// Same pre-init / local-dev fallback shape as DeleteGroups.
+		resp.ErrorCode = int16(codec.ErrCoordinatorNotAvailable)
+		return respond()
+	}
+
+	// Per-topic Read auth split before delegating: allowed topics are
+	// forwarded to the coordinator; denied topics get
+	// TOPIC_AUTHORIZATION_FAILED on every requested partition. Apache's
+	// KafkaApis.handleOffsetDeleteRequest layers auth this way.
+	allowed := req.Topics
+	var denied []api.OffsetDeleteTopicResponse
+	if h.authorizer != nil {
+		allowed = nil
+		for _, t := range req.Topics {
+			if h.authorizer.Authorize(principal, auth.Resource{Type: "topic", Name: t.Name, PatternType: "literal"}, auth.OpRead) {
+				allowed = append(allowed, t)
+				continue
+			}
+			tr := api.OffsetDeleteTopicResponse{Name: t.Name}
+			for _, p := range t.Partitions {
+				tr.Partitions = append(tr.Partitions, api.OffsetDeletePartitionResponse{
+					PartitionIndex: p,
+					ErrorCode:      int16(codec.ErrTopicAuthorizationFailed),
+				})
+			}
+			denied = append(denied, tr)
+		}
+	}
+
+	var keys []string
+	for _, t := range allowed {
+		for _, p := range t.Partitions {
+			keys = append(keys, coordinator.OffsetKey(t.Name, p))
+		}
+	}
+
+	groupErr, removed := h.coord.DeleteOffsets(req.GroupID, keys)
+	if groupErr != 0 {
+		resp.ErrorCode = groupErr
+		return respond()
+	}
+
+	for _, t := range allowed {
+		tr := api.OffsetDeleteTopicResponse{Name: t.Name}
+		for _, p := range t.Partitions {
+			code := int16(codec.ErrUnknownTopicOrPartition)
+			if removed[coordinator.OffsetKey(t.Name, p)] {
+				code = 0
+			}
+			tr.Partitions = append(tr.Partitions, api.OffsetDeletePartitionResponse{
+				PartitionIndex: p,
+				ErrorCode:      code,
+			})
+		}
+		resp.Topics = append(resp.Topics, tr)
+	}
+	resp.Topics = append(resp.Topics, denied...)
+	return respond()
+}

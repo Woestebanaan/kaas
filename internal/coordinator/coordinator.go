@@ -363,7 +363,7 @@ func (m *Manager) OffsetCommit(req *api.OffsetCommitRequest) *api.OffsetCommitRe
 	offsets := make(map[string]int64)
 	for _, t := range req.Topics {
 		for _, p := range t.Partitions {
-			offsets[offsetKey(t.Name, p.PartitionIndex)] = p.CommittedOffset
+			offsets[OffsetKey(t.Name, p.PartitionIndex)] = p.CommittedOffset
 		}
 	}
 	_ = m.offsets.Commit(req.GroupID, offsets)
@@ -459,7 +459,7 @@ func (m *Manager) TxnOffsetCommit(req *api.TxnOffsetCommitRequest) *api.TxnOffse
 	offsets := make(map[string]int64)
 	for _, t := range req.Topics {
 		for _, p := range t.Partitions {
-			offsets[offsetKey(t.Name, p.PartitionIndex)] = p.CommittedOffset
+			offsets[OffsetKey(t.Name, p.PartitionIndex)] = p.CommittedOffset
 		}
 	}
 	m.offsets.StorePending(req.GroupID, req.ProducerID, offsets)
@@ -492,7 +492,7 @@ func (m *Manager) OffsetFetch(req *api.OffsetFetchRequest) *api.OffsetFetchRespo
 		for _, t := range topics {
 			tr := api.OffsetFetchTopicResponse{Name: t.Name}
 			for _, p := range t.PartitionIndexes {
-				k := offsetKey(t.Name, p)
+				k := OffsetKey(t.Name, p)
 				tr.Partitions = append(tr.Partitions, api.OffsetFetchPartitionResponse{
 					PartitionIndex:  p,
 					CommittedOffset: committed[k],
@@ -594,6 +594,54 @@ func (m *Manager) deleteGroup(groupID string) int16 {
 		return int16(codec.ErrUnknownServerError)
 	}
 	return 0
+}
+
+// DeleteOffsets removes specific (topic, partition) offset entries
+// from a group without deleting the whole group (gh #100, OffsetDelete
+// API 47). Used by AdminClient.deleteConsumerGroupOffsets() and
+// kafka-consumer-groups.sh --delete-offsets.
+//
+// Returns either:
+//   - groupErr != 0: top-level error (NOT_COORDINATOR / GROUP_ID_NOT_FOUND
+//     / NON_EMPTY_GROUP / UNKNOWN_SERVER_ERROR). `removed` is nil. Caller
+//     emits the error with no per-partition results.
+//   - groupErr == 0: `removed` maps each requested key to whether it
+//     existed before. Caller maps absent keys to UNKNOWN_TOPIC_OR_PARTITION
+//     in the wire response.
+//
+// State guard matches DeleteGroups: only Empty / Dead groups are
+// eligible. Apache rejects offset deletes on Stable / *Rebalance —
+// active members would have committed offsets fenced mid-delete
+// otherwise.
+func (m *Manager) DeleteOffsets(groupID string, keys []string) (groupErr int16, removed map[string]bool) {
+	if !m.isCoordinator(groupID) {
+		return int16(codec.ErrNotCoordinator), nil
+	}
+
+	m.mu.Lock()
+	g, inMemory := m.groups[groupID]
+	m.mu.Unlock()
+
+	// Same disk-cache-warmup as deleteGroup: a coordinator that just
+	// took over may have offsets on disk but no in-memory group yet.
+	_ = m.offsets.Load(groupID)
+	hasOffsets := m.offsets.HasGroup(groupID)
+
+	if !inMemory && !hasOffsets {
+		return int16(codec.ErrGroupIDNotFound), nil
+	}
+	if inMemory {
+		snap := g.describe()
+		if snap.state != "Empty" && snap.state != "Dead" {
+			return int16(codec.ErrNonEmptyGroup), nil
+		}
+	}
+
+	rem, err := m.offsets.DeletePartitions(groupID, keys)
+	if err != nil {
+		return int16(codec.ErrUnknownServerError), nil
+	}
+	return 0, rem
 }
 
 func (m *Manager) DescribeGroups(req *api.DescribeGroupsRequest) *api.DescribeGroupsResponse {

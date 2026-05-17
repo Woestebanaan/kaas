@@ -114,7 +114,11 @@ func (s *OffsetStore) PendingFor(groupID string, producerID int64) map[string]in
 	return out
 }
 
-func offsetKey(topic string, partition int32) string {
+// OffsetKey is the "topic/partition" cache + on-disk JSON key. Exported
+// so handlers and tests build keys identically to the coordinator
+// (gh #100 added the per-partition OffsetDelete path that needs matching
+// key construction at the wire layer).
+func OffsetKey(topic string, partition int32) string {
 	return fmt.Sprintf("%s/%d", topic, partition)
 }
 
@@ -167,7 +171,7 @@ func (s *OffsetStore) Fetch(groupID string, specs []FetchSpec) map[string]int64 
 	result := make(map[string]int64)
 	for _, spec := range specs {
 		for _, p := range spec.Partitions {
-			k := offsetKey(spec.Topic, p)
+			k := OffsetKey(spec.Topic, p)
 			if group != nil {
 				if v, ok := group[k]; ok {
 					result[k] = v
@@ -207,6 +211,56 @@ func (s *OffsetStore) Delete(groupID string) error {
 		return err
 	}
 	return nil
+}
+
+// DeletePartitions removes specific (topic, partition) offset entries
+// from a group's committed offsets. Used by Manager.DeleteOffsets
+// (gh #100) for OffsetDelete (API 47): kafka-consumer-groups
+// --delete-offsets and AdminClient.deleteConsumerGroupOffsets.
+//
+// Returns the set of keys that were actually removed. Keys not present
+// in the cache are silently absent — the wire-level UNKNOWN_TOPIC_OR_PARTITION
+// mapping happens at the handler layer using the returned set.
+//
+// Mirrors Commit()'s lock-then-snap-then-write discipline: the disk
+// write happens outside the cache lock to avoid extending hot-path
+// contention into filesystem latency.
+func (s *OffsetStore) DeletePartitions(groupID string, keys []string) (map[string]bool, error) {
+	removed := make(map[string]bool, len(keys))
+	s.mu.Lock()
+	group := s.cache[groupID]
+	if group == nil {
+		s.mu.Unlock()
+		return removed, nil
+	}
+	for _, k := range keys {
+		if _, ok := group[k]; ok {
+			delete(group, k)
+			removed[k] = true
+		}
+	}
+	snap := make(map[string]int64, len(group))
+	for k, v := range group {
+		snap[k] = v
+	}
+	s.mu.Unlock()
+
+	if err := os.MkdirAll(s.dir(), 0o775); err != nil {
+		return removed, err
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return removed, err
+	}
+	tmp := filepath.Join(s.dir(), groupID+".tmp")
+	final := filepath.Join(s.dir(), groupID+".json")
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return removed, err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return removed, err
+	}
+	return removed, nil
 }
 
 // Load reads a group's offsets from disk into the in-memory cache.

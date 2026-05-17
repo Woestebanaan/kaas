@@ -419,6 +419,12 @@ func (b *Broker) registerConsumerGroupHandlers(d *protocol.Dispatcher) {
 	// deletion (per-member instead of per-group); skafka caps at v2
 	// until that path is wired.
 	d.Register(42, 0, 2, handlers.NewDeleteGroupsHandler(b.coord, b.authorizer))
+
+	// OffsetDelete (key 47, v0) — kafka-consumer-groups --delete-offsets
+	// and AdminClient.deleteConsumerGroupOffsets(). Per-partition variant
+	// of DeleteGroups; same coordinator + Empty/Dead state guard. Apache
+	// Kafka 3.7 only ships v0 (non-flexible). gh #100.
+	d.Register(47, 0, 0, handlers.NewOffsetDeleteHandler(b.coord, b.authorizer))
 }
 
 // registerTopicAdminHandlers: CreateTopics (19), DeleteTopics (20).
