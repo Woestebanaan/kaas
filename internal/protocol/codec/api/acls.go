@@ -2,6 +2,215 @@ package api
 
 import "github.com/woestebanaan/skafka/internal/protocol/codec"
 
+// Apache Kafka ACL enumeration codes (gh #107). These match the
+// `org.apache.kafka.common.{resource,acl}` constants so AdminClient
+// requests carrying these int8 values translate 1:1 to the CR-side
+// string representation the operator's reconcileACLs already speaks.
+
+const (
+	ResourceTypeUnknown          int8 = 0
+	ResourceTypeAny              int8 = 1
+	ResourceTypeTopic            int8 = 2
+	ResourceTypeGroup            int8 = 3
+	ResourceTypeCluster          int8 = 4
+	ResourceTypeTransactionalID  int8 = 5
+	ResourceTypeDelegationToken  int8 = 6
+	ResourceTypeUser             int8 = 7
+)
+
+const (
+	PatternTypeUnknown   int8 = 0
+	PatternTypeAny       int8 = 1
+	PatternTypeMatch     int8 = 2
+	PatternTypeLiteral   int8 = 3
+	PatternTypePrefixed  int8 = 4
+)
+
+const (
+	AclOperationUnknown         int8 = 0
+	AclOperationAny             int8 = 1
+	AclOperationAll             int8 = 2
+	AclOperationRead            int8 = 3
+	AclOperationWrite           int8 = 4
+	AclOperationCreate          int8 = 5
+	AclOperationDelete          int8 = 6
+	AclOperationAlter           int8 = 7
+	AclOperationDescribe        int8 = 8
+	AclOperationClusterAction   int8 = 9
+	AclOperationDescribeConfigs int8 = 10
+	AclOperationAlterConfigs    int8 = 11
+	AclOperationIdempotentWrite int8 = 12
+)
+
+const (
+	PermissionTypeUnknown int8 = 0
+	PermissionTypeAny     int8 = 1
+	PermissionTypeDeny    int8 = 2
+	PermissionTypeAllow   int8 = 3
+)
+
+// ResourceTypeToCR maps a wire int8 to the lowercase string used in
+// KafkaUserACLResource.Type. Returns ("", false) for UNKNOWN/ANY (those
+// only appear in filters; CreateAcls callers must pass a concrete type).
+// DELEGATION_TOKEN and USER are accepted on the wire but skafka has no
+// CR-side enum for them — returns ("", false) so the handler can
+// surface UNSUPPORTED_RESOURCE_TYPE rather than silently dropping.
+func ResourceTypeToCR(t int8) (string, bool) {
+	switch t {
+	case ResourceTypeTopic:
+		return "topic", true
+	case ResourceTypeGroup:
+		return "group", true
+	case ResourceTypeCluster:
+		return "cluster", true
+	case ResourceTypeTransactionalID:
+		return "transactionalId", true
+	}
+	return "", false
+}
+
+// ResourceTypeFromCR is the inverse of ResourceTypeToCR — used when
+// encoding DescribeAcls / DeleteAcls responses back onto the wire.
+// Returns ResourceTypeUnknown for unrecognised values so the encoded
+// response is at least well-formed.
+func ResourceTypeFromCR(s string) int8 {
+	switch s {
+	case "topic":
+		return ResourceTypeTopic
+	case "group":
+		return ResourceTypeGroup
+	case "cluster":
+		return ResourceTypeCluster
+	case "transactionalId":
+		return ResourceTypeTransactionalID
+	}
+	return ResourceTypeUnknown
+}
+
+// PatternTypeToCR maps a wire int8 to the CR-side string. Returns
+// ("", true) for ANY (used as a filter wildcard); ("", false) for
+// UNKNOWN. MATCH is accepted on the filter side and stored as "match"
+// — the operator's matchesResource treats it as prefix-equivalent, see
+// internal/auth/acl.go.
+func PatternTypeToCR(t int8) (string, bool) {
+	switch t {
+	case PatternTypeLiteral:
+		return "literal", true
+	case PatternTypePrefixed:
+		return "prefix", true
+	case PatternTypeMatch:
+		return "match", true
+	case PatternTypeAny:
+		return "", true
+	}
+	return "", false
+}
+
+// PatternTypeFromCR is the inverse of PatternTypeToCR. Returns LITERAL
+// as the default (matches the operator-side aclToEntry defaulting).
+func PatternTypeFromCR(s string) int8 {
+	switch s {
+	case "literal", "":
+		return PatternTypeLiteral
+	case "prefix":
+		return PatternTypePrefixed
+	case "match":
+		return PatternTypeMatch
+	}
+	return PatternTypeUnknown
+}
+
+// OperationToCR maps a wire int8 to the capitalised operation string
+// used in KafkaUserACL.Operations + the on-disk ACLEntry.Operations.
+// Returns ("", true) for ANY (filter wildcard); ("", false) for
+// UNKNOWN. AdminClient sends concrete ops on Create, so the handler
+// rejects UNKNOWN there.
+func OperationToCR(op int8) (string, bool) {
+	switch op {
+	case AclOperationAll:
+		return "All", true
+	case AclOperationRead:
+		return "Read", true
+	case AclOperationWrite:
+		return "Write", true
+	case AclOperationCreate:
+		return "Create", true
+	case AclOperationDelete:
+		return "Delete", true
+	case AclOperationAlter:
+		return "Alter", true
+	case AclOperationDescribe:
+		return "Describe", true
+	case AclOperationClusterAction:
+		return "ClusterAction", true
+	case AclOperationDescribeConfigs:
+		return "DescribeConfigs", true
+	case AclOperationAlterConfigs:
+		return "AlterConfigs", true
+	case AclOperationIdempotentWrite:
+		return "IdempotentWrite", true
+	case AclOperationAny:
+		return "", true
+	}
+	return "", false
+}
+
+// OperationFromCR is the inverse of OperationToCR — case-sensitive to
+// match the on-disk Apache-Kafka casing. Returns UNKNOWN for unrecognised
+// strings (the response encoder still emits a syntactically valid entry).
+func OperationFromCR(s string) int8 {
+	switch s {
+	case "All":
+		return AclOperationAll
+	case "Read":
+		return AclOperationRead
+	case "Write":
+		return AclOperationWrite
+	case "Create":
+		return AclOperationCreate
+	case "Delete":
+		return AclOperationDelete
+	case "Alter":
+		return AclOperationAlter
+	case "Describe":
+		return AclOperationDescribe
+	case "ClusterAction":
+		return AclOperationClusterAction
+	case "DescribeConfigs":
+		return AclOperationDescribeConfigs
+	case "AlterConfigs":
+		return AclOperationAlterConfigs
+	case "IdempotentWrite":
+		return AclOperationIdempotentWrite
+	}
+	return AclOperationUnknown
+}
+
+// PermissionToCR maps a wire int8 to the on-disk capitalised string.
+// Returns ("", true) for ANY (filter wildcard); ("", false) for UNKNOWN.
+func PermissionToCR(p int8) (string, bool) {
+	switch p {
+	case PermissionTypeAllow:
+		return "Allow", true
+	case PermissionTypeDeny:
+		return "Deny", true
+	case PermissionTypeAny:
+		return "", true
+	}
+	return "", false
+}
+
+// PermissionFromCR is the inverse of PermissionToCR.
+func PermissionFromCR(s string) int8 {
+	switch s {
+	case "Allow", "allow":
+		return PermissionTypeAllow
+	case "Deny", "deny":
+		return PermissionTypeDeny
+	}
+	return PermissionTypeUnknown
+}
+
 // AclFilter is used in DescribeAcls and DeleteAcls requests.
 type AclFilter struct {
 	ResourceTypeFilter int8

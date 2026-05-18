@@ -187,22 +187,136 @@ func (h *DeleteTopicsHandler) Handle(_ *connstate.ConnState, version int16, body
 	return w.Bytes(), nil
 }
 
-// ---- ACL handlers — NOT_CONTROLLER; managed via KafkaUser.spec.authorization (gh #135) ----
+// ---- ACL handlers (gh #107) ----
+//
+// ACLs are authored inline on each KafkaUser CR's
+// spec.authorization.acls list (gh #135). The handlers translate the
+// AdminClient wire shape (int8 enum codes) into the CR-side string
+// representation, then delegate to an ACLCRWriter that patches the
+// KafkaUser CR; the operator's reconcileACLs rebuilds /data/__cluster/
+// acls.json on next reconcile, and every broker's AclEngine hot-reloads.
+//
+// Without an ACLCRWriter wired (kafka-compat tests, dev mode without an
+// apiserver) the handlers degrade to per-entry NONE_OF_THE_ABOVE errors
+// so test paths don't silently lose data; only the wired path produces
+// real success.
 
-type DescribeAclsHandler struct{}
+// ACLBinding is the broker-side representation of one ACL row. Strings
+// rather than int8s so the writer can patch directly into the
+// v1alpha1.KafkaUserACL fields without re-mapping.
+type ACLBinding struct {
+	Principal    string // "User:alice"
+	ResourceType string // "topic" | "group" | "cluster" | "transactionalId"
+	ResourceName string
+	PatternType  string // "literal" | "prefix"
+	Operation    string // capitalised: "Read", "Write", "All", ...
+	Permission   string // "Allow" | "Deny"
+	Host         string // round-tripped verbatim; broker ignores
+}
+
+// ACLFilter is the filter shape used by Describe and Delete. Empty
+// strings mean "any" along that axis (the wire-level ANY=1 codes
+// collapse to empty here). For PatternType, "" matches every entry;
+// "literal"/"prefix" matches exactly; "match" expands to literal+prefix
+// (the operator-side matchesResource semantics — see
+// internal/auth/acl.go).
+type ACLFilter struct {
+	Principal    string
+	ResourceType string
+	ResourceName string
+	PatternType  string
+	Operation    string
+	Permission   string
+	Host         string
+}
+
+// ACLCRWriter is the persistence interface for CreateAcls / DeleteAcls
+// / DescribeAcls (gh #107). Implementations patch
+// KafkaUser.spec.authorization.acls in place; the operator reconciler
+// is responsible for materialising acls.json on the shared PVC.
+type ACLCRWriter interface {
+	CreateACL(ctx context.Context, b ACLBinding) error
+	DeleteACLs(ctx context.Context, f ACLFilter) ([]ACLBinding, error)
+	ListACLs(ctx context.Context, f ACLFilter) ([]ACLBinding, error)
+}
+
+// ErrUnknownPrincipal is returned by ACLCRWriter.CreateACL when the
+// binding's principal doesn't correspond to an existing KafkaUser CR.
+// Mirrors ErrKafkaUserNotFound for the gh #103/#104 writers — the
+// operator owns CR lifecycle; the admin protocol does not auto-create.
+var ErrUnknownPrincipal = errors.New("no KafkaUser CR for principal")
+
+// ErrInvalidPrincipal is returned by the writer when the binding's
+// principal isn't of the form "User:<name>". Apache Kafka admits
+// "Group:" and "ServiceAccount:" prefixes too; skafka maps only to
+// KafkaUser today, so non-User principals are rejected.
+var ErrInvalidPrincipal = errors.New("principal must be of the form User:<name>")
+
+type DescribeAclsHandler struct {
+	crw ACLCRWriter
+}
 
 func NewDescribeAclsHandler() *DescribeAclsHandler { return &DescribeAclsHandler{} }
 
+// WithCRWriter wires the production path. nil → empty response (the
+// pre-gh #107 stub behavior, preserved so the kafka-compat tests that
+// don't run K8s machinery still pass).
+func (h *DescribeAclsHandler) WithCRWriter(w ACLCRWriter) *DescribeAclsHandler {
+	h.crw = w
+	return h
+}
+
 func (h *DescribeAclsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
-	resp := &api.DescribeAclsResponse{ErrorCode: 0}
+	r := codec.NewReader(body)
+	req, err := api.DecodeDescribeAclsRequest(r, version)
+	if err != nil {
+		return nil, fmt.Errorf("describe_acls decode: %w", err)
+	}
+
+	resp := &api.DescribeAclsResponse{}
+	if h.crw == nil {
+		w := codec.NewWriter()
+		api.EncodeDescribeAclsResponse(w, resp, version)
+		return w.Bytes(), nil
+	}
+
+	filter, ferr := wireFilterToACLFilter(req.AclFilter, version)
+	if ferr != nil {
+		resp.ErrorCode = int16(codec.ErrInvalidRequest)
+		resp.ErrorMessage = ferr.Error()
+		w := codec.NewWriter()
+		api.EncodeDescribeAclsResponse(w, resp, version)
+		return w.Bytes(), nil
+	}
+
+	bindings, err := h.crw.ListACLs(context.Background(), filter)
+	if err != nil {
+		resp.ErrorCode = int16(codec.ErrUnknownServerError)
+		resp.ErrorMessage = err.Error()
+		w := codec.NewWriter()
+		api.EncodeDescribeAclsResponse(w, resp, version)
+		return w.Bytes(), nil
+	}
+
+	resp.Resources = groupBindingsByResource(bindings)
 	w := codec.NewWriter()
 	api.EncodeDescribeAclsResponse(w, resp, version)
 	return w.Bytes(), nil
 }
 
-type CreateAclsHandler struct{}
+type CreateAclsHandler struct {
+	crw ACLCRWriter
+}
 
 func NewCreateAclsHandler() *CreateAclsHandler { return &CreateAclsHandler{} }
+
+// WithCRWriter wires the production path. nil → per-entry success
+// without persistence (the pre-gh #107 stub, kept for kafka-compat
+// tests; not safe for production).
+func (h *CreateAclsHandler) WithCRWriter(w ACLCRWriter) *CreateAclsHandler {
+	h.crw = w
+	return h
+}
 
 func (h *CreateAclsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
 	r := codec.NewReader(body)
@@ -211,17 +325,49 @@ func (h *CreateAclsHandler) Handle(_ *connstate.ConnState, version int16, body [
 		return nil, fmt.Errorf("create_acls decode: %w", err)
 	}
 	resp := &api.CreateAclsResponse{}
-	for range req.Creations {
-		resp.Results = append(resp.Results, api.CreateAclsResult{ErrorCode: 0})
+	for _, b := range req.Creations {
+		result := api.CreateAclsResult{}
+		if h.crw == nil {
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		binding, terr := wireBindingToACLBinding(b, version)
+		if terr != nil {
+			result.ErrorCode = int16(codec.ErrInvalidRequest)
+			result.ErrorMessage = terr.Error()
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		if err := h.crw.CreateACL(context.Background(), binding); err != nil {
+			switch {
+			case errors.Is(err, ErrUnknownPrincipal):
+				result.ErrorCode = int16(codec.ErrInvalidRequest)
+				result.ErrorMessage = err.Error()
+			case errors.Is(err, ErrInvalidPrincipal):
+				result.ErrorCode = int16(codec.ErrInvalidRequest)
+				result.ErrorMessage = err.Error()
+			default:
+				result.ErrorCode = int16(codec.ErrUnknownServerError)
+				result.ErrorMessage = err.Error()
+			}
+		}
+		resp.Results = append(resp.Results, result)
 	}
 	w := codec.NewWriter()
 	api.EncodeCreateAclsResponse(w, resp, version)
 	return w.Bytes(), nil
 }
 
-type DeleteAclsHandler struct{}
+type DeleteAclsHandler struct {
+	crw ACLCRWriter
+}
 
 func NewDeleteAclsHandler() *DeleteAclsHandler { return &DeleteAclsHandler{} }
+
+func (h *DeleteAclsHandler) WithCRWriter(w ACLCRWriter) *DeleteAclsHandler {
+	h.crw = w
+	return h
+}
 
 func (h *DeleteAclsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
 	r := codec.NewReader(body)
@@ -230,12 +376,170 @@ func (h *DeleteAclsHandler) Handle(_ *connstate.ConnState, version int16, body [
 		return nil, fmt.Errorf("delete_acls decode: %w", err)
 	}
 	resp := &api.DeleteAclsResponse{}
-	for range req.Filters {
-		resp.FilterResults = append(resp.FilterResults, api.DeleteAclsFilterResult{ErrorCode: 0})
+	for _, f := range req.Filters {
+		fr := api.DeleteAclsFilterResult{}
+		if h.crw == nil {
+			resp.FilterResults = append(resp.FilterResults, fr)
+			continue
+		}
+		filter, ferr := wireFilterToACLFilter(f, version)
+		if ferr != nil {
+			fr.ErrorCode = int16(codec.ErrInvalidRequest)
+			fr.ErrorMessage = ferr.Error()
+			resp.FilterResults = append(resp.FilterResults, fr)
+			continue
+		}
+		matched, err := h.crw.DeleteACLs(context.Background(), filter)
+		if err != nil {
+			fr.ErrorCode = int16(codec.ErrUnknownServerError)
+			fr.ErrorMessage = err.Error()
+			resp.FilterResults = append(resp.FilterResults, fr)
+			continue
+		}
+		for _, m := range matched {
+			fr.MatchingACLs = append(fr.MatchingACLs, api.DeleteAclsMatchingACL{
+				AclBinding: aclBindingToWire(m, version),
+			})
+		}
+		resp.FilterResults = append(resp.FilterResults, fr)
 	}
 	w := codec.NewWriter()
 	api.EncodeDeleteAclsResponse(w, resp, version)
 	return w.Bytes(), nil
+}
+
+// wireBindingToACLBinding translates a CreateAcls wire entry into the
+// CR-side string shape. Rejects UNKNOWN/ANY enum codes and unsupported
+// resource types (DELEGATION_TOKEN, USER) with INVALID_REQUEST since
+// CreateAcls callers must specify concrete bindings.
+func wireBindingToACLBinding(b api.AclBinding, version int16) (ACLBinding, error) {
+	rt, ok := api.ResourceTypeToCR(b.ResourceType)
+	if !ok {
+		return ACLBinding{}, fmt.Errorf("unsupported resource type: %d", b.ResourceType)
+	}
+	// v0 has no PatternType field; the wire decoder leaves it as zero.
+	// Apache Kafka's v0 semantic is "literal", so we default there.
+	patternCode := b.PatternType
+	if version < 1 {
+		patternCode = api.PatternTypeLiteral
+	}
+	pt, ok := api.PatternTypeToCR(patternCode)
+	if !ok {
+		return ACLBinding{}, fmt.Errorf("unsupported pattern type: %d", patternCode)
+	}
+	if pt == "" {
+		// PatternTypeAny isn't valid for Create — it's a filter wildcard.
+		return ACLBinding{}, fmt.Errorf("pattern type ANY not valid for create")
+	}
+	op, ok := api.OperationToCR(b.Operation)
+	if !ok || op == "" {
+		return ACLBinding{}, fmt.Errorf("unsupported operation: %d", b.Operation)
+	}
+	perm, ok := api.PermissionToCR(b.Permission)
+	if !ok || perm == "" {
+		return ACLBinding{}, fmt.Errorf("unsupported permission: %d", b.Permission)
+	}
+	return ACLBinding{
+		Principal:    b.Principal,
+		ResourceType: rt,
+		ResourceName: b.ResourceName,
+		PatternType:  pt,
+		Operation:    op,
+		Permission:   perm,
+		Host:         b.Host,
+	}, nil
+}
+
+// wireFilterToACLFilter translates a DescribeAcls/DeleteAcls wire
+// filter to the CR-side string shape. ANY codes (UNKNOWN/ANY=0/1) and
+// nullable empty strings collapse to "" — the writer treats those as
+// wildcards.
+func wireFilterToACLFilter(f api.AclFilter, version int16) (ACLFilter, error) {
+	out := ACLFilter{
+		Principal:    f.PrincipalFilter,
+		ResourceName: f.ResourceNameFilter,
+		Host:         f.HostFilter,
+	}
+	if f.ResourceTypeFilter != api.ResourceTypeUnknown && f.ResourceTypeFilter != api.ResourceTypeAny {
+		rt, ok := api.ResourceTypeToCR(f.ResourceTypeFilter)
+		if !ok {
+			return ACLFilter{}, fmt.Errorf("unsupported resource type filter: %d", f.ResourceTypeFilter)
+		}
+		out.ResourceType = rt
+	}
+	patternCode := f.PatternTypeFilter
+	if version < 1 {
+		// v0 has no PatternType filter; pre-KIP-290 semantics treated
+		// every entry as literal. Filter on literal so callers using v0
+		// don't accidentally match prefixed entries.
+		patternCode = api.PatternTypeLiteral
+	}
+	if patternCode != api.PatternTypeUnknown && patternCode != api.PatternTypeAny {
+		pt, ok := api.PatternTypeToCR(patternCode)
+		if !ok {
+			return ACLFilter{}, fmt.Errorf("unsupported pattern type filter: %d", patternCode)
+		}
+		out.PatternType = pt
+	}
+	if f.Operation != api.AclOperationUnknown && f.Operation != api.AclOperationAny {
+		op, ok := api.OperationToCR(f.Operation)
+		if !ok || op == "" {
+			return ACLFilter{}, fmt.Errorf("unsupported operation filter: %d", f.Operation)
+		}
+		out.Operation = op
+	}
+	if f.PermissionType != api.PermissionTypeUnknown && f.PermissionType != api.PermissionTypeAny {
+		p, ok := api.PermissionToCR(f.PermissionType)
+		if !ok || p == "" {
+			return ACLFilter{}, fmt.Errorf("unsupported permission filter: %d", f.PermissionType)
+		}
+		out.Permission = p
+	}
+	return out, nil
+}
+
+// aclBindingToWire translates a CR-side binding back into the
+// wire-level shape for DescribeAcls / DeleteAcls responses.
+func aclBindingToWire(b ACLBinding, _ int16) api.AclBinding {
+	return api.AclBinding{
+		ResourceType: api.ResourceTypeFromCR(b.ResourceType),
+		ResourceName: b.ResourceName,
+		PatternType:  api.PatternTypeFromCR(b.PatternType),
+		Principal:    b.Principal,
+		Host:         b.Host,
+		Operation:    api.OperationFromCR(b.Operation),
+		Permission:   api.PermissionFromCR(b.Permission),
+	}
+}
+
+// groupBindingsByResource folds a flat binding list into the
+// DescribeAclsResource shape Apache Kafka clients expect: one Resource
+// row per (type, name, pattern), with N MatchingACL rows inside.
+func groupBindingsByResource(bindings []ACLBinding) []api.DescribeAclsResource {
+	type key struct {
+		rt, name, pt string
+	}
+	idx := make(map[key]int)
+	out := make([]api.DescribeAclsResource, 0, len(bindings))
+	for _, b := range bindings {
+		k := key{rt: b.ResourceType, name: b.ResourceName, pt: b.PatternType}
+		if _, ok := idx[k]; !ok {
+			idx[k] = len(out)
+			out = append(out, api.DescribeAclsResource{
+				ResourceType: api.ResourceTypeFromCR(b.ResourceType),
+				ResourceName: b.ResourceName,
+				PatternType:  api.PatternTypeFromCR(b.PatternType),
+			})
+		}
+		i := idx[k]
+		out[i].ACLs = append(out[i].ACLs, api.MatchingACL{
+			Principal:  b.Principal,
+			Host:       b.Host,
+			Operation:  api.OperationFromCR(b.Operation),
+			Permission: api.PermissionFromCR(b.Permission),
+		})
+	}
+	return out
 }
 
 // ---- DescribeConfigs ----

@@ -591,6 +591,9 @@ func wireTopicCRWriter(b *broker.Broker, cfg brokerConfig) {
 	userWriter := k8spkg.NewKafkaUserWriter(cl, cfg.Namespace)
 	b.UseKafkaUserCRWriter(userWriter)
 	b.UseSCRAMCredentialCRWriter(userWriter)
+	// gh #107: ACL admin-protocol writes patch the same KafkaUser CRs
+	// via their inline spec.authorization.acls list (gh #135).
+	b.UseACLCRWriter(k8spkg.NewKafkaUserACLWriter(cl, cfg.Namespace))
 }
 
 // setupDispatcher builds the request dispatcher: per-listener auth-engine

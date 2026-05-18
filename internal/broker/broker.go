@@ -163,6 +163,13 @@ type Broker struct {
 	scramStore    handlers.SCRAMCredentialStore
 	scramCRWriter handlers.SCRAMCredentialWriter
 
+	// gh #107: ACL writer threads admin-protocol CreateAcls /
+	// DeleteAcls / DescribeAcls into KafkaUser.spec.authorization.acls
+	// (per gh #135 — the dedicated KafkaACL CR is gone). Wired by
+	// UseACLCRWriter from main.go; nil leaves the ACL handlers as
+	// per-entry success stubs (kafka-compat / dev-mode behavior).
+	aclCRWriter handlers.ACLCRWriter
+
 	// txnStore is the per-broker TxnStateStore wired into both
 	// InitProducerId (gh #22 epoch fence) and AddPartitionsToTxn
 	// (gh #23 per-txn partition tracking). Nil in dev-mode or when
@@ -400,6 +407,16 @@ func (b *Broker) UseSCRAMCredentialStore(s handlers.SCRAMCredentialStore) {
 // implements both interfaces with disjoint methods.
 func (b *Broker) UseSCRAMCredentialCRWriter(w handlers.SCRAMCredentialWriter) {
 	b.scramCRWriter = w
+}
+
+// UseACLCRWriter wires the optional ACL writer for the
+// CreateAcls / DeleteAcls / DescribeAcls handlers (gh #107). Must be
+// called BEFORE RegisterHandlers so registerAclHandlers can pick it up.
+// Without this, the ACL handlers degrade to per-entry success stubs —
+// fine for kafka-compat tests without an apiserver, broken in
+// production because admin-protocol ACL writes silently disappear.
+func (b *Broker) UseACLCRWriter(w handlers.ACLCRWriter) {
+	b.aclCRWriter = w
 }
 
 // UseCoordinator wires the v3 BrokerCoordinator into the broker. Must be
@@ -694,12 +711,22 @@ func (b *Broker) registerTxnHandlers(d *protocol.Dispatcher) {
 }
 
 // registerAclHandlers: DescribeAcls (29), CreateAcls (30), DeleteAcls (31).
-// All NOT_CONTROLLER stubs (ACLs are authored inline on each KafkaUser CR's
-// spec.authorization.acls list per gh #135).
+// gh #107: handlers translate the AdminClient wire shape to/from the
+// KafkaUser.spec.authorization.acls inline list (gh #135) via the
+// ACLCRWriter; without one wired they degrade to no-op stubs that
+// preserve pre-gh #107 kafka-compat-test behavior.
 func (b *Broker) registerAclHandlers(d *protocol.Dispatcher) {
-	d.Register(29, 0, 3, handlers.NewDescribeAclsHandler())
-	d.Register(30, 0, 3, handlers.NewCreateAclsHandler())
-	d.Register(31, 0, 3, handlers.NewDeleteAclsHandler())
+	describe := handlers.NewDescribeAclsHandler()
+	create := handlers.NewCreateAclsHandler()
+	delete_ := handlers.NewDeleteAclsHandler()
+	if b.aclCRWriter != nil {
+		describe = describe.WithCRWriter(b.aclCRWriter)
+		create = create.WithCRWriter(b.aclCRWriter)
+		delete_ = delete_.WithCRWriter(b.aclCRWriter)
+	}
+	d.Register(29, 0, 3, describe)
+	d.Register(30, 0, 3, create)
+	d.Register(31, 0, 3, delete_)
 }
 
 // registerClusterAdminHandlers: DescribeConfigs (32), DescribeLogDirs (35),
