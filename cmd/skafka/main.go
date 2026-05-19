@@ -650,6 +650,12 @@ func setupDispatcher(ctx context.Context, authEngine auth.AuthEngine, allowAll *
 	// is the inner ring — RequestObservability wraps around it so the
 	// latency histogram captures the tracing-middleware overhead too.
 	d.Use(protocol.RequestTracing())
+	// gh #14: broker-side max.message.bytes enforcement. Defaults to
+	// Apache's 1048588 (1MiB + 12 bytes batch overhead) when the env
+	// var is unset; the produce handler treats <= 0 as "use default".
+	if n, err := strconv.Atoi(os.Getenv("SKAFKA_MAX_MESSAGE_BYTES")); err == nil && n > 0 {
+		b.SetMaxMessageBytes(int32(n))
+	}
 	b.RegisterHandlers(d)
 	// gh #108 phase 2: cross-broker producer-fence broadcast.
 	// No-op in dev-mode (memory storage).

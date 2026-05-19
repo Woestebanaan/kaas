@@ -170,6 +170,12 @@ type Broker struct {
 	// per-entry success stubs (kafka-compat / dev-mode behavior).
 	aclCRWriter handlers.ACLCRWriter
 
+	// maxMessageBytes (gh #14) caps the byte size of one record batch
+	// the broker accepts on Produce. 0 = use handler default (Apache
+	// 1048588). Set via SetMaxMessageBytes from main.go's
+	// SKAFKA_MAX_MESSAGE_BYTES env var so the chart can tune it.
+	maxMessageBytes int32
+
 	// txnStore is the per-broker TxnStateStore wired into both
 	// InitProducerId (gh #22 epoch fence) and AddPartitionsToTxn
 	// (gh #23 per-txn partition tracking). Nil in dev-mode or when
@@ -419,6 +425,15 @@ func (b *Broker) UseACLCRWriter(w handlers.ACLCRWriter) {
 	b.aclCRWriter = w
 }
 
+// SetMaxMessageBytes overrides the broker-side per-batch byte cap
+// (gh #14). 0 leaves the handler default (1048588 = 1MiB + batch
+// overhead, matching Apache's `message.max.bytes`). Must be called
+// BEFORE RegisterHandlers so the produce handler picks it up at
+// dispatch-time wiring.
+func (b *Broker) SetMaxMessageBytes(n int32) {
+	b.maxMessageBytes = n
+}
+
 // UseCoordinator wires the v3 BrokerCoordinator into the broker. Must be
 // called BEFORE RegisterHandlers so the ProduceHandler can pick it up
 // via WithCoordinator at registration time. Calling this with nil leaves
@@ -464,6 +479,9 @@ func (b *Broker) registerDataHandlers(d *protocol.Dispatcher, autoCreate handler
 	produceHandler := handlers.NewProduceHandler(b.store, b.leases, b.authorizer, b.quotas)
 	if b.brokerCoord != nil {
 		produceHandler = produceHandler.WithCoordinator(b.brokerCoord)
+	}
+	if b.maxMessageBytes > 0 {
+		produceHandler = produceHandler.WithMaxMessageBytes(b.maxMessageBytes)
 	}
 	d.Register(0, 3, 9, produceHandler)
 	d.Register(1, 4, 12, handlers.NewFetchHandler(b.store, b.leases, b.authorizer, b.quotas))

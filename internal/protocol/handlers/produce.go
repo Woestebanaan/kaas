@@ -34,7 +34,22 @@ type ProduceHandler struct {
 	// writer enforcement is now epoch-prefixed segment filenames + the
 	// coordinator-owned ownership decision.
 	coord kafkaapi.BrokerCoordinator
+
+	// maxMessageBytes caps the byte size of one record batch (gh #14).
+	// Apache's default is `message.max.bytes=1048588` (1MB + 12 bytes
+	// of batch overhead). Set via WithMaxMessageBytes; zero or negative
+	// disables the cap entirely (useful in tests where the producer
+	// builds purposefully-large batches that aren't the subject of the
+	// test). On the hot path we compare against len(pd.Records) — the
+	// full batch wire size, which matches Apache's "message.max.bytes
+	// applies to the full RecordBatch" semantics.
+	maxMessageBytes int32
 }
+
+// DefaultMaxMessageBytes mirrors Apache Kafka's `message.max.bytes`
+// default (1048588 bytes = 1 MiB + 12 bytes for batch overhead). Used
+// when nothing else sets maxMessageBytes explicitly.
+const DefaultMaxMessageBytes int32 = 1048588
 
 func NewProduceHandler(
 	store storage.StorageEngine,
@@ -42,7 +57,22 @@ func NewProduceHandler(
 	authorizer auth.Authorizer,
 	quotas auth.QuotaChecker,
 ) *ProduceHandler {
-	return &ProduceHandler{store: store, leases: leases, authorizer: authorizer, quotas: quotas}
+	return &ProduceHandler{
+		store:           store,
+		leases:          leases,
+		authorizer:      authorizer,
+		quotas:          quotas,
+		maxMessageBytes: DefaultMaxMessageBytes,
+	}
+}
+
+// WithMaxMessageBytes overrides the per-batch byte cap (gh #14).
+// Pass 0 (or negative) to disable the cap. Operators set this via
+// the chart's broker.maxMessageBytes value / SKAFKA_MAX_MESSAGE_BYTES
+// env var when their workload genuinely needs the Apache > default.
+func (h *ProduceHandler) WithMaxMessageBytes(n int32) *ProduceHandler {
+	h.maxMessageBytes = n
+	return h
 }
 
 // WithCoordinator switches the handler over to the v3 BrokerCoordinator path.
@@ -118,6 +148,20 @@ func (h *ProduceHandler) Handle(conn *connstate.ConnState, version int16, body [
 				pr.ErrorCode = int16(codec.ErrCorruptMessage)
 				pr.BaseOffset = -1
 				recordProduceError(mx, td.Name, "corrupt_message")
+				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
+				continue
+			}
+
+			// gh #14: enforce broker-side max.message.bytes. Java
+			// producers cap their own batches at max.request.size
+			// (1MB by default) but malicious or misconfigured clients
+			// can still send bigger; without this check the storage
+			// engine accepts arbitrarily large batches and trips
+			// downstream MaxFetchBytes loops at consume time.
+			if h.maxMessageBytes > 0 && int32(len(pd.Records)) > h.maxMessageBytes {
+				pr.ErrorCode = int16(codec.ErrMessageTooLarge)
+				pr.BaseOffset = -1
+				recordProduceError(mx, td.Name, "message_too_large")
 				topicResp.PartitionResponses = append(topicResp.PartitionResponses, pr)
 				continue
 			}
