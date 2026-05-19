@@ -92,7 +92,21 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 				continue
 			}
 			pr.HighWatermark = hwm
+			// gh #31 (KIP-98 read-committed): LastStableOffset = the
+			// highest offset at which every transaction is committed
+			// or aborted. Until the transaction coordinator state
+			// machine (gh #28) and the __transaction_state topic
+			// (gh #29) land, skafka has no in-flight txn state, so
+			// every record at offset < HWM is automatically committed
+			// — LSO == HWM and the AbortedTransactions list is empty.
+			// This is the correct read-committed answer for the
+			// "no-txn-in-flight" steady state: clients with
+			// isolation.level=read_committed see the same offset
+			// frontier as read_uncommitted, and there are no aborted
+			// records to filter. Once gh #28 lands, recompute LSO
+			// from TxnStateStore's earliest open transaction.
 			pr.LastStableOffset = hwm
+			_ = req.IsolationLevel // explicit acknowledgement; field decoded but no branch needed yet
 			pr.LogStartOffset, _ = h.store.LogStartOffset(topic.Name, p.PartitionIndex)
 
 			readStart := time.Now()
