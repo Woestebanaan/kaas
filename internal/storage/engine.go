@@ -1895,6 +1895,46 @@ func (e *DiskStorageEngine) TakeOver(ctx context.Context, topic string, partitio
 	return e.takeoverInternal(ctx, topic, partition, int64(epoch))
 }
 
+// FlushManifests walks every partition this engine has open and
+// persists its manifest.json (gh #139). The shutdown path calls this
+// before the broker exits so that on the next start, openPartition's
+// fast path reads a manifest whose HighWatermark matches what's
+// actually on disk.
+//
+// Without this flush, the lazy-manifest design (the manifest is
+// persisted only on segment roll / cleaner advance / partition open /
+// Relinquish) leaves stale HWMs across SIGTERM bounces — Produce
+// updates ps.highWater in memory but never writes the manifest. The
+// next broker reads the stale manifest and reports HWM=0 to clients
+// (the gh #139 symptom).
+//
+// Best-effort: errors persisting individual partitions are returned
+// as a multi-line string but don't abort the loop — the caller (main
+// shutdown path) wants every partition flushed before exit, even if
+// one of them errored mid-flush.
+func (e *DiskStorageEngine) FlushManifests() error {
+	e.mu.Lock()
+	parts := make([]*partitionState, 0, len(e.partitions))
+	for _, ps := range e.partitions {
+		parts = append(parts, ps)
+	}
+	e.mu.Unlock()
+
+	var firstErr error
+	for _, ps := range parts {
+		ps.mu.Lock()
+		if ps.active == nil {
+			ps.mu.Unlock()
+			continue
+		}
+		if err := ps.persistManifestLocked(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		ps.mu.Unlock()
+	}
+	return firstErr
+}
+
 // Relinquish implements the v3 StorageEngine contract. The partition
 // becomes read-only on this broker — and, more importantly, the broker
 // drops its file descriptors on the active segment so that when the

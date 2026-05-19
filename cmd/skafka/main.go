@@ -818,6 +818,16 @@ func runBroker(ctx context.Context) {
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
 	<-ctx.Done()
 	slog.Info("shutting down")
+	// gh #139: flush manifests on shutdown so the next broker open
+	// reads accurate HighWatermark values. Without this, the
+	// lazy-manifest persistence (only on segment roll / cleaner /
+	// takeover / Relinquish) leaves the manifest stale and the new
+	// broker reports HWM=0 to clients on first OffsetFetch.
+	if engine != nil {
+		if err := engine.FlushManifests(); err != nil {
+			slog.Warn("shutdown: FlushManifests failed (next start may read stale HWM)", "err", err)
+		}
+	}
 	srv.Wait()
 }
 
