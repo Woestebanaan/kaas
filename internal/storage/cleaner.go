@@ -136,7 +136,18 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 		return
 	}
 
-	cutoffMs := time.Now().UnixMilli() - c.engine.cfg.RetentionMs
+	// gh #46: RetentionMs <= 0 disables time-based retention entirely,
+	// matching Apache's `retention.ms = -1` semantic. The size-path
+	// further down still applies. Pre-fix, RetentionMs=0 was treated
+	// literally and deleted every closed segment with a known
+	// maxTimestamp; an operator who set retention.ms=0 by mistake
+	// (or via a chart misread) would lose all data on next cleaner
+	// pass.
+	cutoffMs := int64(-1)
+	timeRetentionEnabled := c.engine.cfg.RetentionMs > 0
+	if timeRetentionEnabled {
+		cutoffMs = time.Now().UnixMilli() - c.engine.cfg.RetentionMs
+	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -144,7 +155,7 @@ func (c *RetentionCleaner) cleanPartition(p PartitionID) {
 	// --- time-based retention ---
 	deletedByTime := 0
 	bytesByTime := int64(0)
-	for len(ps.segments) > 0 {
+	for timeRetentionEnabled && len(ps.segments) > 0 {
 		seg := ps.segments[0]
 
 		// Load maxTimestamp from disk if not cached.
