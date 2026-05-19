@@ -34,9 +34,12 @@ echo "x" | "$KAFKA_BIN/kafka-console-producer.sh" --bootstrap-server "$BOOTSTRAP
   --max-messages 1 --timeout-ms 10000 >/dev/null
 
 echo ">> Scenario 1: streams-application-reset"
+# Kafka 4.x dropped --execute; reset is the default and --dry-run is
+# the opt-in (the 4.0 release notes call out this CLI rebrand). Pre-
+# 4.x scripts used --execute explicitly.
 "$KAFKA_BIN/kafka-streams-application-reset.sh" \
   --bootstrap-server "$BOOTSTRAP" --application-id "$APP" \
-  --input-topics "$INPUT" --to-earliest --execute || \
+  --input-topics "$INPUT" --to-earliest || \
   { echo "tool exited non-zero (expected if Streams admin path is incomplete — see #38)"; }
 
 echo ">> verifying internal topics gone"
