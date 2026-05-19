@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/woestebanaan/skafka/internal/auth"
 	"github.com/woestebanaan/skafka/internal/coordinator"
@@ -96,6 +97,46 @@ func (b *Broker) StartFenceWatcher(ctx context.Context) {
 		return
 	}
 	go b.fenceWatcher.Run(ctx)
+}
+
+// StartTxnTimeoutReaper kicks off the gh #28 transaction.timeout.ms
+// sweep on this broker's TxnStateStore. Fires every 10s (Apache's
+// `transaction.abort.timed.out.transaction.cleanup.interval.ms`
+// default) and aborts every Ongoing entry whose deadline has passed.
+// No-op when the store wasn't wired (dev-mode in-memory storage —
+// txns themselves are unsupported there).
+//
+// Each tick scans every slot owned by this broker; cross-broker
+// coordinator routing (gh #91) means each txn ID has exactly one
+// reaper acting on it cluster-wide. Cost: O(num slots × open txns)
+// per tick — slot files are JSON-decoded but stay in OS page cache
+// on the second-and-later tick, so cost in steady state is ~tens of
+// microseconds per slot.
+func (b *Broker) StartTxnTimeoutReaper(ctx context.Context) {
+	if b.txnStore == nil {
+		return
+	}
+	go func() {
+		const tick = 10 * time.Second
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				aborted := b.txnStore.AbortOverdue(now.UnixMilli())
+				if len(aborted) > 0 {
+					for _, r := range aborted {
+						slog.Warn("transaction reaped by timeout sweep (gh #28)",
+							"txn_id", r.TxnID, "pid", r.PID,
+							"old_epoch", r.OldEpoch, "new_epoch", r.NewEpoch,
+							"groups", r.Groups)
+					}
+				}
+			}
+		}
+	}()
 }
 
 // Config holds broker identity and static configuration.

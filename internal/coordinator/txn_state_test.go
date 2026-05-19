@@ -1125,3 +1125,177 @@ func TestEndTxnAbortFiresOffsetHookWithCommitFalse(t *testing.T) {
 		t.Errorf("expected one hook call with commit=false, got %+v", commits)
 	}
 }
+
+// TestAbortOverdue_AgesOutCrashedProducer pins the gh #28 reaper
+// contract: an Ongoing transaction whose OngoingSinceMs+timeoutMs is
+// before nowMs is transitioned to CompleteAbort, its partition list
+// cleared, and its epoch bumped — same fencing signal a clean
+// EndTxn(abort) produces.
+func TestAbortOverdue_AgesOutCrashedProducer(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 3)
+
+	prev := nowUnixMillis
+	nowUnixMillis = func() int64 { return 1_000 }
+	defer func() { nowUnixMillis = prev }()
+
+	alloc, _ := allocCounter()
+	pid, epoch, err := s.GetOrAllocateWithTimeout("crashed-tx", 60_000, alloc)
+	if err != nil {
+		t.Fatalf("alloc: %v", err)
+	}
+
+	// Stamp OngoingSinceMs=1000 via AddPartitions.
+	if err := s.AddPartitions("crashed-tx", pid, epoch, []TxnTopic{
+		{Topic: "events", Partitions: []int32{0}},
+	}); err != nil {
+		t.Fatalf("addPartitions: %v", err)
+	}
+
+	// nowMs well past 1000 + 60000 — reaper should fire.
+	got := s.AbortOverdue(1_000 + 60_000 + 1)
+	if len(got) != 1 {
+		t.Fatalf("AbortOverdue returned %d records, want 1: %+v", len(got), got)
+	}
+	rec := got[0]
+	if rec.TxnID != "crashed-tx" {
+		t.Errorf("aborted TxnID=%q, want %q", rec.TxnID, "crashed-tx")
+	}
+	if rec.PID != pid {
+		t.Errorf("aborted PID=%d, want %d", rec.PID, pid)
+	}
+	if rec.NewEpoch != rec.OldEpoch+1 {
+		t.Errorf("epoch not bumped: old=%d new=%d", rec.OldEpoch, rec.NewEpoch)
+	}
+
+	entry := s.Snapshot()["crashed-tx"]
+	if entry.State != TxnStateCompleteAbort {
+		t.Errorf("post-abort state=%q, want CompleteAbort", entry.State)
+	}
+	if entry.OngoingSinceMs != 0 {
+		t.Errorf("OngoingSinceMs should be cleared, got %d", entry.OngoingSinceMs)
+	}
+	if len(entry.Partitions) != 0 {
+		t.Errorf("Partitions should be cleared, got %+v", entry.Partitions)
+	}
+}
+
+// TestAbortOverdue_SkipsActiveTxn keeps the reaper honest — a txn
+// still inside its window must NOT be aborted, otherwise a slow
+// producer gets nuked mid-commit.
+func TestAbortOverdue_SkipsActiveTxn(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 3)
+
+	prev := nowUnixMillis
+	nowUnixMillis = func() int64 { return 1_000 }
+	defer func() { nowUnixMillis = prev }()
+
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocateWithTimeout("live-tx", 60_000, alloc)
+	_ = s.AddPartitions("live-tx", pid, epoch, []TxnTopic{
+		{Topic: "events", Partitions: []int32{0}},
+	})
+
+	// nowMs only 30s past start — well inside the 60s budget.
+	if got := s.AbortOverdue(1_000 + 30_000); len(got) != 0 {
+		t.Errorf("AbortOverdue fired on live txn: %+v", got)
+	}
+	entry := s.Snapshot()["live-tx"]
+	if entry.State != TxnStateOngoing {
+		t.Errorf("state changed under reaper: got %q want Ongoing", entry.State)
+	}
+}
+
+// TestAbortOverdue_SkipsCompletedTxn protects against the
+// reaper-fires-twice race: an already-committed/aborted txn must not
+// re-trip the sweep, otherwise a subsequent re-init would see a
+// surprise epoch jump.
+func TestAbortOverdue_SkipsCompletedTxn(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 3)
+	prev := nowUnixMillis
+	nowUnixMillis = func() int64 { return 1_000 }
+	defer func() { nowUnixMillis = prev }()
+
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocateWithTimeout("done-tx", 60_000, alloc)
+	_ = s.AddPartitions("done-tx", pid, epoch, []TxnTopic{
+		{Topic: "events", Partitions: []int32{0}},
+	})
+	if err := s.EndTxn("done-tx", pid, epoch, true); err != nil {
+		t.Fatalf("endTxn: %v", err)
+	}
+	priorEntry := s.Snapshot()["done-tx"]
+
+	// Long after deadline. EndTxn cleared OngoingSinceMs, so the
+	// reaper must skip even though State no longer matches Ongoing.
+	if got := s.AbortOverdue(1_000_000_000); len(got) != 0 {
+		t.Errorf("AbortOverdue re-fired on completed txn: %+v", got)
+	}
+	after := s.Snapshot()["done-tx"]
+	if after.Epoch != priorEntry.Epoch || after.State != priorEntry.State {
+		t.Errorf("completed txn mutated: before=%+v after=%+v", priorEntry, after)
+	}
+}
+
+// TestAbortOverdue_NoTimeoutSetIsSkipped keeps pre-#28 entries (and
+// any future call path that didn't carry a timeout) from getting
+// aborted on the first reaper tick. The TxnEntry was written before
+// the field existed and has TransactionTimeoutMs=0.
+func TestAbortOverdue_NoTimeoutSetIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 3)
+	prev := nowUnixMillis
+	nowUnixMillis = func() int64 { return 1_000 }
+	defer func() { nowUnixMillis = prev }()
+
+	alloc, _ := allocCounter()
+	// Note: zero timeout — caller wasn't a fresh KIP-98 client.
+	pid, epoch, _ := s.GetOrAllocateWithTimeout("no-timeout-tx", 0, alloc)
+	_ = s.AddPartitions("no-timeout-tx", pid, epoch, []TxnTopic{
+		{Topic: "events", Partitions: []int32{0}},
+	})
+
+	if got := s.AbortOverdue(999_999_999); len(got) != 0 {
+		t.Errorf("AbortOverdue fired on entry with no timeout: %+v", got)
+	}
+}
+
+// TestAbortOverdue_FiresOffsetHookOnAbort verifies the cross-
+// coordinator signal still goes out on a reaper-driven abort — the
+// staged TxnOffsetCommit offsets must be discarded the same way
+// an explicit EndTxn(abort) would discard them.
+func TestAbortOverdue_FiresOffsetHookOnAbort(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 3)
+	prev := nowUnixMillis
+	nowUnixMillis = func() int64 { return 1_000 }
+	defer func() { nowUnixMillis = prev }()
+
+	alloc, _ := allocCounter()
+	pid, epoch, _ := s.GetOrAllocateWithTimeout("reaped-tx", 1_000, alloc)
+	_ = s.AddOffsetsToTxn("reaped-tx", pid, epoch, "cg-A")
+	_ = s.AddOffsetsToTxn("reaped-tx", pid, epoch, "cg-B")
+
+	var got []struct {
+		group  string
+		commit bool
+	}
+	s.SetTxnOffsetHook(func(g string, _ int64, commit bool) {
+		got = append(got, struct {
+			group  string
+			commit bool
+		}{g, commit})
+	})
+
+	s.AbortOverdue(1_000 + 1_000 + 1)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 hook calls (cg-A, cg-B), got %d: %+v", len(got), got)
+	}
+	for _, c := range got {
+		if c.commit {
+			t.Errorf("reaper hook fired with commit=true on %q (should be abort)", c.group)
+		}
+	}
+}

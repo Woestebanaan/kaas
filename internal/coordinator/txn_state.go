@@ -12,7 +12,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+// nowUnixMillis is a package-local indirection so tests can pin
+// time for the gh #28 txn-timeout reaper (AbortOverdue). Production
+// callers get time.Now().UnixMilli().
+var nowUnixMillis = func() int64 { return time.Now().UnixMilli() }
 
 // DefaultNumSlots matches Apache Kafka's
 // `transaction.state.log.num.partitions=50` default. Pinning the slot
@@ -103,6 +109,18 @@ type TxnEntry struct {
 	PID        int64      `json:"pid"`
 	Epoch      int16      `json:"epoch"`
 	Partitions []TxnTopic `json:"partitions,omitempty"`
+	// OngoingSinceMs is the wall-clock UnixMilli the entry entered
+	// the Ongoing state (gh #28). Together with TransactionTimeoutMs,
+	// this is the input to AbortOverdue's deadline check. Zero in
+	// states other than Ongoing.
+	OngoingSinceMs int64 `json:"ongoingSinceMs,omitempty"`
+	// TransactionTimeoutMs mirrors the InitProducerIdRequest field
+	// (KIP-98). Apache aborts an Ongoing transaction whose
+	// last-update + timeoutMs is in the past. gh #28's MVP wires
+	// the field through to TxnStateStore + adds the AbortOverdue
+	// sweep; a periodic goroutine call is a separate plumbing
+	// task in cluster_runtime.go.
+	TransactionTimeoutMs int32 `json:"transactionTimeoutMs,omitempty"`
 	// State is the transaction state machine field — gh #25/#26.
 	// Mirrors Apache's TransactionState (TransactionMetadata.scala):
 	//
@@ -199,6 +217,19 @@ func NewTxnStateStore(dir string, numSlots int) (*TxnStateStore, error) {
 // brief controller-transition window; outside of that the gh #91
 // OwnsTxn gate keeps each txn ID on a single broker.
 func (s *TxnStateStore) GetOrAllocate(txnID string, alloc func() int64) (int64, int16, error) {
+	return s.GetOrAllocateWithTimeout(txnID, 0, alloc)
+}
+
+// GetOrAllocateWithTimeout is GetOrAllocate plus the gh #28
+// transaction.timeout.ms recording. The client's
+// InitProducerIdRequest.TransactionTimeoutMs is preserved on the
+// entry so AbortOverdue can age out crashed producers without
+// having to re-derive the timeout at sweep time.
+//
+// timeoutMs <= 0 leaves the existing entry's timeout untouched
+// (cooperative for the non-transactional fast path which doesn't
+// know or care about the timeout dial).
+func (s *TxnStateStore) GetOrAllocateWithTimeout(txnID string, timeoutMs int32, alloc func() int64) (int64, int16, error) {
 	if txnID == "" {
 		return 0, 0, errors.New("txn state store: empty transactional id")
 	}
@@ -225,6 +256,9 @@ func (s *TxnStateStore) GetOrAllocate(txnID string, alloc func() int64) (int64, 
 		entry = TxnEntry{PID: alloc(), Epoch: 0}
 	} else {
 		entry.Epoch++
+	}
+	if timeoutMs > 0 {
+		entry.TransactionTimeoutMs = timeoutMs
 	}
 	state[txnID] = entry
 	if err := s.persistSlot(slot, state); err != nil {
@@ -297,6 +331,10 @@ func (s *TxnStateStore) AddPartitions(txnID string, pid int64, epoch int16, addi
 	wasNotOngoing := entry.State != TxnStateOngoing
 	if wasNotOngoing {
 		entry.State = TxnStateOngoing
+		// gh #28: stamp the wall-clock start so the txn-timeout
+		// reaper (AbortOverdue) can age out producers that crashed
+		// mid-transaction. Only stamped on the empty→ongoing edge.
+		entry.OngoingSinceMs = nowUnixMillis()
 	}
 
 	if !merged && !wasNotOngoing {
@@ -364,6 +402,7 @@ func (s *TxnStateStore) AddOffsetsToTxn(txnID string, pid int64, epoch int16, gr
 			// somehow in Empty/Complete* with a stale group entry.
 			if entry.State != TxnStateOngoing {
 				entry.State = TxnStateOngoing
+				entry.OngoingSinceMs = nowUnixMillis()
 				state[txnID] = entry
 				return s.persistSlot(slot, state)
 			}
@@ -373,6 +412,7 @@ func (s *TxnStateStore) AddOffsetsToTxn(txnID string, pid int64, epoch int16, gr
 	entry.Groups = append(entry.Groups, groupID)
 	if entry.State != TxnStateOngoing {
 		entry.State = TxnStateOngoing
+		entry.OngoingSinceMs = nowUnixMillis()
 	}
 	state[txnID] = entry
 	return s.persistSlot(slot, state)
@@ -464,6 +504,9 @@ func (s *TxnStateStore) EndTxn(txnID string, pid int64, epoch int16, commit bool
 			entry.State = TxnStateCompleteAbort
 		}
 		entry.Partitions = nil
+		// gh #28: clear the timeout-reaper clock; AbortOverdue must
+		// not re-trip on an already-completed transaction.
+		entry.OngoingSinceMs = 0
 		// gh #24/#27: fire the cross-coordinator hook for each
 		// (groupID, pid) so its offset store either materialises or
 		// discards the pending offsets staged by TxnOffsetCommit.
@@ -502,6 +545,101 @@ func (s *TxnStateStore) EndTxn(txnID string, pid int64, epoch int16, commit bool
 
 	state[txnID] = entry
 	return s.persistSlot(slot, state)
+}
+
+// AbortOverdue scans every slot owned by this broker and aborts any
+// Ongoing transaction whose OngoingSinceMs + TransactionTimeoutMs is
+// older than now. gh #28 — mirrors Apache's
+// TransactionStateManager.abortTimedOutTransactions.
+//
+// Returns the list of (txnID, pid, epoch) tuples that were aborted
+// so the caller can fire the same group-offset hook EndTxn fires (in
+// practice this is done internally; the return slice is for
+// observability/metrics + tests). Caller is expected to invoke this
+// periodically — a 10s tick is the rough Apache cadence (controlled
+// by `transaction.abort.timed.out.transaction.cleanup.interval.ms`,
+// 10000 default; skafka's reaper loop in cluster_runtime fires on
+// the same cadence).
+//
+// Bumps the producer epoch on abort. Apache's "writeTxnMarkers + bump
+// epoch" sequence is what fences a stuck producer: when it eventually
+// reconnects with the old (PID, epoch), the gh #22 fence-on-rejoin
+// path returns PRODUCER_FENCED. Skafka transitions state to
+// CompleteAbort atomically (no markers yet — that's gh #114) and
+// bumps the epoch in the same persist.
+//
+// A 0 OngoingSinceMs is treated as "no clock set" and skipped — this
+// keeps pre-#28 entries (which never got the stamp) from getting
+// nuked on the first reaper tick. The same skip applies to entries
+// whose TransactionTimeoutMs is 0 (client never told us how long it
+// wanted, so we don't get to decide for them).
+func (s *TxnStateStore) AbortOverdue(nowMs int64) []TxnAbortRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var aborted []TxnAbortRecord
+	for slot := 0; slot < s.numSlots; slot++ {
+		state, err := s.loadSlot(slot)
+		if err != nil {
+			continue
+		}
+		changed := false
+		for txnID, entry := range state {
+			if entry.State != TxnStateOngoing {
+				continue
+			}
+			if entry.OngoingSinceMs == 0 || entry.TransactionTimeoutMs <= 0 {
+				continue
+			}
+			deadline := entry.OngoingSinceMs + int64(entry.TransactionTimeoutMs)
+			if deadline > nowMs {
+				continue
+			}
+
+			pid, epoch := entry.PID, entry.Epoch
+			groups := append([]string(nil), entry.Groups...)
+
+			entry.State = TxnStateCompleteAbort
+			entry.Partitions = nil
+			entry.OngoingSinceMs = 0
+			if entry.Epoch == math.MaxInt16 {
+				entry.Epoch = 0
+			} else {
+				entry.Epoch++
+			}
+			entry.Groups = nil
+			state[txnID] = entry
+			changed = true
+
+			if s.txnOffsetHook != nil {
+				for _, g := range groups {
+					s.txnOffsetHook(g, pid, false)
+				}
+			}
+			aborted = append(aborted, TxnAbortRecord{
+				TxnID:    txnID,
+				PID:      pid,
+				OldEpoch: epoch,
+				NewEpoch: entry.Epoch,
+				Groups:   groups,
+			})
+		}
+		if changed {
+			_ = s.persistSlot(slot, state)
+		}
+	}
+	return aborted
+}
+
+// TxnAbortRecord is the side-effect record AbortOverdue returns per
+// aborted txn — feeds metrics and the gh #114 marker-writer (when it
+// lands) and is used by tests to assert the sweep fired.
+type TxnAbortRecord struct {
+	TxnID    string
+	PID      int64
+	OldEpoch int16
+	NewEpoch int16
+	Groups   []string
 }
 
 // Transaction state constants — mirror Apache's TransactionState

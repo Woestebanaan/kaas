@@ -93,25 +93,37 @@ func TestInitProducerIdEpochZero(t *testing.T) {
 // (PID stays stable, epoch bumps) contract without touching disk.
 type fakeTxnStore struct {
 	state map[string]struct {
-		pid   int64
-		epoch int16
+		pid       int64
+		epoch     int16
+		timeoutMs int32
 	}
 }
 
 func newFakeTxnStore() *fakeTxnStore {
 	return &fakeTxnStore{state: map[string]struct {
-		pid   int64
-		epoch int16
+		pid       int64
+		epoch     int16
+		timeoutMs int32
 	}{}}
 }
 
 func (f *fakeTxnStore) GetOrAllocate(txnID string, alloc func() int64) (int64, int16, error) {
+	return f.GetOrAllocateWithTimeout(txnID, 0, alloc)
+}
+
+// lastTimeoutMs (per-txnID, set on every Get) is what gh #28 tests
+// assert against to confirm the handler threaded TransactionTimeoutMs
+// through to the store.
+func (f *fakeTxnStore) GetOrAllocateWithTimeout(txnID string, timeoutMs int32, alloc func() int64) (int64, int16, error) {
 	e, ok := f.state[txnID]
 	if !ok {
 		e.pid = alloc()
 		e.epoch = 0
 	} else {
 		e.epoch++
+	}
+	if timeoutMs > 0 {
+		e.timeoutMs = timeoutMs
 	}
 	f.state[txnID] = e
 	return e.pid, e.epoch, nil

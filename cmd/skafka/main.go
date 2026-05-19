@@ -660,6 +660,10 @@ func setupDispatcher(ctx context.Context, authEngine auth.AuthEngine, allowAll *
 	// gh #108 phase 2: cross-broker producer-fence broadcast.
 	// No-op in dev-mode (memory storage).
 	b.StartFenceWatcher(ctx)
+	// gh #28: transaction.timeout.ms reaper — sweeps every Ongoing
+	// txn whose deadline has passed and transitions it to
+	// CompleteAbort. No-op in dev-mode (TxnStateStore not wired).
+	b.StartTxnTimeoutReaper(ctx)
 	return d, listenerEngines
 }
 

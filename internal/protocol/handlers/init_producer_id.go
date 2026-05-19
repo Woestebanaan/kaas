@@ -32,6 +32,11 @@ type TxnOwnership interface {
 // coordinator.TxnStateStore; tests can substitute a fake.
 type TxnStateStore interface {
 	GetOrAllocate(txnID string, alloc func() int64) (int64, int16, error)
+	// GetOrAllocateWithTimeout records the client's requested
+	// transaction.timeout.ms so the gh #28 txn-timeout reaper has
+	// the per-txn deadline to compare against. Same return shape as
+	// GetOrAllocate.
+	GetOrAllocateWithTimeout(txnID string, timeoutMs int32, alloc func() int64) (int64, int16, error)
 }
 
 // ProducerEpochFencer broadcasts an epoch bump to every partition
@@ -154,7 +159,7 @@ func (h *InitProducerIdHandler) Handle(_ *connstate.ConnState, version int16, bo
 		return w.Bytes(), nil
 	}
 
-	pid, epoch := h.allocate(req.TransactionalID)
+	pid, epoch := h.allocate(req.TransactionalID, req.TransactionTimeoutMs)
 
 	resp := &api.InitProducerIdResponse{
 		ProducerID:    pid,
@@ -173,7 +178,7 @@ func (h *InitProducerIdHandler) Handle(_ *connstate.ConnState, version int16, bo
 // — that means the broker is mid-startup or running in a config
 // that doesn't support transactions, and a zombie producer
 // could still write under its old (PID, epoch).
-func (h *InitProducerIdHandler) allocate(txnID string) (int64, int16) {
+func (h *InitProducerIdHandler) allocate(txnID string, timeoutMs int32) (int64, int16) {
 	if txnID == "" || h.txnStore == nil {
 		if txnID != "" && h.txnStore == nil {
 			slog.Warn("InitProducerId received transactional.id but no TxnStateStore is wired; "+
@@ -181,7 +186,7 @@ func (h *InitProducerIdHandler) allocate(txnID string) (int64, int16) {
 		}
 		return h.next.Add(1), 0
 	}
-	pid, epoch, err := h.txnStore.GetOrAllocate(txnID, func() int64 { return h.next.Add(1) })
+	pid, epoch, err := h.txnStore.GetOrAllocateWithTimeout(txnID, timeoutMs, func() int64 { return h.next.Add(1) })
 	if err != nil {
 		// Persistence failure on the txnStore is rare (disk full,
 		// I/O error). The producer side has nothing to fall back
