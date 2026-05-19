@@ -116,6 +116,13 @@ func (b *Broker) StartTxnTimeoutReaper(ctx context.Context) {
 	if b.txnStore == nil {
 		return
 	}
+	// gh #91: only reap txns this broker is the coordinator for.
+	// Without this the same overdue entry gets nuked once per broker,
+	// firing the offset hook N times and racing on slot-file writes.
+	var ownsTxn func(string) bool
+	if owner, ok := b.brokerCoord.(handlers.TxnOwnership); ok {
+		ownsTxn = owner.OwnsTxn
+	}
 	go func() {
 		const tick = 10 * time.Second
 		t := time.NewTicker(tick)
@@ -125,7 +132,7 @@ func (b *Broker) StartTxnTimeoutReaper(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case now := <-t.C:
-				aborted := b.txnStore.AbortOverdue(now.UnixMilli())
+				aborted := b.txnStore.AbortOverdueOwned(now.UnixMilli(), ownsTxn)
 				if len(aborted) > 0 {
 					for _, r := range aborted {
 						slog.Warn("transaction reaped by timeout sweep (gh #28)",

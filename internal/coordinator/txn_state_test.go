@@ -1299,3 +1299,37 @@ func TestAbortOverdue_FiresOffsetHookOnAbort(t *testing.T) {
 		}
 	}
 }
+
+// TestAbortOverdueOwned_SkipsNonOwnedTxns guards gh #91 multi-broker
+// correctness: a broker's reaper must skip txn IDs that aren't on
+// its slot. Without this gate, every broker reaps every overdue
+// entry — the offset hook fires N times and slot-file writes race.
+func TestAbortOverdueOwned_SkipsNonOwnedTxns(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewTxnStateStore(dir, 3)
+	prev := nowUnixMillis
+	nowUnixMillis = func() int64 { return 1_000 }
+	defer func() { nowUnixMillis = prev }()
+
+	alloc, _ := allocCounter()
+	for _, id := range []string{"mine", "yours"} {
+		pid, epoch, _ := s.GetOrAllocateWithTimeout(id, 1_000, alloc)
+		_ = s.AddPartitions(id, pid, epoch, []TxnTopic{
+			{Topic: "events", Partitions: []int32{0}},
+		})
+	}
+
+	owns := func(txnID string) bool { return txnID == "mine" }
+	got := s.AbortOverdueOwned(1_000+1_000+1, owns)
+	if len(got) != 1 || got[0].TxnID != "mine" {
+		t.Errorf("AbortOverdueOwned ignored ownership gate: got %+v", got)
+	}
+
+	snap := s.Snapshot()
+	if snap["mine"].State != TxnStateCompleteAbort {
+		t.Errorf("mine should be aborted: %+v", snap["mine"])
+	}
+	if snap["yours"].State != TxnStateOngoing {
+		t.Errorf("yours should be untouched (not this broker's coord): %+v", snap["yours"])
+	}
+}

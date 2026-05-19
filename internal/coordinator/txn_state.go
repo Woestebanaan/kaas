@@ -574,6 +574,17 @@ func (s *TxnStateStore) EndTxn(txnID string, pid int64, epoch int16, commit bool
 // whose TransactionTimeoutMs is 0 (client never told us how long it
 // wanted, so we don't get to decide for them).
 func (s *TxnStateStore) AbortOverdue(nowMs int64) []TxnAbortRecord {
+	return s.AbortOverdueOwned(nowMs, nil)
+}
+
+// AbortOverdueOwned is AbortOverdue plus a gh #91 ownership gate.
+// `ownsTxn` is the per-broker check that returns true only for the
+// txn IDs this broker is the coordinator for; when nil (tests, dev
+// mode, single-broker) every slot is in scope. Without this gate a
+// multi-broker cluster has every broker racing to abort the same
+// overdue entry — both correct in outcome, wasteful on slot-file
+// writes and the offset hook fires N times instead of once.
+func (s *TxnStateStore) AbortOverdueOwned(nowMs int64, ownsTxn func(txnID string) bool) []TxnAbortRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -586,6 +597,9 @@ func (s *TxnStateStore) AbortOverdue(nowMs int64) []TxnAbortRecord {
 		changed := false
 		for txnID, entry := range state {
 			if entry.State != TxnStateOngoing {
+				continue
+			}
+			if ownsTxn != nil && !ownsTxn(txnID) {
 				continue
 			}
 			if entry.OngoingSinceMs == 0 || entry.TransactionTimeoutMs <= 0 {
