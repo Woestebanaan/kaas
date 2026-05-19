@@ -15,10 +15,22 @@ echo ">> Scenario 1: 10k records / 1KB / acks=1"
   --num-records 10000 --record-size 1024 --throughput -1 \
   --producer-props bootstrap.servers="$BOOTSTRAP" acks=1
 
-echo ">> Scenario 2: same, with snappy compression"
-"$KAFKA_BIN/kafka-producer-perf-test.sh" --topic "$TOPIC" \
-  --num-records 10000 --record-size 1024 --throughput -1 \
-  --producer-props bootstrap.servers="$BOOTSTRAP" acks=1 compression.type=snappy
+echo ">> Scenario 2 (gh #13): produce 1k records under each compression codec"
+# Apache producers can pick gzip / snappy / lz4 / zstd. Skafka stores
+# the compressed RecordBatch verbatim — it never decompresses — so
+# this test confirms each codec round-trips through Produce without
+# the broker tripping on the codec-bit combination. A consumer would
+# decompress on its end; this script only verifies the producer
+# wire path (the matching Go test in tests/kafka-compat covers the
+# consumer side, where ALL four codecs decode back to the original
+# bytes).
+for codec in gzip snappy lz4 zstd; do
+  echo "  -- $codec"
+  "$KAFKA_BIN/kafka-producer-perf-test.sh" --topic "$TOPIC" \
+    --num-records 1000 --record-size 1024 --throughput -1 \
+    --producer-props bootstrap.servers="$BOOTSTRAP" acks=1 \
+      "compression.type=$codec" 2>&1 | tail -1
+done
 
 echo ">> Scenario 3 (gh #14): oversized record (>1MB) must be rejected"
 # Apache broker default max.message.bytes=1048588. Skafka mirrors that
