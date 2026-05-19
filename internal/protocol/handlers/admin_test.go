@@ -19,6 +19,8 @@ type fakeCRW struct {
 	deleted   []string
 	createErr map[string]error
 	deleteErr map[string]error
+	expanded  map[string]int32 // gh #52: ExpandTopic record
+	expandErr map[string]error
 }
 
 func (f *fakeCRW) CreateTopic(_ context.Context, name string, _ int32, configs map[string]string) error {
@@ -39,6 +41,19 @@ func (f *fakeCRW) DeleteTopic(_ context.Context, name string) error {
 		return err
 	}
 	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+func (f *fakeCRW) ExpandTopic(_ context.Context, name string, newCount int32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err, ok := f.expandErr[name]; ok {
+		return err
+	}
+	if f.expanded == nil {
+		f.expanded = make(map[string]int32)
+	}
+	f.expanded[name] = newCount
 	return nil
 }
 

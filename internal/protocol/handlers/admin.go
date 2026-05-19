@@ -40,7 +40,20 @@ import (
 type TopicCRWriter interface {
 	CreateTopic(ctx context.Context, name string, partitions int32, configs map[string]string) error
 	DeleteTopic(ctx context.Context, name string) error
+	// ExpandTopic grows the partition count on an existing KafkaTopic
+	// CR (gh #52, KIP-195). The operator's reconciler picks up the
+	// new count and creates the additional partition directories.
+	// Implementations should return ErrTopicNotFound when the CR
+	// doesn't exist, and ErrInvalidPartitionCount when the requested
+	// count <= the existing one (Apache's contract: CreatePartitions
+	// can only grow, never shrink).
+	ExpandTopic(ctx context.Context, name string, newCount int32) error
 }
+
+// ErrInvalidPartitionCount is returned by TopicCRWriter.ExpandTopic
+// when the requested count is not strictly greater than the existing
+// partition count. Mirrors Apache's INVALID_PARTITIONS (37) wire code.
+var ErrInvalidPartitionCount = errors.New("requested partition count must be greater than existing")
 
 // ErrTopicAlreadyExists / ErrTopicNotFound are sentinels TopicCRWriter
 // implementations should wrap (errors.Is-compatible) so handlers can
@@ -540,6 +553,86 @@ func groupBindingsByResource(bindings []ACLBinding) []api.DescribeAclsResource {
 		})
 	}
 	return out
+}
+
+// ---- CreatePartitions (gh #52) ----
+
+// CreatePartitionsHandler grows a topic's partition count at runtime
+// via the admin protocol (KIP-195). Mirrors the KafkaTopic CR-write
+// flow CreateTopicsHandler uses — the operator's reconciler picks up
+// the new count and creates the additional partition directories.
+// Without a CRWriter wired (kafka-compat tests, dev mode) the
+// handler reports per-topic INVALID_REQUEST so clients see a clean
+// error rather than silent success.
+type CreatePartitionsHandler struct {
+	topics TopicSource
+	crw    TopicCRWriter
+}
+
+func NewCreatePartitionsHandler(topics TopicSource) *CreatePartitionsHandler {
+	return &CreatePartitionsHandler{topics: topics}
+}
+
+func (h *CreatePartitionsHandler) WithCRWriter(crw TopicCRWriter) *CreatePartitionsHandler {
+	h.crw = crw
+	return h
+}
+
+func (h *CreatePartitionsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	r := codec.NewReader(body)
+	req, err := api.DecodeCreatePartitionsRequest(r, version)
+	if err != nil {
+		return nil, fmt.Errorf("create_partitions decode: %w", err)
+	}
+
+	resp := &api.CreatePartitionsResponse{}
+	for _, t := range req.Topics {
+		result := api.CreatePartitionsResult{Name: t.Name}
+		// Apache requires the new count > existing — enforced by the
+		// writer's ExpandTopic path, but we also check here so the
+		// no-CRWriter dev/test path surfaces something sane.
+		if t.Count < 1 {
+			result.ErrorCode = int16(codec.ErrInvalidRequest)
+			result.ErrorMessage = "partition count must be >= 1"
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		if req.ValidateOnly {
+			// validate_only never writes; assume success for valid
+			// shapes (Apache's contract for the admin tool's
+			// --dry-run).
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		if h.crw == nil {
+			// Dev/test path: report INVALID_REQUEST so the caller
+			// doesn't think their grow succeeded.
+			result.ErrorCode = int16(codec.ErrInvalidRequest)
+			result.ErrorMessage = "broker not configured for runtime topic mutation"
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		if err := h.crw.ExpandTopic(context.Background(), t.Name, t.Count); err != nil {
+			switch {
+			case errors.Is(err, ErrTopicNotFound):
+				result.ErrorCode = int16(codec.ErrUnknownTopicOrPartition)
+			case errors.Is(err, ErrInvalidPartitionCount):
+				// Apache's INVALID_PARTITIONS (37). The codec package
+				// doesn't name this constant yet; use the raw value
+				// (mirrors what the AlterPartitionReassignments path
+				// did before its constant was added).
+				result.ErrorCode = 37
+				result.ErrorMessage = err.Error()
+			default:
+				result.ErrorCode = int16(codec.ErrInvalidRequest)
+				result.ErrorMessage = err.Error()
+			}
+		}
+		resp.Results = append(resp.Results, result)
+	}
+	w := codec.NewWriter()
+	api.EncodeCreatePartitionsResponse(w, resp, version)
+	return w.Bytes(), nil
 }
 
 // ---- DescribeConfigs ----

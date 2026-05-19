@@ -578,6 +578,16 @@ func (b *Broker) registerTopicAdminHandlers(d *protocol.Dispatcher) {
 		deleteTopicsHandler = deleteTopicsHandler.WithCRWriter(b.topicCRWriter)
 	}
 	d.Register(20, 0, 5, deleteTopicsHandler)
+
+	// gh #52: CreatePartitions (KIP-195). v0-v3 per Apache 3.7
+	// schema; flexible at v2+. Wires the same TopicCRWriter used by
+	// CreateTopics — the operator's reconciler picks up the new
+	// partition count and creates the additional dirs.
+	createPartitions := handlers.NewCreatePartitionsHandler(b.topics)
+	if b.topicCRWriter != nil {
+		createPartitions = createPartitions.WithCRWriter(b.topicCRWriter)
+	}
+	d.Register(37, 0, 3, createPartitions)
 }
 
 // registerSaslHandlers: SaslHandshake (17), SaslAuthenticate (36).

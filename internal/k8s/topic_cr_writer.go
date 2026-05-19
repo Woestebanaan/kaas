@@ -9,6 +9,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/woestebanaan/skafka/internal/observability"
@@ -163,6 +164,31 @@ func (w *TopicCRWriter) DeleteTopic(ctx context.Context, name string) error {
 			return fmt.Errorf("%w: %s", handlers.ErrTopicNotFound, name)
 		}
 		return fmt.Errorf("delete KafkaTopic %s: %w", name, err)
+	}
+	return nil
+}
+
+// ExpandTopic grows a KafkaTopic CR's partition count (gh #52,
+// KIP-195). Apache's contract: count can only grow, never shrink.
+// Existing partitions keep their records; new partitions start
+// empty. Wraps apierrors.IsNotFound as handlers.ErrTopicNotFound
+// and rejects shrink/equal requests with ErrInvalidPartitionCount
+// (mapped to INVALID_PARTITIONS=37 on the wire).
+func (w *TopicCRWriter) ExpandTopic(ctx context.Context, name string, newCount int32) error {
+	metaName, _ := nameForCR(name)
+	var t v1alpha1.KafkaTopic
+	if err := w.client.Get(ctx, types.NamespacedName{Namespace: w.namespace, Name: metaName}, &t); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", handlers.ErrTopicNotFound, name)
+		}
+		return fmt.Errorf("get KafkaTopic %s: %w", name, err)
+	}
+	if newCount <= t.Spec.Partitions {
+		return fmt.Errorf("%w: existing=%d requested=%d", handlers.ErrInvalidPartitionCount, t.Spec.Partitions, newCount)
+	}
+	t.Spec.Partitions = newCount
+	if err := w.client.Update(ctx, &t); err != nil {
+		return fmt.Errorf("update KafkaTopic %s: %w", name, err)
 	}
 	return nil
 }
