@@ -21,6 +21,9 @@ type fakeCRW struct {
 	deleteErr map[string]error
 	expanded  map[string]int32 // gh #52: ExpandTopic record
 	expandErr map[string]error
+	// gh #9: UpdateTopicConfig
+	configMutations map[string][]TopicConfigMutation
+	configErr       map[string]error
 }
 
 func (f *fakeCRW) CreateTopic(_ context.Context, name string, _ int32, configs map[string]string) error {
@@ -54,6 +57,19 @@ func (f *fakeCRW) ExpandTopic(_ context.Context, name string, newCount int32) er
 		f.expanded = make(map[string]int32)
 	}
 	f.expanded[name] = newCount
+	return nil
+}
+
+func (f *fakeCRW) UpdateTopicConfig(_ context.Context, name string, mutations []TopicConfigMutation) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err, ok := f.configErr[name]; ok {
+		return err
+	}
+	if f.configMutations == nil {
+		f.configMutations = make(map[string][]TopicConfigMutation)
+	}
+	f.configMutations[name] = append(f.configMutations[name], mutations...)
 	return nil
 }
 

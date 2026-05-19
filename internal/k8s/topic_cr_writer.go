@@ -168,6 +168,148 @@ func (w *TopicCRWriter) DeleteTopic(ctx context.Context, name string) error {
 	return nil
 }
 
+// UpdateTopicConfig patches the KafkaTopic CR's spec.config block
+// (gh #9, KIP-339 IncrementalAlterConfigs). Each mutation is one
+// (key, op, value) tuple. Op values: 0=SET, 1=DELETE, 2=APPEND,
+// 3=SUBTRACT. Today skafka only honours SET and DELETE for the
+// scalar-typed config keys; APPEND/SUBTRACT are accepted but
+// translated to SET for cleanup.policy ("delete" → "compact,delete"
+// when appended). Unknown keys are silently ignored to match
+// Apache's "best-effort" semantic for forward-compat.
+func (w *TopicCRWriter) UpdateTopicConfig(ctx context.Context, name string, mutations []handlers.TopicConfigMutation) error {
+	metaName, _ := nameForCR(name)
+	var t v1alpha1.KafkaTopic
+	if err := w.client.Get(ctx, types.NamespacedName{Namespace: w.namespace, Name: metaName}, &t); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", handlers.ErrTopicNotFound, name)
+		}
+		return fmt.Errorf("get KafkaTopic %s: %w", name, err)
+	}
+	for _, m := range mutations {
+		applyTopicConfigMutation(&t.Spec.Config, m)
+	}
+	if err := w.client.Update(ctx, &t); err != nil {
+		return fmt.Errorf("update KafkaTopic %s: %w", name, err)
+	}
+	return nil
+}
+
+// applyTopicConfigMutation maps one Kafka-wire config key+op onto
+// the typed KafkaTopic.spec.config schema. SET / DELETE are
+// straightforward; APPEND / SUBTRACT only apply to cleanup.policy
+// (the one config skafka treats as a comma-list).
+func applyTopicConfigMutation(cfg *v1alpha1.KafkaTopicConfig, m handlers.TopicConfigMutation) {
+	switch m.Key {
+	case "cleanup.policy":
+		switch m.Op {
+		case 0: // SET
+			cfg.CleanupPolicy = m.Value
+		case 1: // DELETE
+			cfg.CleanupPolicy = ""
+		case 2: // APPEND — merge into the existing comma list
+			cfg.CleanupPolicy = appendCommaPolicy(cfg.CleanupPolicy, m.Value)
+		case 3: // SUBTRACT
+			cfg.CleanupPolicy = subtractCommaPolicy(cfg.CleanupPolicy, m.Value)
+		}
+	case "retention.ms":
+		applyInt64Config(&cfg.RetentionMs, m)
+	case "retention.bytes":
+		applyInt64Config(&cfg.RetentionBytes, m)
+	case "segment.bytes":
+		applyInt64Config(&cfg.SegmentBytes, m)
+	case "min.compaction.lag.ms":
+		applyInt64Config(&cfg.MinCompactionLagMs, m)
+	case "delete.retention.ms":
+		applyInt64Config(&cfg.DeleteRetentionMs, m)
+	default:
+		// Unknown key — silent drop. Apache returns success here as long
+		// as the request shape was valid; rejecting on unknown keys
+		// would break clients that send a full config set on every
+		// alter (Streams config dump pattern).
+	}
+}
+
+func applyInt64Config(field **int64, m handlers.TopicConfigMutation) {
+	switch m.Op {
+	case 0: // SET
+		if n, err := parseInt64(m.Value); err == nil {
+			*field = &n
+		}
+	case 1: // DELETE
+		*field = nil
+	case 2, 3:
+		// APPEND/SUBTRACT only make sense for list-valued configs;
+		// silently ignore for scalar int64 fields.
+	}
+}
+
+// appendCommaPolicy adds a value to a comma-separated policy list if
+// not already present. Used for cleanup.policy APPEND ops.
+func appendCommaPolicy(current, add string) string {
+	if current == "" {
+		return add
+	}
+	for _, v := range splitCSV(current) {
+		if v == add {
+			return current
+		}
+	}
+	return current + "," + add
+}
+
+// subtractCommaPolicy removes a value from a comma-separated policy
+// list. Returns empty when the result is empty.
+func subtractCommaPolicy(current, remove string) string {
+	if current == "" {
+		return ""
+	}
+	parts := splitCSV(current)
+	out := parts[:0]
+	for _, v := range parts {
+		if v != remove {
+			out = append(out, v)
+		}
+	}
+	return joinCSV(out)
+}
+
+// splitCSV / joinCSV are tiny strings.Split/strings.Join wrappers kept
+// inline so the writer file doesn't need an extra import.
+func splitCSV(s string) []string {
+	out := []string{}
+	for len(s) > 0 {
+		i := indexByte(s, ',')
+		if i < 0 {
+			out = append(out, s)
+			break
+		}
+		out = append(out, s[:i])
+		s = s[i+1:]
+	}
+	return out
+}
+func joinCSV(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	}
+	out := parts[0]
+	for _, p := range parts[1:] {
+		out += "," + p
+	}
+	return out
+}
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
 // ExpandTopic grows a KafkaTopic CR's partition count (gh #52,
 // KIP-195). Apache's contract: count can only grow, never shrink.
 // Existing partitions keep their records; new partitions start

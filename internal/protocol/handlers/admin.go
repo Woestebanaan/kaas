@@ -48,6 +48,23 @@ type TopicCRWriter interface {
 	// count <= the existing one (Apache's contract: CreatePartitions
 	// can only grow, never shrink).
 	ExpandTopic(ctx context.Context, name string, newCount int32) error
+	// UpdateTopicConfig patches a topic's config block at runtime
+	// (gh #9, KIP-339). Each entry in mutations carries one
+	// (key, operation, value) tuple — SET/DELETE/APPEND/SUBTRACT.
+	// The implementation maps known keys onto the typed
+	// KafkaTopic.spec.config fields; unknown keys are silently
+	// ignored to match Apache's "best-effort accept" semantic.
+	// Returns ErrTopicNotFound for unknown topics.
+	UpdateTopicConfig(ctx context.Context, name string, mutations []TopicConfigMutation) error
+}
+
+// TopicConfigMutation is the broker-side projection of an
+// IncrementalAlterConfigs config entry. Op matches the wire constants:
+// 0=SET, 1=DELETE, 2=APPEND, 3=SUBTRACT.
+type TopicConfigMutation struct {
+	Key   string
+	Op    int8
+	Value string
 }
 
 // ErrInvalidPartitionCount is returned by TopicCRWriter.ExpandTopic
@@ -632,6 +649,82 @@ func (h *CreatePartitionsHandler) Handle(_ *connstate.ConnState, version int16, 
 	}
 	w := codec.NewWriter()
 	api.EncodeCreatePartitionsResponse(w, resp, version)
+	return w.Bytes(), nil
+}
+
+// ---- IncrementalAlterConfigs (gh #9, KIP-339) ----
+
+// IncrementalAlterConfigsHandler mutates per-resource config entries
+// at runtime. Mirrors the CreatePartitions wire shape — translates
+// the request into TopicCRWriter.UpdateTopicConfig calls; the
+// operator reconciler then writes the per-topic .config.json on the
+// PVC and the storage cleaner picks up the new values on next pass.
+//
+// Today only TOPIC resources are supported. BROKER and BROKER_LOGGER
+// return UNSUPPORTED_VERSION (skafka has no per-broker dynamic config
+// surface yet).
+type IncrementalAlterConfigsHandler struct {
+	crw TopicCRWriter
+}
+
+func NewIncrementalAlterConfigsHandler() *IncrementalAlterConfigsHandler {
+	return &IncrementalAlterConfigsHandler{}
+}
+
+func (h *IncrementalAlterConfigsHandler) WithCRWriter(crw TopicCRWriter) *IncrementalAlterConfigsHandler {
+	h.crw = crw
+	return h
+}
+
+func (h *IncrementalAlterConfigsHandler) Handle(_ *connstate.ConnState, version int16, body []byte) ([]byte, error) {
+	r := codec.NewReader(body)
+	req, err := api.DecodeIncrementalAlterConfigsRequest(r, version)
+	if err != nil {
+		return nil, fmt.Errorf("incremental_alter_configs decode: %w", err)
+	}
+	resp := &api.IncrementalAlterConfigsResponse{}
+	for _, res := range req.Resources {
+		result := api.IncrementalAlterConfigsResult{
+			ResourceType: res.ResourceType,
+			ResourceName: res.ResourceName,
+		}
+		if res.ResourceType != api.ConfigResourceTopic {
+			result.ErrorCode = int16(codec.ErrUnsupportedVersion)
+			result.ErrorMessage = "skafka only supports IncrementalAlterConfigs on Topic resources"
+			resp.Responses = append(resp.Responses, result)
+			continue
+		}
+		if req.ValidateOnly {
+			resp.Responses = append(resp.Responses, result)
+			continue
+		}
+		if h.crw == nil {
+			result.ErrorCode = int16(codec.ErrInvalidRequest)
+			result.ErrorMessage = "broker not configured for runtime topic mutation"
+			resp.Responses = append(resp.Responses, result)
+			continue
+		}
+		mutations := make([]TopicConfigMutation, 0, len(res.Configs))
+		for _, c := range res.Configs {
+			mutations = append(mutations, TopicConfigMutation{
+				Key:   c.Name,
+				Op:    c.ConfigOperation,
+				Value: c.Value,
+			})
+		}
+		if err := h.crw.UpdateTopicConfig(context.Background(), res.ResourceName, mutations); err != nil {
+			switch {
+			case errors.Is(err, ErrTopicNotFound):
+				result.ErrorCode = int16(codec.ErrUnknownTopicOrPartition)
+			default:
+				result.ErrorCode = int16(codec.ErrInvalidRequest)
+				result.ErrorMessage = err.Error()
+			}
+		}
+		resp.Responses = append(resp.Responses, result)
+	}
+	w := codec.NewWriter()
+	api.EncodeIncrementalAlterConfigsResponse(w, resp, version)
 	return w.Bytes(), nil
 }
 

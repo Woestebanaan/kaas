@@ -218,6 +218,7 @@ func flexibleRequestHeader(apiKey, apiVersion int16) bool {
 		30: 2,  // CreateAcls
 		31: 2,  // DeleteAcls
 		37: 2,  // CreatePartitions (gh #52, flexibleVersions=2+)
+		44: 1,  // IncrementalAlterConfigs (gh #9, flexibleVersions=1+)
 		36: 2,  // SaslAuthenticate
 		// DescribeCluster (gh #102): flexibleVersions=0+ per Apache
 		// schema — EVERY version uses REQUEST_HEADER_V2 with tagged

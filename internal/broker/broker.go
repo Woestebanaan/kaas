@@ -588,6 +588,16 @@ func (b *Broker) registerTopicAdminHandlers(d *protocol.Dispatcher) {
 		createPartitions = createPartitions.WithCRWriter(b.topicCRWriter)
 	}
 	d.Register(37, 0, 3, createPartitions)
+
+	// gh #9: IncrementalAlterConfigs (KIP-339). v0–v1 per Apache 3.7
+	// schema; flexible at v1+. Same TopicCRWriter as CreateTopics /
+	// CreatePartitions — the operator's reconciler picks up the
+	// config change and rewrites the per-topic .config.json.
+	incrAlter := handlers.NewIncrementalAlterConfigsHandler()
+	if b.topicCRWriter != nil {
+		incrAlter = incrAlter.WithCRWriter(b.topicCRWriter)
+	}
+	d.Register(44, 0, 1, incrAlter)
 }
 
 // registerSaslHandlers: SaslHandshake (17), SaslAuthenticate (36).
