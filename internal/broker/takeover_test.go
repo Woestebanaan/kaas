@@ -56,6 +56,9 @@ func (r *recordingStorage) LogStartOffset(_ string, _ int32) (int64, error) { re
 func (r *recordingStorage) OffsetForLeaderEpoch(_ string, _ int32, _ int32) (int32, int64, error) {
 	return -1, -1, nil
 }
+func (r *recordingStorage) OffsetForTimestamp(_ string, _ int32, _ int64) (int64, int64, error) {
+	return -1, -1, nil
+}
 func (r *recordingStorage) CreatePartition(_ string, _ int32) error         { return nil }
 func (r *recordingStorage) DeletePartition(_ string, _ int32) error         { return nil }
 func (r *recordingStorage) PartitionSize(_ string, _ int32) int64           { return 0 }

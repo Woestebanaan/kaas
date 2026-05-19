@@ -106,6 +106,13 @@ type StorageEngine interface {
 	Read(ctx context.Context, topic string, partition int32, startOffset int64, maxBytes int) ([]byte, error)
 	HighWatermark(topic string, partition int32) (int64, error)
 	LogStartOffset(topic string, partition int32) (int64, error)
+	// OffsetForTimestamp implements ListOffsets timestamp lookup
+	// (gh #5). Returns (offset, timestamp) where offset is the
+	// first record at or after the requested timestamp. Segment-
+	// granularity today: returns the baseOffset of the first
+	// segment whose maxTimestamp >= timestampMs, or (-1, -1) when
+	// no record matches.
+	OffsetForTimestamp(topic string, partition int32, timestampMs int64) (offset, timestamp int64, err error)
 	// OffsetForLeaderEpoch implements KIP-101 (gh #101): for a Java
 	// consumer that holds leader_epoch E, return (resultEpoch,
 	// endOffset) marking the offset just past the last record at
@@ -1529,6 +1536,53 @@ func (e *DiskStorageEngine) HighWatermark(topic string, partition int32) (int64,
 	// was stuck on a stalled NAS fsync — propagating the storage stall
 	// up into the metrics pipeline and silencing ALL skafka metrics.
 	return ps.highWaterAtomic.Load(), nil
+}
+
+// OffsetForTimestamp implements ListOffsets timestamp lookup (gh #5).
+// Returns the baseOffset of the first segment whose maxTimestamp >=
+// the requested timestamp, plus that segment's maxTimestamp.
+//
+// This is a segment-granularity approximation — Apache uses a
+// per-segment .timeindex file for finer-grained lookups; skafka
+// doesn't yet maintain that index, so we return the conservative
+// "first segment that could plausibly contain a record with ts >=
+// request" answer. Java consumers calling offsetsForTimes() then
+// seek to that offset and walk forward; the approximation may
+// over-read by up to one segment.
+//
+// Special return shape:
+//   - No segments → (-1, -1, nil). Apache's wire contract is
+//     "offset=-1, timestamp=-1 means no matching record".
+//   - Every segment has maxTimestamp < request → (-1, -1, nil). The
+//     request is asking about a future timestamp.
+//   - Match → (segment.baseOffset, segment.maxTimestamp, nil).
+//
+// Returns ErrUnknownPartition when the partition isn't open here.
+func (e *DiskStorageEngine) OffsetForTimestamp(topic string, partition int32, timestampMs int64) (int64, int64, error) {
+	ps, ok := e.getPartition(topic, partition)
+	if !ok {
+		return -1, -1, fmt.Errorf("%w: %s/%d", ErrUnknownPartition, topic, partition)
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	// Walk closed segments oldest → newest. First segment whose
+	// maxTimestamp >= request is our target. Skip segments whose
+	// maxTimestamp is 0 (unknown — never loaded from disk) because
+	// they could plausibly satisfy any request; returning a stale
+	// offset is worse than the conservative "first known match".
+	for _, seg := range ps.segments {
+		if seg.maxTimestamp >= timestampMs {
+			return seg.baseOffset, seg.maxTimestamp, nil
+		}
+	}
+	// Check the active segment last — it carries the most recent
+	// writes and its in-memory maxTimestamp is updated on every
+	// appendBatch (gh #132).
+	if ps.active != nil && ps.active.maxTimestamp >= timestampMs {
+		return ps.active.baseOffset, ps.active.maxTimestamp, nil
+	}
+	return -1, -1, nil
 }
 
 // OffsetForLeaderEpoch implements KIP-101 (gh #101): given a requested

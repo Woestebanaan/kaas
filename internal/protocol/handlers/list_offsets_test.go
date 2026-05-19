@@ -49,6 +49,9 @@ func (stubStorage) DeleteRecords(_ string, _ int32, _ int64) (int64, error) {
 func (stubStorage) OffsetForLeaderEpoch(_ string, _ int32, _ int32) (int32, int64, error) {
 	return -1, -1, nil
 }
+func (stubStorage) OffsetForTimestamp(_ string, _ int32, _ int64) (int64, int64, error) {
+	return -1, -1, nil
+}
 
 var _ storage.StorageEngine = stubStorage{}
 

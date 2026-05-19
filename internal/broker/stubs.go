@@ -131,6 +131,15 @@ func (m *MemoryStorage) OffsetForLeaderEpoch(_ string, _ int32, _ int32) (int32,
 	return -1, -1, nil
 }
 
+// OffsetForTimestamp is a no-op in dev-mode: MemoryStorage doesn't
+// retain batch maxTimestamps, so we honestly report "no matching
+// record" (-1, -1, nil) per the wire contract. Java consumers using
+// offsetsForTimes() against a dev broker should see clean sentinel
+// values rather than crash inside OffsetAndTimestamp's ctor.
+func (m *MemoryStorage) OffsetForTimestamp(_ string, _ int32, _ int64) (int64, int64, error) {
+	return -1, -1, nil
+}
+
 // PartitionSize is always 0 in memory storage; there are no segment files.
 func (m *MemoryStorage) PartitionSize(_ string, _ int32) int64 { return 0 }
 

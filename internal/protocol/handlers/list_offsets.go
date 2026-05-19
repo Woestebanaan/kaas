@@ -37,19 +37,18 @@ func (h *ListOffsetsHandler) Handle(_ *connstate.ConnState, version int16, body 
 			// run, i.e., we're not the leader per assignment.json. That
 			// replaces the legacy lease.IsLeader gate (gh #75).
 			var offset int64
+			matchTs := int64(-1)
 			switch {
 			case p.Timestamp == -2: // earliest
 				offset, err = h.store.LogStartOffset(topic.Name, p.PartitionIndex)
 			case p.Timestamp == -1: // latest
 				offset, err = h.store.HighWatermark(topic.Name, p.PartitionIndex)
 			default:
-				// Real-timestamp lookup (search for first record with ts >= p.Timestamp).
-				// Skafka does not index records by timestamp yet, so we cannot honour
-				// this query. Per the Kafka spec, "no matching record" is signalled by
-				// returning (offset=-1, timestamp=-1); returning a real offset with
-				// timestamp=-1 makes the Java client throw IllegalArgumentException in
-				// OffsetAndTimestamp's ctor (caught e.g. by kafbat's Messages page).
-				offset = -1
+				// Real-timestamp lookup (gh #5). Segment-granularity:
+				// the first segment whose maxTimestamp >= request
+				// returns its baseOffset. (-1, -1) signals
+				// "no matching record" per Apache's wire contract.
+				offset, matchTs, err = h.store.OffsetForTimestamp(topic.Name, p.PartitionIndex, p.Timestamp)
 			}
 
 			if err != nil {
@@ -58,7 +57,7 @@ func (h *ListOffsetsHandler) Handle(_ *connstate.ConnState, version int16, body 
 				pr.Timestamp = -1
 			} else {
 				pr.Offset = offset
-				pr.Timestamp = -1
+				pr.Timestamp = matchTs
 			}
 			topicResp.Partitions = append(topicResp.Partitions, pr)
 		}
