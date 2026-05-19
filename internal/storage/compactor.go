@@ -81,7 +81,42 @@ func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped 
 	copy(closedSegs, ps.segments)
 	dir := ps.dir
 	epoch := ps.epoch
+	// gh #116: per-topic compaction knobs (snapshot under ps.mu so
+	// the worker thread sees a consistent view).
+	minCompactionLagMs := ps.minCompactionLagMsOverride
+	deleteRetentionMs := ps.deleteRetentionMsOverride
 	ps.mu.Unlock()
+
+	// gh #116 part 1: enforce min.compaction.lag.ms. Apache LogCleaner
+	// skips any segment whose maxTimestamp is younger than now -
+	// minCompactionLagMs. Intent: give consumers / replicas time to
+	// read records at their original offsets before compaction
+	// renumbers / removes them. minCompactionLagMs=0 (default) is a
+	// no-op — every closed segment is eligible.
+	if minCompactionLagMs > 0 {
+		cutoffMs := time.Now().UnixMilli() - minCompactionLagMs
+		kept := closedSegs[:0]
+		for _, seg := range closedSegs {
+			if seg.maxTimestamp > 0 && seg.maxTimestamp >= cutoffMs {
+				// Younger than the lag gate — skip. Continue past
+				// it; older segments may still be eligible (we
+				// don't break here because segments aren't strictly
+				// ordered by maxTimestamp; gh #132's incremental
+				// maxTimestamp updates can leave later-base-offset
+				// segments with older timestamps when a stale leader
+				// wrote into them).
+				continue
+			}
+			kept = append(kept, seg)
+		}
+		closedSegs = kept
+		if len(closedSegs) == 0 {
+			// All segments are inside the lag window — nothing to
+			// compact this pass. Not an error; the cleaner runs
+			// periodically and will revisit.
+			return 0, 0, nil
+		}
+	}
 
 	// bytes.in is the total source-segment size scanned. We capture
 	// it once before the rewrite; closedSegs is the immutable
@@ -133,8 +168,18 @@ func (e *DiskStorageEngine) compactPartition(ps *partitionState) (kept, dropped 
 		}
 	}()
 
+	// gh #116 part 2: tombstone-retention cutoff. Records flagged as
+	// tombstones (value==nil; Kafka delete marker) whose batch
+	// baseTimestamp is older than this cutoff are dropped on the
+	// next compaction pass — Apache's delete.retention.ms behaviour.
+	// deleteRetentionMs=0 disables the gate (tombstones live forever
+	// in the compacted log, the pre-fix behaviour).
+	var tombstoneCutoffMs int64 = -1
+	if deleteRetentionMs > 0 {
+		tombstoneCutoffMs = time.Now().UnixMilli() - deleteRetentionMs
+	}
 	for _, seg := range closedSegs {
-		k, d, werr := rewriteSegment(seg.logPath, out, offsetMap)
+		k, d, werr := rewriteSegment(seg.logPath, out, offsetMap, tombstoneCutoffMs)
 		if werr != nil {
 			err = fmt.Errorf("compactor pass 2 (%s): %w", seg.logPath, werr)
 			result = "error"
@@ -265,7 +310,12 @@ func walkSegmentRecords(path string, fn func(absOffset int64, key []byte, isTomb
 // rewriteSegment reads every batch from inputPath, drops superseded
 // records, and writes one new batch per surviving source batch into
 // out. Returns the kept/dropped record counts.
-func rewriteSegment(inputPath string, out *os.File, offsetMap map[string]int64) (kept, dropped int, err error) {
+//
+// tombstoneCutoffMs (gh #116): when >= 0, tombstone records in a
+// batch whose baseTimestamp is < tombstoneCutoffMs are also dropped
+// — Apache's delete.retention.ms behaviour. Passing -1 disables the
+// gate (tombstones live forever in the compacted log).
+func rewriteSegment(inputPath string, out *os.File, offsetMap map[string]int64, tombstoneCutoffMs int64) (kept, dropped int, err error) {
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return 0, 0, err
@@ -286,7 +336,7 @@ func rewriteSegment(inputPath string, out *os.File, offsetMap map[string]int64) 
 		if _, perr := io.ReadFull(f, raw[12:]); perr != nil {
 			return kept, dropped, fmt.Errorf("read body: %w", perr)
 		}
-		newBatch, k, d, berr := compactBatch(raw, offsetMap)
+		newBatch, k, d, berr := compactBatch(raw, offsetMap, tombstoneCutoffMs)
 		if berr != nil {
 			return kept, dropped, fmt.Errorf("compact batch: %w", berr)
 		}
@@ -311,11 +361,18 @@ func rewriteSegment(inputPath string, out *os.File, offsetMap map[string]int64) 
 // attrs, baseTimestamp, maxTimestamp, producerID/epoch/seq) are
 // preserved verbatim. lastOffsetDelta gets recomputed from the
 // kept records' offsetDeltas.
-func compactBatch(raw []byte, offsetMap map[string]int64) (newBatch []byte, kept, dropped int, err error) {
+func compactBatch(raw []byte, offsetMap map[string]int64, tombstoneCutoffMs int64) (newBatch []byte, kept, dropped int, err error) {
 	if len(raw) < recordsAreaOffset+4 {
 		return nil, 0, 0, fmt.Errorf("batch too short: %d", len(raw))
 	}
 	srcBaseOffset := int64(binary.BigEndian.Uint64(raw[0:8]))
+	srcBaseTimestamp := int64(binary.BigEndian.Uint64(raw[27:35]))
+
+	// gh #116 part 2: tombstone expiry. When the batch's
+	// baseTimestamp is older than the cutoff, any tombstone record
+	// in the batch is dropped — even if it's the "latest" for its
+	// key. Records with non-nil values are unaffected.
+	expireTombstones := tombstoneCutoffMs >= 0 && srcBaseTimestamp > 0 && srcBaseTimestamp < tombstoneCutoffMs
 
 	// Walk records, deciding kept/dropped + collecting their
 	// (absoluteOffset, body) pairs.
@@ -332,6 +389,13 @@ func compactBatch(raw []byte, offsetMap map[string]int64) (newBatch []byte, kept
 		} else {
 			latest, ok := offsetMap[string(rec.Key)]
 			keep = ok && absOffset == latest
+			// gh #116: drop expired tombstones even when they're
+			// the latest for their key. Apache's contract: a
+			// tombstone older than delete.retention.ms doesn't
+			// outlive itself.
+			if keep && rec.IsTombstone && expireTombstones {
+				keep = false
+			}
 		}
 		if keep {
 			keptRecords = append(keptRecords, keptRecord{absOffset: absOffset, body: rec.Body})

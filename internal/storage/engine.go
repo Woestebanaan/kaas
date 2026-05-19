@@ -249,6 +249,16 @@ type partitionState struct {
 	// Per-topic operator-driven retention plumbing (gh #47).
 	retentionBytesOverride int64
 
+	// minCompactionLagMsOverride / deleteRetentionMsOverride are the
+	// per-topic compaction knobs (gh #116, KIP-58 / KIP-354). Both
+	// loaded from /data/<topic>/.config.json on partition open and
+	// honoured by the compactor's segment-skip + tombstone-expiry
+	// passes. Zero = "no override / disabled" — the compactor falls
+	// back to the conservative default (no lag gate, never expire
+	// tombstones from the compactor's pov).
+	minCompactionLagMsOverride int64
+	deleteRetentionMsOverride  int64
+
 	// Group-commit state (gh #82). The committer goroutine fsyncs the
 	// active segment outside ps.mu, so concurrent Appends to the same
 	// partition share one fsync round-trip instead of serialising one
@@ -784,6 +794,15 @@ func (e *DiskStorageEngine) openPartition(topic string, partition int32) error {
 	if cfg, err := ReadTopicConfig(topicDir); err == nil && cfg != nil {
 		if cfg.RetentionBytes != nil {
 			ps.retentionBytesOverride = *cfg.RetentionBytes
+		}
+		// gh #116: per-topic compaction knobs. Nil means "use the
+		// engine default" (which is 0 in both cases — the compactor
+		// then runs with no lag gate and never expires tombstones).
+		if cfg.MinCompactionLagMs != nil {
+			ps.minCompactionLagMsOverride = *cfg.MinCompactionLagMs
+		}
+		if cfg.DeleteRetentionMs != nil {
+			ps.deleteRetentionMsOverride = *cfg.DeleteRetentionMs
 		}
 	}
 
