@@ -15,6 +15,11 @@ type OffsetStore struct {
 	dataDir string
 	mu      sync.RWMutex
 	cache   map[string]map[string]int64 // groupID → "topic/partition" → offset
+	// gh #21: parallel metadata map. Keyed identically to cache.
+	// Empty string is the wire null sentinel ("no metadata"), so we
+	// only store entries whose value is non-empty to keep the JSON
+	// compact. Updates land alongside cache writes inside Commit.
+	metadata map[string]map[string]string
 
 	// pending is the gh #27 in-flight transactional offset commit
 	// buffer. Keyed by (groupID, producerID): the offsets a
@@ -47,9 +52,10 @@ type FetchSpec struct {
 
 func NewOffsetStore(dataDir string) *OffsetStore {
 	return &OffsetStore{
-		dataDir: dataDir,
-		cache:   make(map[string]map[string]int64),
-		pending: make(map[pendingKey]map[string]int64),
+		dataDir:  dataDir,
+		cache:    make(map[string]map[string]int64),
+		metadata: make(map[string]map[string]string),
+		pending:  make(map[pendingKey]map[string]int64),
 	}
 }
 
@@ -126,30 +132,66 @@ func (s *OffsetStore) dir() string {
 	return filepath.Join(s.dataDir, "__consumer_offsets")
 }
 
-// Commit atomically writes the committed offsets for a group.
-// offsets maps "topic/partition" → committed offset.
+// Commit atomically writes the committed offsets for a group with no
+// per-partition metadata. Equivalent to CommitWithMetadata(groupID,
+// offsets, nil); preserved for callers that don't carry metadata
+// (TxnOffsetCommit flow + internal compaction paths).
 func (s *OffsetStore) Commit(groupID string, offsets map[string]int64) error {
+	return s.CommitWithMetadata(groupID, offsets, nil)
+}
+
+// CommitWithMetadata atomically writes the committed offsets for a
+// group, plus an optional per-partition metadata string (gh #21).
+// metadata may be nil OR may contain a subset of the keys in offsets;
+// any partition with an empty/missing metadata entry is stored without
+// a metadata blob, which round-trips back as the wire null sentinel.
+// Mirrors Apache Kafka's OffsetCommit semantics where metadata is
+// opaque to the broker and round-trips per-partition.
+func (s *OffsetStore) CommitWithMetadata(groupID string, offsets map[string]int64, metadata map[string]string) error {
 	if err := os.MkdirAll(s.dir(), 0o775); err != nil {
 		return err
 	}
 
-	// Merge with existing cached offsets (only update the given keys).
+	// Merge with existing cached offsets + metadata (only update the
+	// given keys). Both maps stay in sync; deleting a metadata entry
+	// is done by passing "" — we store no entry so future fetches see
+	// the empty string (== null on the wire).
 	s.mu.Lock()
 	existing := s.cache[groupID]
 	if existing == nil {
 		existing = make(map[string]int64)
 		s.cache[groupID] = existing
 	}
+	existingMeta := s.metadata[groupID]
+	if existingMeta == nil {
+		existingMeta = make(map[string]string)
+		s.metadata[groupID] = existingMeta
+	}
 	for k, v := range offsets {
 		existing[k] = v
 	}
-	merged := make(map[string]int64, len(existing))
+	for k, v := range metadata {
+		if v == "" {
+			delete(existingMeta, k)
+			continue
+		}
+		existingMeta[k] = v
+	}
+	mergedOffsets := make(map[string]int64, len(existing))
 	for k, v := range existing {
-		merged[k] = v
+		mergedOffsets[k] = v
+	}
+	mergedMeta := make(map[string]string, len(existingMeta))
+	for k, v := range existingMeta {
+		mergedMeta[k] = v
 	}
 	s.mu.Unlock()
 
-	data, err := json.Marshal(merged)
+	// On-disk schema (gh #21): {"offsets": {...}, "metadata": {...}}.
+	// Older files (pre-#21) wrote a plain map[string]int64; load() in
+	// readOffsetsFile parses both shapes for forward compatibility.
+	payload := offsetFileV2{Offsets: mergedOffsets, Metadata: mergedMeta}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -159,6 +201,13 @@ func (s *OffsetStore) Commit(groupID string, offsets map[string]int64) error {
 		return err
 	}
 	return os.Rename(tmp, final)
+}
+
+// offsetFileV2 is the gh #21 disk schema. The plain-map form remains
+// readable via the unmarshalGroupFile helper.
+type offsetFileV2 struct {
+	Offsets  map[string]int64  `json:"offsets"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // Fetch returns committed offsets for the given group and topic partitions.
@@ -182,6 +231,28 @@ func (s *OffsetStore) Fetch(groupID string, specs []FetchSpec) map[string]int64 
 		}
 	}
 	return result
+}
+
+// FetchMetadata returns the per-partition metadata blob committed
+// alongside each offset (gh #21). Keys missing from the returned map
+// have no metadata (the wire null sentinel — empty string).
+func (s *OffsetStore) FetchMetadata(groupID string, specs []FetchSpec) map[string]string {
+	s.mu.RLock()
+	group := s.metadata[groupID]
+	s.mu.RUnlock()
+	out := make(map[string]string)
+	if group == nil {
+		return out
+	}
+	for _, spec := range specs {
+		for _, p := range spec.Partitions {
+			k := OffsetKey(spec.Topic, p)
+			if v, ok := group[k]; ok {
+				out[k] = v
+			}
+		}
+	}
+	return out
 }
 
 // HasGroup reports whether the in-memory cache has any offsets
@@ -265,6 +336,9 @@ func (s *OffsetStore) DeletePartitions(groupID string, keys []string) (map[strin
 
 // Load reads a group's offsets from disk into the in-memory cache.
 // Called when this broker becomes coordinator for the group.
+// Supports both the gh #21 v2 schema (object with offsets + metadata)
+// and the legacy v1 plain-map schema, so a pre-v0.1.163 group file
+// loads cleanly after upgrade.
 func (s *OffsetStore) Load(groupID string) error {
 	path := filepath.Join(s.dir(), groupID+".json")
 	data, err := os.ReadFile(path)
@@ -274,12 +348,32 @@ func (s *OffsetStore) Load(groupID string) error {
 	if err != nil {
 		return err
 	}
-	var offsets map[string]int64
-	if err := json.Unmarshal(data, &offsets); err != nil {
+
+	offsets, metadata, err := decodeOffsetsFile(data)
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.cache[groupID] = offsets
+	if metadata != nil {
+		s.metadata[groupID] = metadata
+	}
 	s.mu.Unlock()
 	return nil
+}
+
+// decodeOffsetsFile parses a __consumer_offsets/<group>.json blob.
+// Tries the v2 envelope first; falls back to the legacy v1 plain
+// map[string]int64 shape. Returning nil metadata for the legacy
+// shape lets Load skip touching s.metadata for unmigrated groups.
+func decodeOffsetsFile(data []byte) (map[string]int64, map[string]string, error) {
+	var v2 offsetFileV2
+	if err := json.Unmarshal(data, &v2); err == nil && v2.Offsets != nil {
+		return v2.Offsets, v2.Metadata, nil
+	}
+	var v1 map[string]int64
+	if err := json.Unmarshal(data, &v1); err != nil {
+		return nil, nil, err
+	}
+	return v1, nil, nil
 }

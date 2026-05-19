@@ -361,12 +361,20 @@ func (m *Manager) OffsetCommit(req *api.OffsetCommitRequest) *api.OffsetCommitRe
 	}
 
 	offsets := make(map[string]int64)
+	// gh #21: carry per-partition metadata through the commit. Empty
+	// strings are stored as "no metadata" — that's how OffsetFetch's
+	// wire null sentinel round-trips.
+	metadata := make(map[string]string)
 	for _, t := range req.Topics {
 		for _, p := range t.Partitions {
-			offsets[OffsetKey(t.Name, p.PartitionIndex)] = p.CommittedOffset
+			k := OffsetKey(t.Name, p.PartitionIndex)
+			offsets[k] = p.CommittedOffset
+			if p.CommittedMetadata != "" {
+				metadata[k] = p.CommittedMetadata
+			}
 		}
 	}
-	_ = m.offsets.Commit(req.GroupID, offsets)
+	_ = m.offsets.CommitWithMetadata(req.GroupID, offsets, metadata)
 
 	resp := &api.OffsetCommitResponse{}
 	for _, t := range req.Topics {
@@ -487,6 +495,7 @@ func (m *Manager) OffsetFetch(req *api.OffsetFetchRequest) *api.OffsetFetchRespo
 			specs = append(specs, FetchSpec{Topic: t.Name, Partitions: t.PartitionIndexes})
 		}
 		committed := m.offsets.Fetch(groupID, specs)
+		metadata := m.offsets.FetchMetadata(groupID, specs)
 
 		var trs []api.OffsetFetchTopicResponse
 		for _, t := range topics {
@@ -496,6 +505,10 @@ func (m *Manager) OffsetFetch(req *api.OffsetFetchRequest) *api.OffsetFetchRespo
 				tr.Partitions = append(tr.Partitions, api.OffsetFetchPartitionResponse{
 					PartitionIndex:  p,
 					CommittedOffset: committed[k],
+					// gh #21: metadata is the wire null sentinel
+					// when empty — the codec handles "" → null on
+					// both flexible and non-flexible versions.
+					Metadata: metadata[k],
 				})
 			}
 			trs = append(trs, tr)
