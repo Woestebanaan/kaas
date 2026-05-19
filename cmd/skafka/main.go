@@ -829,12 +829,25 @@ func runBroker(ctx context.Context) {
 	slog.Info("skafka broker ready", "host", host, "port", port, "cluster_id", clusterID)
 	<-ctx.Done()
 	slog.Info("shutting down")
-	// gh #139: flush manifests on shutdown so the next broker open
-	// reads accurate HighWatermark values. Without this, the
-	// lazy-manifest persistence (only on segment roll / cleaner /
-	// takeover / Relinquish) leaves the manifest stale and the new
-	// broker reports HWM=0 to clients on first OffsetFetch.
 	if engine != nil {
+		// gh #61: graceful scale-down drain. Relinquish every owned
+		// partition so:
+		//   1. The active segment's manifest gets one last persist
+		//      (gh #139 happy path is a subset of this).
+		//   2. File descriptors get closed so the next leader's
+		//      reaper / segment-roll unlinks aren't NFS-silly-renamed
+		//      (gh #76).
+		//   3. Subsequent peer brokers' TakeOver runs recoverSegment
+		//      with diskEpoch < newEpoch and rebuilds HWM cleanly.
+		// Best-effort: per-partition errors are logged but don't
+		// abort the loop. FlushManifests is now redundant but kept
+		// as a defence-in-depth (Relinquish iterates only the
+		// partitions we still own; FlushManifests covers everything
+		// the engine has open, including any partition we may have
+		// already silently relinquished elsewhere).
+		if err := engine.RelinquishAll(); err != nil {
+			slog.Warn("shutdown: RelinquishAll hit an error (some partitions may still have open fds)", "err", err)
+		}
 		if err := engine.FlushManifests(); err != nil {
 			slog.Warn("shutdown: FlushManifests failed (next start may read stale HWM)", "err", err)
 		}

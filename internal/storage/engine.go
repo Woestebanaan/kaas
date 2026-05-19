@@ -1914,6 +1914,62 @@ func (e *DiskStorageEngine) TakeOver(ctx context.Context, topic string, partitio
 	return e.takeoverInternal(ctx, topic, partition, int64(epoch))
 }
 
+// RelinquishAll iterates every partition this engine has open and
+// calls Relinquish on it (gh #61). Used by the shutdown path to do
+// the equivalent of "every partition is now owned by no broker on
+// this pod" — closes file handles so the next leader's reaper /
+// segment-roll unlinks aren't NFS-silly-renamed (gh #76), and
+// persists each partition's manifest one last time before exit
+// (gh #139 already does this via FlushManifests, but Relinquish
+// rolls both together for the case where the broker DOES eventually
+// hand leadership off to a peer).
+//
+// Returns the first error encountered; logging is the caller's job.
+// Best-effort iteration: a Relinquish failure on one partition
+// doesn't abort the rest.
+func (e *DiskStorageEngine) RelinquishAll() error {
+	e.mu.Lock()
+	type pair struct{ topic string; part int32 }
+	keys := make([]pair, 0, len(e.partitions))
+	for k := range e.partitions {
+		// Reverse-parse the partKey format ("topic/partition").
+		// partKey is constructed via e.partKey(topic, partition);
+		// the encoding is "topic/index". Find the LAST slash so
+		// topic names containing slashes still parse correctly.
+		topic, part := splitPartKey(k)
+		keys = append(keys, pair{topic, part})
+	}
+	e.mu.Unlock()
+
+	var firstErr error
+	for _, p := range keys {
+		if err := e.Relinquish(p.topic, p.part); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// splitPartKey parses the "topic/partition" form produced by
+// DiskStorageEngine.partKey. Returns ("", -1) on any parse error so
+// the caller can skip malformed entries.
+func splitPartKey(k string) (string, int32) {
+	for i := len(k) - 1; i >= 0; i-- {
+		if k[i] == '/' {
+			topic := k[:i]
+			var n int32
+			for _, c := range k[i+1:] {
+				if c < '0' || c > '9' {
+					return "", -1
+				}
+				n = n*10 + int32(c-'0')
+			}
+			return topic, n
+		}
+	}
+	return "", -1
+}
+
 // FlushManifests walks every partition this engine has open and
 // persists its manifest.json (gh #139). The shutdown path calls this
 // before the broker exits so that on the next start, openPartition's
