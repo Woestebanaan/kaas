@@ -38,16 +38,17 @@ echo "$got"
   exit 1
 }
 
-echo ">> Scenario 4: --formatter explicit + --offset earliest"
+echo ">> Scenario 4: --partition / --offset earliest + formatter props"
 # Verifies the metadata path returns offsets correctly via a
-# different selector shape.
+# different selector shape. The Kafka 4.x default formatter (no
+# --formatter override needed; the old kafka.tools.DefaultMessageFormatter
+# class was renamed) still honours print.partition / print.offset.
 got=$("$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$BOOTSTRAP" \
   --topic "$TOPIC" --partition 0 --offset earliest --max-messages 3 --timeout-ms 10000 \
-  --formatter kafka.tools.DefaultMessageFormatter \
   --property print.partition=true \
   --property print.offset=true)
 echo "$got"
-[ "$(echo "$got" | wc -l)" -eq 3 ] || { echo "FAIL: explicit-formatter offset-earliest" >&2; exit 1; }
+[ "$(echo "$got" | wc -l)" -eq 3 ] || { echo "FAIL: partition+offset selector" >&2; exit 1; }
 
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --delete --topic "$TOPIC" || true
 
