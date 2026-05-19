@@ -215,6 +215,26 @@ func (l *LocalGroupSource) GroupCoordinator(_ string) (string, bool) {
 	return l.BrokerID, true
 }
 
+// ---- LocalTxnSource ---- //
+
+// LocalTxnSource is a stub coordinator.TxnAssignmentSource for
+// single-broker dev / test setups: this broker is the txn
+// coordinator for every transactional.id. gh #91's hash routing
+// would also resolve to this broker in a single-broker cluster, so
+// the LocalTxnSource is just the always-true shortcut.
+type LocalTxnSource struct {
+	BrokerID string
+}
+
+func NewLocalTxnSource(brokerID string) *LocalTxnSource {
+	return &LocalTxnSource{BrokerID: brokerID}
+}
+
+func (l *LocalTxnSource) OwnsTxn(_ string) bool { return true }
+func (l *LocalTxnSource) TxnCoordinator(_ string) (string, bool) {
+	return l.BrokerID, true
+}
+
 // ---- AllowAllAuthEngine ---- //
 
 // AllowAllAuthEngine authenticates every connection as ANONYMOUS and permits all operations.

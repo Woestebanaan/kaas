@@ -66,6 +66,10 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(offsetDir)
 	offsetStore := coordinator.NewOffsetStore(offsetDir)
 	coordMgr := coordinator.NewManager(ctx, groupSrc, lookupBroker, offsetStore)
+	// gh #91 PR 3: FindCoordinator(KeyType=transaction) needs a txn
+	// assignment source; without it transactional producers see
+	// COORDINATOR_NOT_AVAILABLE and never reach InitProducerId.
+	coordMgr.SetTxnAssignmentSource(broker.NewLocalTxnSource("skafka-0"))
 
 	brokerInfo := handlers.BrokerInfo{
 		NodeID:    0,
@@ -87,6 +91,25 @@ func TestMain(m *testing.M) {
 		brokerInfo,
 		coordMgr,
 	)
+
+	// gh #28 / gh #37: wire a TxnStateStore so the transactional
+	// API surface (InitProducerId, AddPartitionsToTxn, EndTxn, ...)
+	// gets registered. Production wires it via the broker's on-disk
+	// dataDir; the compat broker runs against MemoryStorage so we
+	// hand it a tempdir directly.
+	txnDir, err := os.MkdirTemp("", "skafka-compat-txn-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "MkdirTemp txn: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(txnDir)
+	txnStore, err := coordinator.NewTxnStateStore(txnDir, 50)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "NewTxnStateStore: %v\n", err)
+		os.Exit(1)
+	}
+	b.UseTxnStateStore(txnStore)
+	coordMgr.WireTxnOffsetHook(txnStore)
 
 	d := protocol.NewDispatcher()
 	b.RegisterHandlers(d)

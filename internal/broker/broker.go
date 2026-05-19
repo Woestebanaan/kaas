@@ -499,6 +499,19 @@ func (b *Broker) UseCoordinator(c kafkaapi.BrokerCoordinator) {
 	b.brokerCoord = c
 }
 
+// UseTxnStateStore wires a TxnStateStore pre-RegisterHandlers. The
+// production path constructs the store inline in
+// registerInitProducerIdHandler when the storage engine reports an
+// on-disk dataDir; this setter is for the kafka-compat in-process
+// test broker (and dev tools) that runs against MemoryStorage but
+// still wants transactional handlers (key 22 + 24 + 25 + 26 + 28)
+// registered. Without this setter, every transactional API ends up
+// UNSUPPORTED_VERSION via ApiVersions and franz-go fails the first
+// txn Produce with "broker is too old".
+func (b *Broker) UseTxnStateStore(s *coordinator.TxnStateStore) {
+	b.txnStore = s
+}
+
 // RemoveTopic deregisters a topic from the local registry. Storage and lease
 // cleanup happen elsewhere (lease TTL expiry; operator finalizer for dirs).
 func (b *Broker) RemoveTopic(name string) {
@@ -680,7 +693,12 @@ func (b *Broker) registerProducerIDHandlers(d *protocol.Dispatcher) {
 	// joining "__cluster" onto it would create a stray "memory:/__cluster"
 	// directory in cwd. Production DiskStorageEngine returns an absolute
 	// path so this just skips the dev path.
-	if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
+	// If a TxnStateStore was wired pre-RegisterHandlers via
+	// UseTxnStateStore (kafka-compat test path), use that directly
+	// instead of constructing a new one from the on-disk dataDir.
+	if b.txnStore != nil {
+		initPIDHandler = initPIDHandler.WithTxnStateStore(b.txnStore)
+	} else if dataDir := b.store.DataDir(); strings.HasPrefix(dataDir, "/") {
 		clusterDir := filepath.Join(dataDir, "__cluster")
 		// numSlots decoupled from StatefulSet replica count (gh #108
 		// follow-up): pinning to Apache's transaction.state.log.num.
