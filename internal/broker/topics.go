@@ -47,6 +47,12 @@ type TopicMeta struct {
 	Partitions int32
 	Cleanup    CleanupPolicy
 	Config     handlers.TopicConfig
+	// TopicID carries the gh #105 / KIP-516 stable UUID (the
+	// canonical hyphenated form the operator wrote to
+	// KafkaTopic.Status.TopicID). Empty for topics the broker created
+	// before the operator's status reconcile ran; the Metadata
+	// handler falls back to the all-zero UUID on the wire.
+	TopicID string
 }
 
 // TopicRegistry is a thread-safe in-memory cache of topic metadata.
@@ -157,9 +163,33 @@ func (r *TopicRegistry) All() []handlers.TopicEntry {
 	defer r.mu.RUnlock()
 	out := make([]handlers.TopicEntry, 0, len(r.topics))
 	for name, t := range r.topics {
-		out = append(out, handlers.TopicEntry{Name: name, Partitions: t.Partitions})
+		out = append(out, handlers.TopicEntry{Name: name, Partitions: t.Partitions, TopicID: t.TopicID})
 	}
 	return out
+}
+
+// SetTopicID stashes the gh #105 / KIP-516 stable UUID for a topic.
+// Called from the TopicWatcher onEvent callback when a KafkaTopic's
+// Status.TopicID is populated. Idempotent — the operator never
+// rotates a topic's UUID, so reassignment is a no-op.
+func (r *TopicRegistry) SetTopicID(name, topicID string) {
+	if topicID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	existing := r.topics[name]
+	existing.TopicID = topicID
+	r.topics[name] = existing
+}
+
+// TopicID returns the KIP-516 UUID for a topic. Empty when unknown
+// (pre-#105 CRs or topics created via local AddTopic without
+// operator status reconcile).
+func (r *TopicRegistry) TopicID(name string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.topics[name].TopicID
 }
 
 // AllNames returns the topic names sorted lexically — used by the

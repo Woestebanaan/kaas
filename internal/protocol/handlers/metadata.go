@@ -106,6 +106,53 @@ type TopicConfigSource interface {
 type TopicEntry struct {
 	Name       string
 	Partitions int32
+	// TopicID is the KIP-516 / gh #105 stable UUID. Empty → handler
+	// writes the all-zero UUID (pre-#105 wire behaviour for topics
+	// not yet stamped by the operator's Status reconcile).
+	TopicID string
+}
+
+// decodeHyphenatedUUID parses a canonical 36-char UUID like
+// "00112233-4455-6677-8899-aabbccddeeff" into its 16 raw bytes. On
+// any parse failure (including empty input — the common pre-#105
+// fallback) it returns nil so the Metadata encoder falls back to
+// the all-zero sentinel.
+func decodeHyphenatedUUID(s string) []byte {
+	if len(s) != 36 {
+		return nil
+	}
+	// Hyphen positions per RFC 4122.
+	if s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return nil
+	}
+	out := make([]byte, 16)
+	hexAt := func(dst, srcStart, srcLen int) bool {
+		for i := 0; i < srcLen; i += 2 {
+			hi, ok1 := hexDigit(s[srcStart+i])
+			lo, ok2 := hexDigit(s[srcStart+i+1])
+			if !ok1 || !ok2 {
+				return false
+			}
+			out[dst+i/2] = hi<<4 | lo
+		}
+		return true
+	}
+	if !hexAt(0, 0, 8) || !hexAt(4, 9, 4) || !hexAt(6, 14, 4) || !hexAt(8, 19, 4) || !hexAt(10, 24, 12) {
+		return nil
+	}
+	return out
+}
+
+func hexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // BrokerInfo is a static single-broker implementation of BrokerSource.
@@ -317,7 +364,11 @@ func (h *MetadataHandler) Handle(conn *connstate.ConnState, version int16, body 
 	}
 
 	for _, entry := range entries {
-		topic := api.MetadataTopic{Name: entry.Name, ErrorCode: 0}
+		topic := api.MetadataTopic{
+			Name:         entry.Name,
+			ErrorCode:    0,
+			TopicIDBytes: decodeHyphenatedUUID(entry.TopicID),
+		}
 		for p := int32(0); p < entry.Partitions; p++ {
 			leaderID := h.leaders.LeaderFor(entry.Name, p)
 			// Replicas/ISR must include the leader, otherwise modern

@@ -74,8 +74,22 @@ type KafkaTopicConfig struct {
 }
 
 type KafkaTopicStatus struct {
-	PartitionCount int32              `json:"partitionCount,omitempty"`
-	Conditions     []metav1.Condition `json:"conditions,omitempty"`
+	PartitionCount int32 `json:"partitionCount,omitempty"`
+	// TopicID is the stable UUID for this topic (KIP-516, gh #105).
+	// The operator generates a random v4 UUID on first reconcile when
+	// missing and never rotates it; deleting + re-creating a topic
+	// produces a fresh UUID (matches Apache's "re-created topics have
+	// distinct IDs" contract).
+	//
+	// Format: 36-char canonical hyphenated UUID
+	// (8-4-4-4-12, e.g. "00112233-4455-6677-8899-aabbccddeeff"). The
+	// broker surfaces this on Metadata v10+ responses and on the
+	// CreateTopics v7+ response so AdminClient consumers can address
+	// topics by ID. Empty/missing → broker emits all-zero UUID
+	// (pre-#105 behaviour, preserved for CRs that never had a status
+	// populated).
+	TopicID    string             `json:"topicId,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

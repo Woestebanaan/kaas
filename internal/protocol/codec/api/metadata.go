@@ -30,6 +30,10 @@ type MetadataPartition struct {
 type MetadataTopic struct {
 	ErrorCode                 int16
 	Name                      string
+	// TopicIDBytes is the 16-byte KIP-516 UUID (gh #105). Empty → the
+	// encoder writes the all-zero UUID (pre-#105 fallback). Length is
+	// either 0 or 16; anything else is a bug. Surfaced on v10+.
+	TopicIDBytes              []byte
 	IsInternal                bool    // v1+
 	Partitions                []MetadataPartition
 	TopicAuthorizedOperations int32   // v8+
@@ -185,8 +189,15 @@ func EncodeMetadataResponse(w *codec.Writer, resp *MetadataResponse, version int
 				w.WriteString(t.Name)
 			}
 			if version >= 10 {
-				// TopicID: 16-byte UUID. We use all-zero for now.
-				w.WriteRawBytes(make([]byte, 16))
+				// gh #105: surface the per-topic UUID when the operator
+				// has assigned one. Empty / wrong-length falls back to
+				// the all-zero sentinel for legacy CRs that predate
+				// Status.TopicID.
+				if len(t.TopicIDBytes) == 16 {
+					w.WriteRawBytes(t.TopicIDBytes)
+				} else {
+					w.WriteRawBytes(make([]byte, 16))
+				}
 			}
 			if version >= 1 {
 				if t.IsInternal {

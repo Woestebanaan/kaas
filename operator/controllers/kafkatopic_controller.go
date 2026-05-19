@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +19,20 @@ import (
 	"github.com/woestebanaan/skafka/internal/storage"
 	v1alpha1 "github.com/woestebanaan/skafka/operator/api/v1alpha1"
 )
+
+// generateTopicUUID returns a canonical hyphenated v4-style UUID
+// string for gh #105 KafkaTopic.Status.TopicID. Cryptographically
+// random; matches Apache's KIP-516 contract that re-created topics
+// get distinct IDs.
+func generateTopicUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	// Set the version (4) and variant bits per RFC 4122.
+	b[6] = (b[6] & 0x0f) | 0x40 // v4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	hexS := hex.EncodeToString(b[:])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hexS[0:8], hexS[8:12], hexS[12:16], hexS[16:20], hexS[20:32])
+}
 
 // clusterFilesDir is the reserved subdirectory under DataDir for cluster-wide
 // files (assignment.json, credentials.json, acls.json). The topic sweep must
@@ -115,6 +131,13 @@ func (r *KafkaTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Update status.
 	topic.Status.PartitionCount = topic.Spec.Partitions
+	// gh #105: assign a stable TopicID on first reconcile. Apache's
+	// KIP-516 contract: random UUID per topic, distinct across
+	// re-creations. Operator never rotates it once set; subsequent
+	// reconciles preserve.
+	if topic.Status.TopicID == "" {
+		topic.Status.TopicID = generateTopicUUID()
+	}
 	setCondition(&topic.Status.Conditions, metav1.Condition{
 		Type:    "Ready",
 		Status:  metav1.ConditionTrue,

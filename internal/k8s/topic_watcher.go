@@ -47,6 +47,11 @@ type TopicEvent struct {
 	OldPartitions  int32 // previous count (only set for Modified)
 	CleanupPolicy  string
 	Config         handlers.TopicConfig
+	// TopicID carries the gh #105 / KIP-516 stable UUID assigned by
+	// the operator on first reconcile (KafkaTopic.Status.TopicID).
+	// Empty for legacy CRs that never had a status populated; the
+	// broker falls back to all-zero on the wire in that case.
+	TopicID string
 }
 
 // TopicWatcher streams KafkaTopic CR changes from the API server and fires a
@@ -290,6 +295,7 @@ func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
 	w.cache[name] = next
 	w.mu.Unlock()
 
+	topicID := t.Status.TopicID
 	switch {
 	case !existed:
 		w.fire(TopicEvent{
@@ -298,6 +304,7 @@ func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
 			Partitions:    newParts,
 			CleanupPolicy: newPolicy,
 			Config:        newCfg,
+			TopicID:       topicID,
 		})
 	case newParts > old.Partitions:
 		w.fire(TopicEvent{
@@ -307,6 +314,7 @@ func (w *TopicWatcher) handleUpsert(t *operatorv1.KafkaTopic) {
 			OldPartitions: old.Partitions,
 			CleanupPolicy: newPolicy,
 			Config:        newCfg,
+			TopicID:       topicID,
 		})
 	case !topicConfigEqual(old.Config, newCfg):
 		// Config-only mutation (cleanup.policy, retention.ms,

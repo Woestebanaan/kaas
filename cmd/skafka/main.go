@@ -925,6 +925,10 @@ func startTopicWatcher(
 			// gh #48 SetTopicCleanupPolicy push — Cleanup is part of
 			// Config now.
 			b.SetTopicConfig(ev.Name, ev.Config)
+			// gh #105 / KIP-516: stash the operator-assigned TopicID
+			// so the Metadata response surfaces it. Empty on legacy
+			// CRs without Status.TopicID — the encoder falls back.
+			b.SetTopicID(ev.Name, ev.TopicID)
 			// Triggers an assignment recompute on whichever broker is
 			// currently controller. No-op on non-controller brokers and
 			// when the v3 runtime is disabled. Without this, new topics
@@ -941,6 +945,11 @@ func startTopicWatcher(
 			}
 			b.AddTopic(ev.Name, ev.Partitions)
 			b.SetTopicConfig(ev.Name, ev.Config)
+			// gh #105: the TopicID is invariant per the operator's
+			// contract, but re-stashing on Modified is harmless and
+			// covers the boot-window race where Modified arrives
+			// before Added (cache miss after watch-restart).
+			b.SetTopicID(ev.Name, ev.TopicID)
 			if ev.OldPartitions != ev.Partitions {
 				rt.NotifyTopicChange(ctx, kafkaapi.AssignmentReasonTopicResized, ev.Name)
 			}

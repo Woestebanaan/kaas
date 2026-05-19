@@ -373,6 +373,14 @@ func (b *Broker) SetTopicConfig(name string, cfg handlers.TopicConfig) {
 	b.topics.SetTopicConfig(name, cfg)
 }
 
+// SetTopicID is the gh #105 hook: the TopicWatcher's onEvent stashes
+// KafkaTopic.Status.TopicID here so the Metadata response can carry
+// it on v10+. Empty value is silently dropped (legacy CRs without a
+// populated status); the encoder falls back to the all-zero UUID.
+func (b *Broker) SetTopicID(name, topicID string) {
+	b.topics.SetTopicID(name, topicID)
+}
+
 // Topics returns the underlying topic registry. Phase 4+5: cmd/skafka
 // wraps this as the controller's TopicSource so the AssignmentLoop sees
 // every topic the broker knows about.
