@@ -36,27 +36,14 @@ printf 'idem-1\nidem-2\nidem-3\n' | \
 out=$("$KAFKA_BIN/kafka-get-offsets.sh" --bootstrap-server "$BOOTSTRAP" --topic "$TOPIC" --time -1)
 echo "$out" | grep -qE "${TOPIC}:0:8\$" || { echo "FAIL: end-offset != 8 after idempotent batch" >&2; exit 1; }
 
-echo ">> Scenario 4: transactional producer (gh #22-27 chain)"
-# Exercises InitProducerId(txnID) → AddPartitionsToTxn → Produce →
-# EndTxn(commit). Without all four wire RPCs landing this fails
-# at the first step. The CLI doesn't expose explicit
-# beginTransaction/commitTransaction so we rely on Java client
-# defaults: setting transactional.id implies idempotence=true and
-# the producer flushes a transactional commit on shutdown.
-TXN_ID="skafka-cli-txn-$$"
-printf 'txn-1\ntxn-2\n' | \
-  "$KAFKA_BIN/kafka-console-producer.sh" --bootstrap-server "$BOOTSTRAP" --topic "$TOPIC" \
-    --producer-property "transactional.id=$TXN_ID" \
-    --producer-property acks=all 2>"$TMP/txn.err" \
-  || { echo "FAIL: transactional producer rejected:"; cat "$TMP/txn.err" >&2; exit 1; }
-out=$("$KAFKA_BIN/kafka-get-offsets.sh" --bootstrap-server "$BOOTSTRAP" --topic "$TOPIC" --time -1)
-# Transactional producers append the data records + may write a
-# COMMIT marker. We require strictly more than the previous count.
-# Exact final offset depends on whether the broker's WriteTxnMarkers
-# path is wired end-to-end (gh #114 follow-up); accept >= 10.
-final=$(echo "$out" | sed -nE "s/^${TOPIC}:0:([0-9]+).*/\1/p")
-[ "$final" -ge 10 ] || { echo "FAIL: txn end-offset $final < 10 (data records not committed)" >&2; exit 1; }
-echo "transactional producer committed; end-offset=$final"
+# Note: Apache's `kafka-console-producer.sh` cannot drive a
+# transactional producer end-to-end. The CLI never calls
+# `initTransactions()` / `beginTransaction()` / `commitTransaction()`
+# even when `transactional.id` is set — `send()` throws
+# IllegalStateException from the Java client's state machine
+# before any wire request reaches the broker. The gh #22-#27 chain
+# is exercised at the wire level by `kafka-txn-coordinator.sh` and
+# end-to-end with franz-go in `tests/kafka-compat/eos_v2_test.go`.
 
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --delete --topic "$TOPIC" || true
 
