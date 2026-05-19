@@ -808,6 +808,17 @@ func runBroker(ctx context.Context) {
 	srvCfg := protocol.Config{Listeners: listenerCfgs}
 	srv := protocol.NewServer(srvCfg, d)
 	srv.SetAuthEngine(authEngine)
+	// gh #43: ssl.principal.mapping.rules (KIP-371). Empty → CN-only
+	// behaviour preserved. Parse failure logs a warning and skips
+	// (rather than failing broker startup over a chart-config typo).
+	if rules := os.Getenv("SKAFKA_SSL_PRINCIPAL_MAPPING_RULES"); rules != "" {
+		if mapper, err := auth.NewPrincipalMapper(rules); err == nil {
+			srv.SetPrincipalMapper(mapper)
+		} else {
+			slog.Warn("ssl.principal.mapping.rules parse failed; falling back to CN-only mTLS principal extraction",
+				"rules", rules, "err", err)
+		}
+	}
 	if err := srv.Start(ctx); err != nil {
 		slog.Error("start server", "err", err)
 		os.Exit(1)

@@ -63,7 +63,11 @@ type Server struct {
 	cfg        Config
 	dispatcher *Dispatcher
 	authEngine auth.AuthEngine // optional; used for mTLS CN extraction
-	listeners  []net.Listener
+	// principalMapper applies ssl.principal.mapping.rules (gh #43)
+	// to the X.509 subject DN before AuthenticateTLS lookup. nil →
+	// the AuthEngine sees the CN unchanged (pre-fix behaviour).
+	principalMapper *auth.PrincipalMapper
+	listeners       []net.Listener
 	// listenerTag maps each open listener to the ListenerName the
 	// accept loop should stamp onto incoming connections. Lets one
 	// Server host the three listener policies (anon plaintext, mTLS
@@ -85,6 +89,12 @@ func NewServer(cfg Config, d *Dispatcher) *Server {
 
 // SetAuthEngine registers an AuthEngine used for mTLS CN extraction on TLS connections.
 func (s *Server) SetAuthEngine(e auth.AuthEngine) { s.authEngine = e }
+
+// SetPrincipalMapper wires the ssl.principal.mapping.rules
+// extractor (gh #43). Called by main.go after parsing the chart's
+// auth.sslPrincipalMappingRules value. nil leaves the default
+// "use CN unchanged" behaviour.
+func (s *Server) SetPrincipalMapper(m *auth.PrincipalMapper) { s.principalMapper = m }
 
 // Start opens the listener(s) and begins accepting connections.
 // It returns once all listeners are bound (or on error).
@@ -256,7 +266,15 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn, listenerTag connstat
 			metric.WithAttributes(attribute.String("result", "ok")))
 		cs := tlsConn.ConnectionState()
 		if len(cs.PeerCertificates) > 0 && s.authEngine != nil {
-			cn := cs.PeerCertificates[0].Subject.CommonName
+			peer := cs.PeerCertificates[0]
+			cn := peer.Subject.CommonName
+			// gh #43: apply ssl.principal.mapping.rules to the
+			// full subject DN. Empty rule set → returns the CN
+			// unchanged (pre-fix behaviour). The mapper is
+			// nil-safe; production main.go wires it from env.
+			if s.principalMapper != nil {
+				cn = s.principalMapper.Apply(peer.Subject.String(), cn)
+			}
 			if p, err := s.authEngine.AuthenticateTLS(cn); err == nil {
 				state.Principal = &p
 				state.SASLDone = true
