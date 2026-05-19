@@ -60,14 +60,29 @@ func (r *KafkaUserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	cred, secretName, err := r.buildCredential(ctx, &user)
 	if err != nil {
+		// gh #120: distinguish "the referenced input Secret doesn't
+		// exist yet" from a generic credential-derivation failure.
+		// Returning a non-nil err here triggers controller-runtime's
+		// exponential-backoff retry loop, which produced an ERROR log
+		// line every reconcile and never converged (the Secret isn't
+		// coming back on its own). Convert SecretNotFound to a
+		// Condition + no-retry — the next operator-side periodic
+		// resync (default 10h) or a manual `kubectl apply` re-edit
+		// of the KafkaUser CR will retrigger reconcile.
+		reason := "CredentialError"
+		retErr := err
+		if apierrors.IsNotFound(err) {
+			reason = "SecretNotFound"
+			retErr = nil
+		}
 		setCondition(&user.Status.Conditions, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionFalse,
-			Reason:  "CredentialError",
+			Reason:  reason,
 			Message: err.Error(),
 		})
 		_ = r.Status().Update(ctx, &user)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, retErr
 	}
 
 	cf, err := readCredentials(r.DataDir)
