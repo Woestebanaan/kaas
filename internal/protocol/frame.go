@@ -226,6 +226,18 @@ func flexibleRequestHeader(apiKey, apiVersion int16) bool {
 		// the dispatcher used the legacy header and the handler then
 		// read from the wrong offset.
 		60: 0,
+		// gh #138: missing entries here caused the Java AdminClient
+		// (kafka-configs.sh, kafka-broker-api-versions.sh) to hang for
+		// minutes on DescribeClientQuotas v1 / AlterClientQuotas v1.
+		// The codec wrote a flexible body but the dispatcher emitted
+		// RESPONSE_HEADER_V0 (no tagged fields). The client's decoder
+		// then read past the response into garbage, silently retried
+		// until its default 5-minute timeout fired.
+		23: 3, // OffsetForLeaderEpoch (gh #101, flexibleVersions=4+; codec gates on >=3)
+		48: 1, // DescribeClientQuotas (gh #103, flexibleVersions=1+)
+		49: 1, // AlterClientQuotas (gh #103, flexibleVersions=1+)
+		50: 0, // DescribeUserScramCredentials (gh #104, flexibleVersions=0+)
+		51: 0, // AlterUserScramCredentials (gh #104, flexibleVersions=0+)
 	}
 	min, ok := flexibleMin[apiKey]
 	if !ok {
