@@ -41,6 +41,16 @@ func TestFlexibleResponseHeader_AdminAPIs(t *testing.T) {
 		// Spot checks for previously-correct mappings.
 		{"ApiVersions header always V0", 18, 3, false, "bootstrap contract"},
 		{"DescribeAcls v2 flexible", 29, 2, true, "gh #107"},
+
+		// gh #142 — OffsetFetch flexibleVersions=6+ (Apache schema).
+		// Pre-fix map said v8; v6/v7 emitted a non-flexible header
+		// with a flexible body so --reset-offsets --execute silently
+		// retried (kafka-consumer-groups --describe --offsets on
+		// empty groups showed no offset rows).
+		{"OffsetFetch v5 non-flexible", 9, 5, false, "gh #142"},
+		{"OffsetFetch v6 flexible", 9, 6, true, "gh #142"},
+		{"OffsetFetch v7 flexible", 9, 7, true, "gh #142"},
+		{"OffsetFetch v8 flexible", 9, 8, true, "gh #142"},
 	}
 
 	for _, tc := range cases {

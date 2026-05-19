@@ -194,7 +194,7 @@ func flexibleRequestHeader(apiKey, apiVersion int16) bool {
 		2:  6,  // ListOffsets
 		3:  9,  // Metadata
 		8:  8,  // OffsetCommit
-		9:  8,  // OffsetFetch (v8 uses flexible)
+		9:  6,  // OffsetFetch (Apache schema: flexibleVersions=6+; pre-gh #142 said v8 here, which let Java AdminClient's OffsetFetch v6/v7 read a tag-less header but a tag-full body, leaving --reset-offsets --execute silently retrying)
 		10: 3,  // FindCoordinator
 		11: 6,  // JoinGroup
 		12: 4,  // Heartbeat
