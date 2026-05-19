@@ -48,7 +48,15 @@ func (h *FetchHandler) Handle(conn *connstate.ConnState, version int16, body []b
 	}
 
 	principal := principalFrom(conn)
-	resp := &api.FetchResponse{ErrorCode: 0, SessionID: req.SessionID}
+	// gh #4: KIP-227 incremental fetch sessions. Skafka doesn't yet
+	// maintain per-session state; the right "stateless mode" answer
+	// is SessionID=0 in the response, which tells the client "your
+	// session was forgotten, send full data next time" (Apache's
+	// documented signal for "broker doesn't support sessions").
+	// Echoing the client's SessionID would lie — they'd then send
+	// deltas and we'd lose state. The CPU cost on the broker is the
+	// 'full request every time' shape, fine at skafka's scale.
+	resp := &api.FetchResponse{ErrorCode: 0, SessionID: 0}
 
 	for _, topic := range req.Topics {
 		topicResp := api.FetchTopicResponse{Name: topic.Name}
