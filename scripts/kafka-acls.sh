@@ -26,9 +26,13 @@ ADMIN_PROPS="${ADMIN_PROPS:-}"
 EXTRA=()
 [ -n "$ADMIN_PROPS" ] && EXTRA+=(--command-config "$ADMIN_PROPS")
 
-if [ ${#EXTRA[@]} -eq 0 ]; then
-  skip "ADMIN_PROPS not set — kafka-acls.sh requires an authenticated admin client. Set ADMIN_PROPS=/path/to/admin.properties."
-fi
+# ADMIN_PROPS is optional: skafka's chart ships a `plain` listener
+# (authentication.type=none) on :9092, which is also the in-cluster
+# bootstrap default. AdminClient writes through unauthenticated on
+# that listener and the gh #107 ACL writer still persists to the
+# KafkaUser CR (authorization is independent of authentication, per
+# CLAUDE.md). Set ADMIN_PROPS=/path/to/admin.properties when you want
+# to exercise the same flow against a SASL/SCRAM listener.
 
 need kubectl
 
@@ -44,7 +48,7 @@ PRINCIPAL="User:$USER_NAME"
 cleanup() {
   local rc=$?
   set +e
-  kubectl -n "$NAMESPACE" delete kafkauser "$USER_NAME" --ignore-not-found --wait=false >/dev/null 2>&1
+  kubectl -n "$NAMESPACE" delete kafkausers.skafka.io "$USER_NAME" --ignore-not-found --wait=false >/dev/null 2>&1
   # Operator-owned output Secret (gh #136 auto-generated path).
   kubectl -n "$NAMESPACE" delete secret "$USER_NAME-kafka-credentials" --ignore-not-found --wait=false >/dev/null 2>&1
   rm -rf "$TMP"
@@ -68,7 +72,7 @@ EOF
 # needs Get to succeed (not Ready), so apply+brief readback is enough;
 # we don't gate on Status.Conditions[Ready].
 for _ in $(seq 1 30); do
-  if kubectl -n "$NAMESPACE" get kafkauser "$USER_NAME" >/dev/null 2>&1; then
+  if kubectl -n "$NAMESPACE" get kafkausers.skafka.io "$USER_NAME" >/dev/null 2>&1; then
     break
   fi
   sleep 0.5
@@ -88,7 +92,7 @@ echo ">> Scenario 3: --list shows it"
 echo ">> Verify the CR was actually patched (gh #107 contract)"
 # The wire response could have been a stub-success; the test that
 # distinguishes real persistence from a phantom is checking the CR.
-kubectl -n "$NAMESPACE" get kafkauser "$USER_NAME" -o jsonpath='{.spec.authorization.acls}' \
+kubectl -n "$NAMESPACE" get kafkausers.skafka.io "$USER_NAME" -o jsonpath='{.spec.authorization.acls}' \
   | grep -q "\"name\":\"$ACL_TOPIC\"" \
   || { echo "FAIL: ACL not present on KafkaUser/$USER_NAME spec" >&2; exit 1; }
 
@@ -100,7 +104,7 @@ echo "$out" | grep -q "$PRINCIPAL" && { echo "FAIL: ACL still present" >&2; exit
 
 # CR-side parity check for delete: the entry should be gone (or the
 # operations list emptied, which the writer normalises to entry-drop).
-remaining=$(kubectl -n "$NAMESPACE" get kafkauser "$USER_NAME" -o jsonpath='{.spec.authorization.acls}')
+remaining=$(kubectl -n "$NAMESPACE" get kafkausers.skafka.io "$USER_NAME" -o jsonpath='{.spec.authorization.acls}')
 echo "$remaining" | grep -q "\"name\":\"$ACL_TOPIC\"" \
   && { echo "FAIL: ACL entry still on KafkaUser/$USER_NAME spec after --remove" >&2; exit 1; }
 
