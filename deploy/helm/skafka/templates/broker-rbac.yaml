@@ -33,10 +33,13 @@ rules:
   # operator-driven path (kubectl apply -f); create/delete cover
   # the admin-protocol path (gh #51) where Kafbat / kafka-topics.sh
   # / Java AdminClient calls CreateTopics/DeleteTopics on the broker
-  # and the broker's TopicCRWriter writes the CR.
+  # and the broker's TopicCRWriter writes the CR. update/patch cover
+  # CreatePartitions (gh #52, key 37 — TopicCRWriter.ExpandTopic) and
+  # IncrementalAlterConfigs (gh #9, key 44 — UpdateTopicConfig), both
+  # of which mutate spec on an existing KafkaTopic CR.
   - apiGroups: [skafka.io]
     resources: [kafkatopics]
-    verbs: [get, list, watch, create, delete]
+    verbs: [get, list, watch, create, update, patch, delete]
   # KafkaClusterAssignments mirror: the elected controller broker
   # writes Status to it via internal/controller/k8s_mirror.go after every
   # assignment.json change. Read on every broker (debug/diag); update
