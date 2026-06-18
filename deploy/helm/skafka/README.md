@@ -3,6 +3,13 @@
 Deploys the skafka broker StatefulSet and operator Deployment backed by a single
 shared ReadWriteMany PersistentVolumeClaim.
 
+> **Note (mid-rewrite).** skafka is being rewritten from Go to Rust (see
+> `../../../rewrite.md`). The chart itself is language-agnostic and is
+> reused unchanged by both flavors. Phase 9 of the rewrite will add an
+> `image.flavor` value (`go` | `rust`) so a single chart version can deploy
+> either; until then the chart only points at the Go images shipped from
+> `archive/`.
+
 ## Prerequisites
 
 - Kubernetes >= 1.27
@@ -66,8 +73,10 @@ rename, fsync durability, and close-to-open consistency.
 
 Phase 4 dropped flock entirely — single-writer enforcement now comes from
 epoch-prefixed segment filenames + the BrokerCoordinator's ownership decision
-(see `internal/controller/`), so the StorageClass no longer needs to support
-`flock()`. Any RWX volume that meets NFSv4-class semantics works.
+(see `archive/internal/controller/` in the Go tree, or `crates/sk-controller`
+once the Rust port lands — see `../../../rewrite.md`), so the StorageClass no
+longer needs to support `flock()`. Any RWX volume that meets NFSv4-class
+semantics works.
 
 | StorageClass | Status | Notes |
 |---|---|---|

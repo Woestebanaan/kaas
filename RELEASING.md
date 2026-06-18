@@ -4,6 +4,25 @@ Releases are tag-driven. Pushing a semver tag to `main` triggers the
 `release` workflow (`.github/workflows/docker-publish.yml`), which builds and
 publishes the broker image, the operator image, and the Helm chart to GHCR.
 
+## Status: mid-rewrite
+
+skafka is being rewritten from Go to Rust (see `rewrite.md`). Until Phase 9
+cuts over:
+
+- Releases continue to ship the **Go** broker + operator from `archive/`.
+  The release workflow builds `archive/Dockerfile` and
+  `archive/Dockerfile.operator`. The Helm chart and CRDs at the repo root
+  are unchanged.
+- The Go release line stays on `v0.1.N-preview` patches.
+- The **first Rust release** will be tagged `v0.2.0-preview` (Phase 9 in
+  `rewrite.md`). It will publish alongside the Go images for one release
+  window so the Helm chart's `image.flavor` field (`go` | `rust`, default
+  `go` at first) can switch deployments without re-pinning the chart
+  version. Once the Rust flavor is the default, the Go tree gets deleted
+  and the patch line continues from the Rust side.
+
+The rules below apply to whichever flavor is currently being cut.
+
 ## Versioning
 
 - Semver: `vMAJOR.MINOR.PATCH[-PRERELEASE]`.
