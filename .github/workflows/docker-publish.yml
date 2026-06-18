@@ -75,23 +75,47 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build + push broker image
+      - name: Build + push broker image (go, from archive/)
+        # During the Rust rewrite the Go binaries still ship from archive/.
+        # Phase 9 of rewrite.md flips the default flavor to Rust and adds a
+        # second build step targeting bins/skafka/Dockerfile.
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: Dockerfile
+          context: archive
+          file: archive/Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.names.outputs.broker_image }}:${{ steps.names.outputs.image_tag }}
 
-      - name: Build + push operator image
+      - name: Build + push operator image (go, from archive/)
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: Dockerfile.operator
+          context: archive
+          file: archive/Dockerfile.operator
           platforms: linux/amd64
           push: true
           tags: ${{ steps.names.outputs.operator_image }}:${{ steps.names.outputs.image_tag }}
+
+      # ----------------------------------------------------------------------
+      # Rust image stanzas — commented out until Phase 9 cuts over.
+      # ----------------------------------------------------------------------
+      # - name: Build + push broker image (rust)
+      #   uses: docker/build-push-action@v7
+      #   with:
+      #     context: .
+      #     file: bins/skafka/Dockerfile
+      #     platforms: linux/amd64
+      #     push: true
+      #     tags: ghcr.io/${{ steps.names.outputs.owner }}/skafka-rs-preview:${{ steps.names.outputs.image_tag }}
+      #
+      # - name: Build + push operator image (rust)
+      #   uses: docker/build-push-action@v7
+      #   with:
+      #     context: .
+      #     file: bins/skafka-operator/Dockerfile
+      #     platforms: linux/amd64
+      #     push: true
+      #     tags: ghcr.io/${{ steps.names.outputs.owner }}/skafka-operator-rs-preview:${{ steps.names.outputs.image_tag }}
 
       - uses: azure/setup-helm@v5
         with:

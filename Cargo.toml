@@ -1,0 +1,109 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sk-codec",
+    "crates/sk-protocol",
+    "crates/sk-storage",
+    "crates/sk-coordinator",
+    "crates/sk-broker",
+    "crates/sk-controller",
+    "crates/sk-auth",
+    "crates/sk-k8s",
+    "crates/sk-observability",
+    "crates/sk-operator-api",
+    "crates/sk-operator-controllers",
+    "crates/sk-test-harness",
+    "bins/skafka",
+    "bins/skafka-operator",
+    "xtask",
+]
+
+[workspace.package]
+edition      = "2021"
+license      = "Apache-2.0"
+repository   = "https://github.com/Woestebanaan/skafka"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# async + I/O
+tokio          = { version = "1.43", features = ["full"] }
+tokio-rustls   = "0.26"
+tokio-util     = { version = "0.7", features = ["io", "codec"] }
+bytes          = "1.9"
+futures        = "0.3"
+async-trait    = "0.1"
+parking_lot    = "0.12"
+dashmap        = "6.1"
+arc-swap       = "1.7"
+notify         = "7.0"
+
+# wire / serde / encoding
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+prost          = "0.13"
+tonic          = "0.12"
+prost-build    = "0.13"
+tonic-build    = "0.12"
+protoc-bin-vendored = "3"
+crc32c         = "0.6"
+uuid           = { version = "1.11", features = ["v4", "serde"] }
+base64         = "0.22"
+hmac           = "0.12"
+sha2           = "0.10"
+regex          = "1.11"
+bytestring     = "1.4"
+
+# error / tracing / metrics
+thiserror      = "2.0"
+anyhow         = "1"
+tracing        = "0.1"
+tracing-subscriber    = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.28"
+opentelemetry         = "0.27"
+opentelemetry-otlp    = { version = "0.27", features = ["grpc-tonic"] }
+opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
+
+# kubernetes
+kube           = { version = "0.96", features = ["client", "derive", "runtime", "rustls-tls"] }
+k8s-openapi    = { version = "0.23", features = ["latest"] }
+schemars       = "0.8"
+
+# TLS
+rustls         = { version = "0.23", default-features = false, features = ["ring"] }
+rcgen          = "0.13"
+
+# axum (healthz, metrics endpoints)
+axum           = "0.7"
+
+# dev-deps shared across crates
+proptest       = "1.6"
+insta          = { version = "1.41", features = ["json", "yaml"] }
+tokio-test     = "0.4"
+tempfile       = "3.14"
+wiremock       = "0.6"
+
+# internal crates referenced by path
+sk-codec                = { path = "crates/sk-codec" }
+sk-protocol             = { path = "crates/sk-protocol" }
+sk-storage              = { path = "crates/sk-storage" }
+sk-coordinator          = { path = "crates/sk-coordinator" }
+sk-broker               = { path = "crates/sk-broker" }
+sk-controller           = { path = "crates/sk-controller" }
+sk-auth                 = { path = "crates/sk-auth" }
+sk-k8s                  = { path = "crates/sk-k8s" }
+sk-observability        = { path = "crates/sk-observability" }
+sk-operator-api         = { path = "crates/sk-operator-api" }
+sk-operator-controllers = { path = "crates/sk-operator-controllers" }
+sk-test-harness         = { path = "crates/sk-test-harness" }
+
+[workspace.lints.clippy]
+unwrap_used              = "deny"
+expect_used              = "deny"
+panic                    = "deny"
+as_conversions           = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss           = "deny"
+
+[workspace.lints.rust]
+unsafe_code                   = "forbid"
+missing_debug_implementations = "warn"

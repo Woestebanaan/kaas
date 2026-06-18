@@ -12,6 +12,10 @@ dist/
 # Test cache
 *.test
 
+# Rust build output
+/target/
+**/*.rs.bk
+
 # Editor / OS
 .DS_Store
 .idea/

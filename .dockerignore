@@ -1,12 +1,14 @@
+# Rust workspace .dockerignore. Applies to bins/*/Dockerfile builds whose
+# context is the repo root. The archive/ tree has its own .dockerignore for
+# the legacy Go build.
 .git
 .github
-deploy
-phase*-breakdown.md
-shared-storage-kafka-plan.md
+target/
+archive/
+deploy/
+tests/
 *.md
-tests/kafka-compat
-tests/integration
-skafka
-skafka-operator
-bin
-dist
+.claude
+.idea
+.vscode
+*.swp

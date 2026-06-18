@@ -1,0 +1,12 @@
+[package]
+name         = "sk-controller"
+version      = "0.0.0"
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish      = false
+description  = "Controller-side: balancer, assignment writer, heartbeat server."
+
+[lints]
+workspace = true

@@ -10,8 +10,38 @@ permissions:
   contents: read
 
 jobs:
-  lint-and-test:
+  rust:
     runs-on: arc-runner-set
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: cargo build --release
+        run: cargo build --release --workspace --bins
+
+  legacy-go:
+    # The Go tree under archive/ is frozen but still ships releases until the
+    # Rust port reaches Phase 9. Keep vet+test green so port-blocking bugfixes
+    # land safely.
+    runs-on: arc-runner-set
+    defaults:
+      run:
+        working-directory: archive
     steps:
       - name: Runner preflight
         run: |
@@ -28,23 +58,14 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
-          # cache: false on purpose. setup-go's cache backend is GitHub-hosted
-          # which means every run downloads ~600 MB over the home internet
-          # before tests start (~2 min on a ~5 MB/s link). The ARC runner pods
-          # are patched in apps/arc-runners (k3s-cluster) to mount a node-local
-          # hostPath at /var/lib/arc-go-cache, and GOMODCACHE / GOCACHE env are
-          # set there, so the Go toolchain finds the warm caches in-pod with
-          # no network round-trip. First run populates; subsequent runs hit
-          # the warm cache.
+          go-version-file: archive/go.mod
+          # cache: false on purpose. See archive/go.mod-adjacent notes in
+          # CLAUDE.md — the ARC runners mount /var/lib/arc-go-cache as a
+          # node-local hostPath with GOMODCACHE/GOCACHE pointed at it.
           cache: false
 
       - name: go vet
         run: go vet ./...
-
-      # golangci-lint is currently disabled: the latest published golangci-lint
-      # is built with Go 1.24 and refuses to load a project whose go.mod targets
-      # Go 1.26.1. Re-enable once a golangci-lint release built with Go 1.26 ships.
 
       - name: go test
         run: go test ./...
@@ -53,18 +74,17 @@ jobs:
         run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
 
       - name: Check CRD manifests are up to date
-        # Phase 8: also verifies the Helm chart's crds/ stays in sync.
-        # Drift here means a fresh `helm install` would skip the new CRD.
-        # Inlined from the Makefile because arc-runner-set ships without
-        # `make` — this used to invoke `make manifests`.
+        # CRDs live at deploy/crds/ relative to the repo root; controller-gen
+        # output paths are relative to the workspace, which is archive/ for
+        # this job. Use ../deploy to climb out.
         run: |
           "$(go env GOPATH)/bin/controller-gen" \
             crd paths="./operator/api/..." \
-            output:crd:artifacts:config=deploy/crds
-          cp deploy/crds/skafka.io_*.yaml deploy/helm/skafka/crds/
-          git diff --exit-code -- deploy/crds/ deploy/helm/skafka/crds/
+            output:crd:artifacts:config=../deploy/crds
+          cp ../deploy/crds/skafka.io_*.yaml ../deploy/helm/skafka/crds/
+          cd .. && git diff --exit-code -- deploy/crds/ deploy/helm/skafka/crds/
 
-  docker:
+  docker-rust:
     runs-on: arc-runner-set
     steps:
       - name: Wait for Docker daemon (DinD sidecar)
@@ -88,18 +108,58 @@ jobs:
         with:
           driver: docker-container
 
-      - name: Build broker image (no push)
+      - name: Build broker image (rust, no push)
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile
+          file: bins/skafka/Dockerfile
           push: false
 
-      - name: Build operator image (no push)
+      - name: Build operator image (rust, no push)
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.operator
+          file: bins/skafka-operator/Dockerfile
+          push: false
+
+  docker-go:
+    # Mirrors docker-rust but builds the legacy Go images from archive/.
+    # Stays green until Phase 9 retires the Go release line.
+    runs-on: arc-runner-set
+    steps:
+      - name: Wait for Docker daemon (DinD sidecar)
+        run: |
+          echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready after ${i}s"
+              docker version
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "docker daemon did not become ready"
+          docker info || true
+          exit 1
+
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      - name: Build broker image (go, no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: archive
+          file: archive/Dockerfile
+          push: false
+
+      - name: Build operator image (go, no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: archive
+          file: archive/Dockerfile.operator
           push: false
 
   helm:

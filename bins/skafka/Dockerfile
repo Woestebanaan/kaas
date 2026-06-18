@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1.7
+FROM rust:1.85-slim-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --bin skafka && \
+    cp target/release/skafka /skafka
+
+FROM debian:bookworm-slim AS runtime
+RUN useradd --system --uid 10001 skafka
+COPY --from=build /skafka /usr/local/bin/skafka
+USER 10001
+EXPOSE 9092 9094 8080
+ENTRYPOINT ["/usr/local/bin/skafka"]

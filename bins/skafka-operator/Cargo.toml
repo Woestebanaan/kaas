@@ -1,0 +1,16 @@
+[package]
+name         = "skafka-operator"
+version      = "0.0.0"
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish      = false
+description  = "skafka Kubernetes operator binary."
+
+[[bin]]
+name = "skafka-operator"
+path = "src/main.rs"
+
+[lints]
+workspace = true
