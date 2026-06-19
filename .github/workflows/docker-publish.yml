@@ -77,7 +77,7 @@ jobs:
 
       - name: Build + push broker image (go, from archive/)
         # During the Rust rewrite the Go binaries still ship from archive/.
-        # Phase 9 of rewrite.md flips the default flavor to Rust and adds a
+        # Phase 9 of docs/rewrite.md flips the default flavor to Rust and adds a
         # second build step targeting bins/skafka/Dockerfile.
         uses: docker/build-push-action@v7
         with:

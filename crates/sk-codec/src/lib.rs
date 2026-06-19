@@ -16,8 +16,8 @@
 //! the matching counter in [`tripwires`]. The integration tests in
 //! `crates/sk-codec/tests/` assert both counters read zero after every run.
 //!
-//! See `phase-1.md` for the full scope and the workstream breakdown that
-//! produced these modules.
+//! See `docs/phase-1.md` for the full scope and the workstream breakdown
+//! that produced these modules.
 
 pub mod api;
 pub mod crc;

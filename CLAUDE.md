@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status: mid-rewrite from Go to Rust
 
-skafka is being rewritten from Go to Rust. The full plan lives in [`rewrite.md`](./rewrite.md); per-phase detail starts with [`phase-0.md`](./phase-0.md). Tracker issue: [gh #143](https://github.com/Woestebanaan/skafka/issues/143). **Read these before starting non-trivial work.**
+skafka is being rewritten from Go to Rust. The full plan lives in [`docs/rewrite.md`](./docs/rewrite.md); per-phase detail starts with [`docs/phase-0.md`](./docs/phase-0.md). System-level architecture in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Tracker issue: [gh #143](https://github.com/Woestebanaan/skafka/issues/143). **Read these before starting non-trivial work.**
 
 - **Phase 0 shipped (commit `f701876`).** The Rust workspace at the repo root is real: `Cargo.toml`, `rust-toolchain.toml` (pin = 1.85), 12 lib crates under `crates/sk-*`, 2 bins under `bins/{skafka,skafka-operator}`, an `xtask` runner, vendored `protoc` via `tonic-build` in `sk-broker`. Every crate compiles, `cargo xtask ci` is green, and CI runs `rust` + `legacy-go` + `docker-rust` + `docker-go` + `helm` jobs in parallel. The crates are scaffolding only — production logic lands phase-by-phase.
 - **All Go code lives under `archive/`.** Every path in the rest of this doc that names a Go source path (`cmd/...`, `internal/...`, `operator/...`, `pkg/...`, `tests/...`, `go.mod`, `Dockerfile*`, `Makefile`) should be read with an `archive/` prefix. `go build ./...` works from inside `archive/`. The Go tree is **frozen** — no new feature work; only port-blocking bugfixes.
@@ -69,7 +69,7 @@ make proto                  # regenerate gRPC stubs from ../proto/heartbeat.prot
 
 **CRD drift** — if you edit anything under `archive/operator/api/`, run `make manifests` from inside `archive/` and commit both `deploy/crds/` and `deploy/helm/skafka/crds/`. The CI step is inlined (the runner has no `make`), but the effect is the same. Once `sk-operator-api` lands in Phase 7, `xtask gen-crds` replaces `controller-gen` as the drift source.
 
-Releases are tag-driven; see `RELEASING.md`. **Always bump the patch (`v0.1.N-preview` → `v0.1.N+1-preview`), never re-cut a tag.** The Rust port will cut from `v0.2.0-preview` per Phase 9.
+Releases are tag-driven; see [`docs/RELEASING.md`](./docs/RELEASING.md). **Always bump the patch (`v0.1.N-preview` → `v0.1.N+1-preview`), never re-cut a tag.** The Rust port will cut from `v0.2.0-preview` per Phase 9.
 
 `scripts/kafka-*.sh` (at the repo root, not archived) is a per-tool integration suite that runs the Apache Kafka shell tools (`kafka-topics`, `kafka-{producer,consumer}-perf-test`, `kafka-acls`, etc.) against a live broker — *not* invoked by `go test`. Each script sources `scripts/_common.sh` for shared `BOOTSTRAP` / `KAFKA_BIN` / `skip` helpers; defaults target the in-cluster Service DNS and `/opt/kafka/bin`. Scripts target the broker's wire surface, so they exercise whichever flavor (Go or Rust) is currently deployed — they don't need updating per phase. Scripts that target features that are non-goals or post-3.7 (KRaft tools, share-groups, etc.) print a one-line reason and `exit 77` (the autoconf "skipped" code) so they're discoverable without pretending to test something that can't work.
 
@@ -246,4 +246,4 @@ All Rust crates listed below are **scaffolded** (Phase 0, commit `f701876`) — 
 | `tests/`                         | per-crate `tests/` + `crates/sk-test-harness` | per phase | — |
 | `pkg/heartbeatpb`                | tonic-build output inside `crates/sk-broker` (✅ Phase 0) | 0 | — |
 
-`proto/`, `deploy/`, `scripts/`, and the `/data/__cluster/` layout do **not** move — the Rust port reuses them verbatim. See [`rewrite.md`](./rewrite.md) for phase boundaries and exit criteria, [`phase-0.md`](./phase-0.md) for the bootstrap decisions, and the tracker issue [gh #143](https://github.com/Woestebanaan/skafka/issues/143) for live status.
+`proto/`, `deploy/`, `scripts/`, and the `/data/__cluster/` layout do **not** move — the Rust port reuses them verbatim. See [`docs/rewrite.md`](./docs/rewrite.md) for phase boundaries and exit criteria, [`docs/phase-0.md`](./docs/phase-0.md) for the bootstrap decisions, and the tracker issue [gh #143](https://github.com/Woestebanaan/skafka/issues/143) for live status.
