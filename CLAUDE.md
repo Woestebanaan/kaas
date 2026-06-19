@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status: mid-rewrite from Go to Rust
 
-skafka is being rewritten from Go to Rust. The full plan lives in [`rewrite.md`](./rewrite.md) — read it before starting any non-trivial work.
+skafka is being rewritten from Go to Rust. The full plan lives in [`rewrite.md`](./rewrite.md); per-phase detail starts with [`phase-0.md`](./phase-0.md). Tracker issue: [gh #143](https://github.com/Woestebanaan/skafka/issues/143). **Read these before starting non-trivial work.**
 
-- **All Go code now lives under `archive/`.** Every path in the rest of this doc that names a Go source path (`cmd/...`, `internal/...`, `operator/...`, `pkg/...`, `tests/...`, `go.mod`, `Dockerfile*`, `Makefile`) should be read with an `archive/` prefix. `go build ./...` works from inside `archive/`. The Go tree is **frozen** — no new feature work; only port-blocking bugfixes.
-- **The Rust workspace will live at the repository root** (`Cargo.toml`, `crates/`, `bins/`, `xtask/`). It does not exist yet — Phase 0 of `rewrite.md` bootstraps it.
+- **Phase 0 shipped (commit `f701876`).** The Rust workspace at the repo root is real: `Cargo.toml`, `rust-toolchain.toml` (pin = 1.85), 12 lib crates under `crates/sk-*`, 2 bins under `bins/{skafka,skafka-operator}`, an `xtask` runner, vendored `protoc` via `tonic-build` in `sk-broker`. Every crate compiles, `cargo xtask ci` is green, and CI runs `rust` + `legacy-go` + `docker-rust` + `docker-go` + `helm` jobs in parallel. The crates are scaffolding only — production logic lands phase-by-phase.
+- **All Go code lives under `archive/`.** Every path in the rest of this doc that names a Go source path (`cmd/...`, `internal/...`, `operator/...`, `pkg/...`, `tests/...`, `go.mod`, `Dockerfile*`, `Makefile`) should be read with an `archive/` prefix. `go build ./...` works from inside `archive/`. The Go tree is **frozen** — no new feature work; only port-blocking bugfixes.
 - **`proto/`, `deploy/`, and `scripts/` stay at the root**, unchanged. The Rust port reuses them as-is (tonic-build consumes `proto/heartbeat.proto`; the Helm chart and shell integration suite are language-agnostic).
 - **The architecture and behaviour sections below remain the source of truth** — they describe how skafka works on the wire, on disk, and against the K8s API. They are the spec the Rust port targets, not historical commentary.
+- **Open phases.** [gh #144](https://github.com/Woestebanaan/skafka/issues/144) Phase 1 codec · [gh #145](https://github.com/Woestebanaan/skafka/issues/145) Phase 2 storage · [gh #146](https://github.com/Woestebanaan/skafka/issues/146) Phase 3 server · [gh #147](https://github.com/Woestebanaan/skafka/issues/147) Phase 4 auth · [gh #148](https://github.com/Woestebanaan/skafka/issues/148) Phase 5 coordinator · [gh #149](https://github.com/Woestebanaan/skafka/issues/149) Phase 6 transactions · [gh #150](https://github.com/Woestebanaan/skafka/issues/150) Phase 7 operator · [gh #151](https://github.com/Woestebanaan/skafka/issues/151) Phase 8 observability+parity · [gh #152](https://github.com/Woestebanaan/skafka/issues/152) Phase 9 cutover.
 
 ## Parity target & non-goals
 
@@ -20,22 +21,53 @@ skafka targets **Apache Kafka 3.7** for wire-protocol and Kafka Streams parity. 
 
 ## Common commands
 
-The Go tree under `archive/` is self-contained. All `go` and `make` invocations run from inside `archive/`:
+### Rust (at the repo root)
+
+```bash
+cargo build --workspace                                  # build every crate + both bins
+cargo test  --workspace --all-features                   # run all Rust unit + integration tests
+cargo test  -p sk-codec                                  # one crate
+cargo test  -p sk-broker --test proto_smoke              # one integration test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt   --check
+cargo xtask ci                                           # fmt + clippy + test + release build, all in one
+cargo xtask gen-proto                                    # force-rebuild sk-broker so tonic-build re-runs
+cargo xtask gen-crds                                     # stub until phase 7; will write deploy/crds/
+cargo xtask check-crd-drift                              # CI gate; stub until phase 7
+```
+
+`rust-toolchain.toml` pins Rust 1.85 (transitive `getrandom` needs edition 2024); `rustup` auto-installs it on first invocation. `protoc` is vendored via `protoc-bin-vendored` inside `sk-broker/build.rs` — no `apt install protobuf-compiler` needed. Generated proto code is silenced from the workspace clippy gate via a module-scope `#![allow(...)]`.
+
+### Go (inside `archive/`)
+
+The Go tree is **frozen**. Bugfixes only — no new feature work. All `go` and `make` invocations run from inside `archive/`:
 
 ```bash
 cd archive
 go build ./...              # build all binaries
-go test ./...               # run all unit tests
-go test ./internal/storage  # run one package
-go test -run TestX ./...    # run one test by name
-go vet ./...
+go test  ./...              # run all unit tests
+go test  ./internal/storage # run one package
+go test  -run TestX ./...   # run one test by name
+go vet   ./...
 make manifests              # regenerate CRD YAMLs from operator/api/* AND mirror into ../deploy/helm/skafka/crds/
 make proto                  # regenerate gRPC stubs from ../proto/heartbeat.proto (needs `buf`; install via `make proto-tools`)
 ```
 
 `archive/go.mod` targets Go 1.26.1. `golangci-lint` is currently disabled in CI (latest release is built with Go 1.24 and refuses 1.26 modules) — `make lint` works locally if you have a matching toolchain, but don't be surprised when it fails to load.
 
-CI (`.github/workflows/ci.yml`) runs `go vet`, `go test`, builds both Docker images, lints/templates the Helm chart, and **fails on CRD drift** — if you edit anything under `archive/operator/api/`, run `make manifests` from inside `archive/` and commit both `deploy/crds/` and `deploy/helm/skafka/crds/`. The CI step is inlined (the runner has no `make`), but the effect is the same. The workflow will be replaced by a Rust pipeline in Phase 0 of `rewrite.md`; until then it still targets the Go tree under `archive/`.
+### CI
+
+`.github/workflows/ci.yml` runs five jobs in parallel:
+
+- `rust` — `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace --all-features` + `cargo build --release --workspace --bins`.
+- `legacy-go` — `cd archive` then `go vet`, `go test`, `controller-gen` CRD drift check. Stays green until Phase 9 retires the Go release line.
+- `docker-rust` — buildx of `bins/skafka/Dockerfile` and `bins/skafka-operator/Dockerfile`, no push.
+- `docker-go` — buildx of `archive/Dockerfile` and `archive/Dockerfile.operator`, no push.
+- `helm` — `helm lint deploy/helm/skafka` + `helm template`.
+
+`.github/workflows/docker-publish.yml` is tag-triggered and currently builds **only** the Go images from `archive/`. Rust image stanzas are committed but commented out; Phase 9 flips the default flavor.
+
+**CRD drift** — if you edit anything under `archive/operator/api/`, run `make manifests` from inside `archive/` and commit both `deploy/crds/` and `deploy/helm/skafka/crds/`. The CI step is inlined (the runner has no `make`), but the effect is the same. Once `sk-operator-api` lands in Phase 7, `xtask gen-crds` replaces `controller-gen` as the drift source.
 
 Releases are tag-driven; see `RELEASING.md`. **Always bump the patch (`v0.1.N-preview` → `v0.1.N+1-preview`), never re-cut a tag.** The Rust port will cut from `v0.2.0-preview` per Phase 9.
 
@@ -190,26 +222,28 @@ Cluster-wide authorization lives at `.Values.authorization.{type,superUsers}` (t
 
 **Storage substrate**: the chart accepts `storage.accessMode: ReadWriteOnce` + a local-path class for single-broker deployments (the k3s overlay does this — RWX-NFS was the source of perf-bench DeadlineExceeded errors during saturation tests). Multi-broker requires `ReadWriteMany` with NFSv4-class semantics (same-directory rename atomicity, fsync durability, close-to-open consistency); see NOTES.txt for the provider matrix.
 
-## Go → Rust crate map (forward-looking)
+## Go → Rust crate map
 
-When porting, find the Go package under `archive/` and write the equivalent into the Rust crate listed here. Crate scopes mirror the Go package boundaries 1:1 so the code map above stays valid:
+All Rust crates listed below are **scaffolded** (Phase 0, commit `f701876`) — each one builds, runs `cargo test`, and contains a doc-comment-only `lib.rs`. Production logic lands phase-by-phase per the **Phase** column.
 
-| Go package (under `archive/`)    | Rust crate                    | Phase |
-|----------------------------------|-------------------------------|-------|
-| `internal/protocol/codec`        | `crates/sk-codec`             | 1     |
-| `internal/protocol`              | `crates/sk-protocol`          | 3     |
-| `internal/storage`               | `crates/sk-storage`           | 2     |
-| `internal/coordinator`           | `crates/sk-coordinator`       | 5 / 6 |
-| `internal/broker`                | `crates/sk-broker`            | 5     |
-| `internal/controller`            | `crates/sk-controller`        | 5     |
-| `internal/auth`                  | `crates/sk-auth`              | 4     |
-| `internal/k8s`                   | `crates/sk-k8s`               | 5 / 7 |
-| `internal/observability`         | `crates/sk-observability`     | 8     |
-| `operator/api/v1alpha1`          | `crates/sk-operator-api`      | 7     |
-| `operator/controllers`           | `crates/sk-operator-controllers` | 7  |
-| `cmd/skafka`                     | `bins/skafka`                 | 3     |
-| `cmd/skafka-operator`            | `bins/skafka-operator`        | 7     |
-| `tests/`                         | per-crate `tests/` + `crates/sk-test-harness` | per phase |
-| `pkg/heartbeatpb`                | `tonic-build` output inside `crates/sk-broker` | 5 |
+| Go package (under `archive/`)    | Rust crate                       | Phase | Issue                                                  |
+|----------------------------------|----------------------------------|-------|--------------------------------------------------------|
+| `internal/protocol/codec`        | `crates/sk-codec`                | 1     | [gh #144](https://github.com/Woestebanaan/skafka/issues/144) |
+| `internal/protocol`              | `crates/sk-protocol`             | 3     | [gh #146](https://github.com/Woestebanaan/skafka/issues/146) |
+| `internal/storage`               | `crates/sk-storage`              | 2     | [gh #145](https://github.com/Woestebanaan/skafka/issues/145) |
+| `internal/coordinator` (groups)  | `crates/sk-coordinator`          | 5     | [gh #148](https://github.com/Woestebanaan/skafka/issues/148) |
+| `internal/coordinator` (txn)     | `crates/sk-coordinator`          | 6     | [gh #149](https://github.com/Woestebanaan/skafka/issues/149) |
+| `internal/broker`                | `crates/sk-broker`               | 5     | [gh #148](https://github.com/Woestebanaan/skafka/issues/148) |
+| `internal/controller`            | `crates/sk-controller`           | 5     | [gh #148](https://github.com/Woestebanaan/skafka/issues/148) |
+| `internal/auth`                  | `crates/sk-auth`                 | 4     | [gh #147](https://github.com/Woestebanaan/skafka/issues/147) |
+| `internal/k8s` (broker side)     | `crates/sk-k8s`                  | 5     | [gh #148](https://github.com/Woestebanaan/skafka/issues/148) |
+| `internal/k8s` (CR writers)      | `crates/sk-k8s`                  | 7     | [gh #150](https://github.com/Woestebanaan/skafka/issues/150) |
+| `internal/observability`         | `crates/sk-observability`        | 8     | [gh #151](https://github.com/Woestebanaan/skafka/issues/151) |
+| `operator/api/v1alpha1`          | `crates/sk-operator-api`         | 7     | [gh #150](https://github.com/Woestebanaan/skafka/issues/150) |
+| `operator/controllers`           | `crates/sk-operator-controllers` | 7     | [gh #150](https://github.com/Woestebanaan/skafka/issues/150) |
+| `cmd/skafka`                     | `bins/skafka`                    | 3     | [gh #146](https://github.com/Woestebanaan/skafka/issues/146) |
+| `cmd/skafka-operator`            | `bins/skafka-operator`           | 7     | [gh #150](https://github.com/Woestebanaan/skafka/issues/150) |
+| `tests/`                         | per-crate `tests/` + `crates/sk-test-harness` | per phase | — |
+| `pkg/heartbeatpb`                | tonic-build output inside `crates/sk-broker` (✅ Phase 0) | 0 | — |
 
-`proto/`, `deploy/`, `scripts/`, and the `/data/__cluster/` layout do **not** move — the Rust port reuses them verbatim. See `rewrite.md` for phase boundaries, exit criteria, and the cutover plan.
+`proto/`, `deploy/`, `scripts/`, and the `/data/__cluster/` layout do **not** move — the Rust port reuses them verbatim. See [`rewrite.md`](./rewrite.md) for phase boundaries and exit criteria, [`phase-0.md`](./phase-0.md) for the bootstrap decisions, and the tracker issue [gh #143](https://github.com/Woestebanaan/skafka/issues/143) for live status.
