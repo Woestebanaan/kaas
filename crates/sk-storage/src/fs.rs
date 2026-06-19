@@ -21,11 +21,26 @@ use std::path::{Path, PathBuf};
 pub trait FileRead: Read + Seek + Send + 'static {}
 
 /// File handle returned by [`Fs::open_write`] / [`Fs::create`].
-/// `Write + Seek + Send`. [`Fs::fsync`] consumes a `&mut dyn FileWrite`
-/// so the trait does not carry a raw fsync method — the seam is one
-/// layer up so a future `io_uring` impl can batch fsyncs across
-/// multiple files.
-pub trait FileWrite: Write + Seek + Send + 'static {}
+/// `Write + Seek + Send`, plus per-handle `write_at` (atomic positioned
+/// write) and `sync_all` (durable flush) so the segment hot path
+/// doesn't pay the close-reopen cost on every fsync.
+pub trait FileWrite: Write + Seek + Send + 'static {
+    /// Atomic positioned write at byte offset `offset`. Default impl
+    /// uses `seek + write_all`; [`RealFs`] overrides with the native
+    /// `pwrite(2)`-backed `FileExt::write_at` so the file's cursor
+    /// position isn't disturbed by concurrent reads on a separate
+    /// handle.
+    fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.seek(io::SeekFrom::Start(offset))?;
+        self.write_all(buf)
+    }
+
+    /// Flush kernel buffers and durable storage. Default impl flushes
+    /// only; [`RealFs`] overrides with `std::fs::File::sync_all`.
+    fn sync_all(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+}
 
 /// All disk I/O the storage engine performs.
 pub trait Fs: Send + Sync + 'static {
@@ -98,7 +113,16 @@ impl Seek for RealFile {
     }
 }
 impl FileRead for RealFile {}
-impl FileWrite for RealFile {}
+impl FileWrite for RealFile {
+    fn write_at(&mut self, buf: &[u8], offset: u64) -> io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        self.0.write_all_at(buf, offset)
+    }
+
+    fn sync_all(&mut self) -> io::Result<()> {
+        self.0.sync_all()
+    }
+}
 
 impl Fs for RealFs {
     fn open_read(&self, p: &Path) -> io::Result<Box<dyn FileRead>> {

@@ -43,6 +43,8 @@ pub use producer_snapshot::{
     PRODUCER_SNAPSHOT_FILENAME, PRODUCER_SNAPSHOT_VERSION,
 };
 pub use segment::{
-    legacy_segment_log_path, parse_segment_stem, segment_index_path, segment_log_path, SegmentMeta,
+    legacy_segment_log_path, list_segments, parse_batch_offsets, parse_segment_stem, read_batches,
+    scan_high_watermark, search_index, search_index_bytes, segment_index_path, segment_log_path,
+    ActiveSegment, RolledTail, SegmentMeta, INDEX_ENTRY_SIZE,
 };
 pub use topicconfig::{read_topic_config, write_topic_config, TopicConfigFile};
