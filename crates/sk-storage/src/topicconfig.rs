@@ -1,0 +1,129 @@
+//! Per-topic configuration file: `/data/<topic>/.config.json`.
+//!
+//! Port of `archive/internal/storage/topicconfig.go`. The operator
+//! writes this file when reconciling a `KafkaTopic` CR; the broker
+//! reads it on partition open and via the `notify`-driven hot-reload
+//! task (Phase 2 workstream D).
+//!
+//! Every field is `Option<...>` so "unset" survives the round trip
+//! distinct from "set to 0" — the broker's per-partition override
+//! fields treat `None` as "fall through to the engine default".
+
+use std::io;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::atomic_write::atomic_write_json;
+use crate::fs::Fs;
+
+/// Filename written by the operator under `/data/<topic>/`.
+pub const TOPIC_CONFIG_FILENAME: &str = ".config.json";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigFile {
+    /// `retention.ms` — segments older than this are eligible for the
+    /// cleaner. Zero is interpreted by the cleaner as "engine default".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_ms: Option<i64>,
+
+    /// `retention.bytes` — partition total above this triggers oldest-
+    /// segment cleanup. Zero = unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_bytes: Option<i64>,
+
+    /// `segment.bytes` — roll the active segment at this size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_bytes: Option<i64>,
+
+    /// `cleanup.policy` — `"delete"`, `"compact"`, or `"compact,delete"`.
+    /// Empty string omitted to match Go's `omitempty` tag.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub cleanup_policy: String,
+
+    /// `min.compaction.lag.ms` (KIP-58, gh #116).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_compaction_lag_ms: Option<i64>,
+
+    /// `delete.retention.ms` (KIP-354, gh #116).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_retention_ms: Option<i64>,
+}
+
+/// Read the per-topic config file. Returns `Ok(None)` when the file
+/// is absent — the broker falls back to engine defaults.
+pub fn read_topic_config(fs: &dyn Fs, topic_dir: &Path) -> io::Result<Option<TopicConfigFile>> {
+    let path = topic_dir.join(TOPIC_CONFIG_FILENAME);
+    match fs.open_read(&path) {
+        Ok(mut f) => {
+            let mut buf = Vec::new();
+            io::Read::read_to_end(&mut f, &mut buf)?;
+            let c: TopicConfigFile = serde_json::from_slice(&buf).map_err(io::Error::other)?;
+            Ok(Some(c))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Atomically write the per-topic config file. Called by the operator
+/// (Phase 7 wires the reconciler).
+pub fn write_topic_config(fs: &dyn Fs, topic_dir: &Path, c: &TopicConfigFile) -> io::Result<()> {
+    atomic_write_json(fs, topic_dir, TOPIC_CONFIG_FILENAME, c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::RealFs;
+
+    #[test]
+    fn empty_config_is_a_bare_object() {
+        let c = TopicConfigFile::default();
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            json, "{}",
+            "default config should serialize to empty object"
+        );
+    }
+
+    #[test]
+    fn only_set_fields_are_emitted() {
+        let c = TopicConfigFile {
+            retention_ms: Some(86_400_000),
+            cleanup_policy: "compact,delete".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        // Field order = struct declaration order via serde.
+        assert_eq!(
+            json,
+            r#"{"retentionMs":86400000,"cleanupPolicy":"compact,delete"}"#
+        );
+    }
+
+    #[test]
+    fn missing_file_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = RealFs::new();
+        assert!(read_topic_config(&fs, tmp.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn roundtrip_preserves_unset_vs_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = RealFs::new();
+        let c = TopicConfigFile {
+            retention_ms: Some(0),
+            retention_bytes: None,
+            segment_bytes: Some(1 << 30),
+            cleanup_policy: "compact".into(),
+            min_compaction_lag_ms: None,
+            delete_retention_ms: Some(86_400_000),
+        };
+        write_topic_config(&fs, tmp.path(), &c).unwrap();
+        let got = read_topic_config(&fs, tmp.path()).unwrap().unwrap();
+        assert_eq!(got, c, "unset vs zero must round-trip distinctly");
+    }
+}

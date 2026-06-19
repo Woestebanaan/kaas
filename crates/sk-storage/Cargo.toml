@@ -8,5 +8,19 @@ rust-version.workspace = true
 publish      = false
 description  = "DiskStorageEngine: segments, manifest, idempotence, producer snapshot."
 
+[dependencies]
+bytes        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+dashmap      = { workspace = true }
+parking_lot  = { workspace = true }
+arc-swap     = { workspace = true }
+
+[dev-dependencies]
+proptest     = { workspace = true }
+tempfile     = { workspace = true }
+
 [lints]
 workspace = true

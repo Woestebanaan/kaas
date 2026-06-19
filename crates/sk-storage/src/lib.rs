@@ -1,3 +1,48 @@
-//! sk-storage — DiskStorageEngine: segments, manifest, idempotence, producer snapshot.
+//! sk-storage — DiskStorageEngine port from `archive/internal/storage/`.
 //!
-//! Populated in Phase 2 of the rewrite.
+//! Phase 2 of the Rust rewrite. See [`phase-2.md`](../../../phase-2.md) for
+//! the full plan and the workstream breakdown that produced these modules.
+//!
+//! # Byte-opacity contract
+//!
+//! Record-batch bytes flow through `sk-storage` as `bytes::Bytes` —
+//! never decoded into a `Record` struct. The only module allowed to
+//! inspect record contents is the log-compactor (workstream G,
+//! follow-up); it bumps the `sk_codec::tripwires` counters with
+//! `site = "compactor"` so the byte-opacity integration test (which
+//! exercises Produce/Fetch only) keeps both counters at zero.
+//!
+//! # Initial slice (Phase 2 commit 1)
+//!
+//! - [`fs`] / [`atomic_write`] / [`manifest`] / [`topicconfig`] — workstream A
+//! - [`segment`] — workstream B-minimal (filename helpers + [`segment::SegmentMeta`])
+//! - [`idempotence`] / [`producer_snapshot`] — workstream C
+//!
+//! The partition core ([`partition`]), `DiskStorageEngine` ([`engine`]),
+//! recovery, cleaner, and compactor land in follow-up commits per the
+//! Phase 2 plan.
+
+pub mod atomic_write;
+pub mod errors;
+pub mod fs;
+pub mod idempotence;
+pub mod manifest;
+pub mod producer_snapshot;
+pub mod segment;
+pub mod topicconfig;
+
+pub use errors::StorageError;
+pub use fs::{Fs, RealFs};
+pub use idempotence::{
+    parse_batch_producer_info, BatchProducerInfo, Outcome, ProducerEntry, ProducerStates,
+    RecentBatch, RING_SIZE,
+};
+pub use manifest::Manifest;
+pub use producer_snapshot::{
+    read_producer_snapshot, write_producer_snapshot, ProducerSnapshot, ProducerSnapshotEntry,
+    PRODUCER_SNAPSHOT_FILENAME, PRODUCER_SNAPSHOT_VERSION,
+};
+pub use segment::{
+    legacy_segment_log_path, parse_segment_stem, segment_index_path, segment_log_path, SegmentMeta,
+};
+pub use topicconfig::{read_topic_config, write_topic_config, TopicConfigFile};
