@@ -8,5 +8,21 @@ rust-version.workspace = true
 publish      = false
 description  = "Per-API request/response types, dispatch, multi-listener server bring-up."
 
+[dependencies]
+async-trait = { workspace = true }
+bytes        = { workspace = true }
+futures      = { workspace = true }
+parking_lot  = { workspace = true }
+sk-codec     = { path = "../sk-codec" }
+sk-storage   = { path = "../sk-storage" }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+tokio-test   = { workspace = true }
+
 [lints]
 workspace = true
