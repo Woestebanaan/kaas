@@ -194,6 +194,23 @@ impl Partition {
             ActiveSegment::create(fs.as_ref(), &dir, hwm, epoch)?
         };
 
+        // Recover: scan the active segment forward from its base
+        // offset, stopping at the first torn batch. The log file is
+        // authoritative; the manifest is best-effort.
+        //
+        // - `recovered_hwm > manifest_hwm`: manifest was lagging the
+        //   log (normal — the manifest is rewritten only on roll /
+        //   close / takeover). Advance to the real value.
+        // - `recovered_hwm < manifest_hwm`: phantom HWM. Manifest
+        //   claims durable records that aren't actually in the log
+        //   (operator hand-deleted segments, partial roll). Rewind
+        //   so we never serve nonexistent offsets.
+        let recovered_hwm = {
+            let mut f = fs.open_read(&active.meta.log_path)?;
+            segment::scan_high_watermark(&mut f, active.meta.base_offset)?
+        };
+        let hwm = recovered_hwm;
+
         // Restore the idempotence window.
         let producer_states = read_producer_snapshot(fs.as_ref(), &dir)
             .map_err(|e| match e {

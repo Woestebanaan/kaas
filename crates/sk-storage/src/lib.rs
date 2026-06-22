@@ -23,6 +23,7 @@
 //! Phase 2 plan.
 
 pub mod atomic_write;
+pub mod disk;
 pub mod engine;
 pub mod errors;
 pub mod fs;
@@ -34,6 +35,7 @@ pub mod producer_snapshot;
 pub mod segment;
 pub mod topicconfig;
 
+pub use disk::DiskStorageEngine;
 pub use engine::StorageEngine;
 pub use errors::StorageError;
 pub use fs::{Fs, RealFs};
