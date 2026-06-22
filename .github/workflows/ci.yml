@@ -13,6 +13,34 @@ jobs:
   rust:
     runs-on: arc-runner-set
     steps:
+      - name: Runner preflight
+        run: |
+          echo "--- uname ---"; uname -a
+          echo "--- user ---"; id
+          echo "--- C toolchain ---"
+          for t in cc gcc clang ld pkg-config make; do
+            if command -v "$t" >/dev/null; then echo "$t: $(command -v $t)"
+            else echo "$t: MISSING"; fi
+          done
+
+      - name: Install C toolchain (cc + libc + linker needed by cargo build scripts)
+        # The ARC runner image is minimal — Rust build scripts for crates like
+        # `rustix`, `libc`, `ring`, `anyhow` need a working `cc` + linker.
+        # Phase 0's `.cargo/config.toml` tried `linker = "clang"` (later
+        # removed); CI has been red since because no C toolchain was ever
+        # installed on the runner. Install one here so the toolchain is
+        # self-contained in the workflow rather than coupled to the runner image.
+        run: |
+          if command -v apt-get >/dev/null; then
+            if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+            $SUDO apt-get update
+            $SUDO apt-get install -y --no-install-recommends \
+              gcc libc6-dev pkg-config ca-certificates
+          else
+            echo "::warning::apt-get not available; assuming runner image already has cc/gcc"
+          fi
+          echo "cc → $(command -v cc || echo MISSING)"
+
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
@@ -44,6 +72,10 @@ jobs:
         working-directory: archive
     steps:
       - name: Runner preflight
+        # Override the job-level `working-directory: archive` because the
+        # repo hasn't been checked out yet — bash can't start in a
+        # non-existent dir.
+        working-directory: .
         run: |
           echo "--- uname ---"; uname -a
           echo "--- user ---"; id
