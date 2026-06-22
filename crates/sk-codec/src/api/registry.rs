@@ -29,7 +29,14 @@ impl ApiSpec {
 /// Every API key the Go broker registers in
 /// `archive/internal/broker/broker.go:555-891`. Phase 1 seeds with one
 /// entry; the rest land as their per-API modules are ported.
-pub const ALL: &[ApiSpec] = &[crate::api::api_versions::SPEC];
+pub const ALL: &[ApiSpec] = &[
+    crate::api::produce::SPEC,
+    crate::api::fetch::SPEC,
+    crate::api::list_offsets::SPEC,
+    crate::api::metadata::SPEC,
+    crate::api::init_producer_id::SPEC,
+    crate::api::api_versions::SPEC,
+];
 
 /// Look up the [`ApiSpec`] for a given API key, if registered.
 pub fn lookup(key: i16) -> Option<&'static ApiSpec> {

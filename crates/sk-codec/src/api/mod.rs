@@ -16,4 +16,10 @@
 //! correct ApiVersions response without per-module bookkeeping.
 
 pub mod api_versions;
+pub mod common;
+pub mod fetch;
+pub mod init_producer_id;
+pub mod list_offsets;
+pub mod metadata;
+pub mod produce;
 pub mod registry;
