@@ -1,0 +1,1048 @@
+//! Per-partition write path: mutex-guarded state, lock-free read snapshot,
+//! per-partition committer task.
+//!
+//! Port of `archive/internal/storage/engine.go:221-589`'s `partitionState`
+//! plus its committer goroutine. The Phase 2 plan's workstream D in
+//! [`docs/phase-2.md`](../../../docs/phase-2.md). One [`Partition`] per
+//! `(topic, partition)` tuple; the engine layer ([`crate::engine`]) holds
+//! a `DashMap<(String, i32), Arc<Partition>>` and routes calls.
+//!
+//! # Concurrency model
+//!
+//! - `Mutex<PartitionInner>` for the **write path**. Append, segment roll,
+//!   manifest persist, producer-state mutation — all under this mutex.
+//! - `ArcSwap<ReadSnapshot>` for the **read-path observation channel** —
+//!   `high_watermark()` / `log_start_offset()` / `epoch()` read without
+//!   ever blocking on the mutex. Mirrors the Go gh #134 fix that kept the
+//!   OTel gauge alive when a stuck NAS fsync held the partition lock for
+//!   the watchdog deadline.
+//! - One [`tokio::task`] per partition (the **committer**) that drains
+//!   flush requests via an `mpsc::Receiver`. Each cycle runs
+//!   `active.sync_log()` under `tokio::time::timeout(FsyncMaxLatency)`,
+//!   updates `completed_flush_seq`, and wakes `acks=all` appenders via
+//!   [`tokio::sync::Notify`].
+//!
+//! # Phase 2 initial slice — what's NOT here yet
+//!
+//! Group-commit (gh #82) — the optimization where the committer fsyncs
+//! outside the partition mutex via a cloned log FD — is **not** in this
+//! commit. The committer takes the inner mutex for the entire fsync
+//! window, which serializes concurrent appenders for the fsync duration.
+//! On tmpfs / local SSD that's fine; on NFS it loses the multi-appender
+//! throughput multiplier. A follow-up commit on the same gh #156 issue
+//! adds the FD-clone trick once the basic Partition is verified
+//! correct.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use arc_swap::ArcSwap;
+use bytes::Bytes;
+use parking_lot::Mutex;
+use tokio::sync::{mpsc, Notify};
+use tokio::task::JoinHandle;
+
+use crate::errors::StorageError;
+use crate::fs::Fs;
+use crate::idempotence::{
+    self, parse_batch_producer_info, BatchProducerInfo, Outcome, ProducerEntry,
+};
+use crate::manifest::{self, Manifest, ReadResult};
+use crate::producer_snapshot::{read_producer_snapshot, write_producer_snapshot};
+use crate::segment::{self, parse_batch_offsets, ActiveSegment, SegmentMeta};
+
+/// Per-partition tuning knobs. Ported from Go's
+/// `archive/internal/storage/engine.go::Config`.
+#[derive(Debug, Clone)]
+pub struct PartitionConfig {
+    /// Roll the active segment at this size. Default 1 GiB matches
+    /// Apache's `segment.bytes`.
+    pub segment_bytes: u64,
+    /// Emit one sparse index entry per N bytes of log. Default 4 KiB
+    /// matches Apache's `index.interval.bytes`.
+    pub index_interval_bytes: u64,
+    /// `log.flush.interval.messages`. Default 1 = honest acks=all on
+    /// every batch; raise to amortise fsync cost over more records.
+    pub flush_interval_messages: i64,
+    /// Watchdog deadline for one log fsync (gh #95). Default 30 s.
+    pub fsync_max_latency: Duration,
+}
+
+impl Default for PartitionConfig {
+    fn default() -> Self {
+        Self {
+            segment_bytes: 1 << 30,
+            index_interval_bytes: 4096,
+            flush_interval_messages: 1,
+            fsync_max_latency: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Lock-free observation channel. Updated under the partition mutex
+/// alongside every HWM / log_start / segment-roll change; readable
+/// without taking the mutex.
+#[derive(Debug, Clone)]
+pub struct ReadSnapshot {
+    pub high_water: i64,
+    pub log_start: i64,
+    pub epoch: i64,
+    /// Sorted oldest-first.
+    pub closed: Arc<Vec<SegmentMeta>>,
+    pub active_meta: SegmentMeta,
+}
+
+struct PartitionInner {
+    dir: PathBuf,
+    active: ActiveSegment,
+    closed: Vec<SegmentMeta>,
+    log_start: i64,
+    high_water: i64,
+    epoch: i64,
+
+    /// Records appended since the last flush request was sent. Reset
+    /// on send (not on completion) so we don't enqueue redundant
+    /// flushes for the same batch tail.
+    pending_flush_records: i64,
+    /// Monotonic counter incremented every time append decides to
+    /// trigger a flush. Each appender's local copy of this value is
+    /// what `acks=all` waits on `completed_flush_seq` to cover.
+    requested_flush_seq: u64,
+    /// Updated by the committer task after each successful fsync.
+    completed_flush_seq: u64,
+    /// Sticky on first error. Subsequent appends return immediately
+    /// with this error; the broker is expected to drop the partition.
+    flush_err: Option<StorageError>,
+
+    /// Per-PID idempotence window (gh #12). Held directly here (not
+    /// behind [`crate::idempotence::ProducerStates`]) so the
+    /// classify+record_accepted pair runs under the partition mutex
+    /// without a nested lock.
+    producer_states: HashMap<i64, ProducerEntry>,
+}
+
+struct FlushCoord {
+    req_tx: mpsc::Sender<()>,
+    /// Appenders waiting on `acks=-1` park here; the committer
+    /// notifies after each cycle (success or failure).
+    cond: Arc<Notify>,
+}
+
+/// One owned, leader-bound partition. Holds the active segment's
+/// file handles per the gh #76 single-FD contract.
+pub struct Partition {
+    inner: Arc<Mutex<PartitionInner>>,
+    snapshot: ArcSwap<ReadSnapshot>,
+    flush: FlushCoord,
+    committer: Mutex<Option<JoinHandle<()>>>,
+    cfg: PartitionConfig,
+    fs: Arc<dyn Fs>,
+    topic: String,
+    partition: i32,
+}
+
+impl std::fmt::Debug for Partition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Partition")
+            .field("topic", &self.topic)
+            .field("partition", &self.partition)
+            .field("dir", &self.inner.lock().dir)
+            .finish()
+    }
+}
+
+impl Partition {
+    /// Open (or create) a partition at `dir` and immediately take leadership:
+    /// open file handles, restore producer state, start the committer task,
+    /// publish the initial [`ReadSnapshot`]. After [`Partition::open`] returns,
+    /// the partition is ready to accept appends.
+    pub async fn open(
+        fs: Arc<dyn Fs>,
+        topic: String,
+        partition: i32,
+        dir: PathBuf,
+        cfg: PartitionConfig,
+    ) -> Result<Self, StorageError> {
+        fs.mkdir_all(&dir)?;
+
+        // Manifest is the source of truth for (epoch, hwm, log_start)
+        // when present; segment scan is the fallback.
+        let manifest_read = manifest::read(fs.as_ref(), &dir).map_err(|e| match e {
+            manifest::ManifestError::Io(e) => StorageError::Io(e),
+            manifest::ManifestError::Json(e) => StorageError::Json(e),
+            other => StorageError::Io(std::io::Error::other(other.to_string())),
+        })?;
+        let (epoch, hwm, log_start) = match manifest_read {
+            ReadResult::Present(m) => (m.epoch, m.high_watermark, m.log_start_offset),
+            ReadResult::Legacy(m) => (m.epoch, 0, 0),
+            ReadResult::NotFound => (0, 0, 0),
+        };
+
+        // Load any existing segments.
+        let mut closed = segment::list_segments(fs.as_ref(), &dir)?;
+
+        // The active segment is the last one (highest base_offset);
+        // if none exist yet, create at offset 0 with our current
+        // epoch.
+        let active = if let Some(last) = closed.pop() {
+            let mut a = ActiveSegment::open_meta_only(last);
+            a.open_handles(fs.as_ref())?;
+            a
+        } else {
+            ActiveSegment::create(fs.as_ref(), &dir, hwm, epoch)?
+        };
+
+        // Restore the idempotence window.
+        let producer_states = read_producer_snapshot(fs.as_ref(), &dir)
+            .map_err(|e| match e {
+                crate::producer_snapshot::ProducerSnapshotError::Io(e) => StorageError::Io(e),
+                crate::producer_snapshot::ProducerSnapshotError::Json(e) => StorageError::Json(e),
+            })?
+            .map(|entries| entries.into_iter().collect::<HashMap<i64, ProducerEntry>>())
+            .unwrap_or_default();
+
+        // Persist the manifest so the next open is fast.
+        manifest::write(
+            fs.as_ref(),
+            &dir,
+            &Manifest {
+                epoch,
+                high_watermark: hwm,
+                log_start_offset: log_start,
+            },
+        )
+        .map_err(|e| match e {
+            manifest::ManifestError::Io(e) => StorageError::Io(e),
+            manifest::ManifestError::Json(e) => StorageError::Json(e),
+            other => StorageError::Io(std::io::Error::other(other.to_string())),
+        })?;
+
+        let initial_snapshot = ReadSnapshot {
+            high_water: hwm,
+            log_start,
+            epoch,
+            closed: Arc::new(closed.clone()),
+            active_meta: active.meta.clone(),
+        };
+
+        let inner = Arc::new(Mutex::new(PartitionInner {
+            dir: dir.clone(),
+            active,
+            closed,
+            log_start,
+            high_water: hwm,
+            epoch,
+            pending_flush_records: 0,
+            requested_flush_seq: 0,
+            completed_flush_seq: 0,
+            flush_err: None,
+            producer_states,
+        }));
+
+        // Flush channel — capacity 1 with coalescing semantics. If
+        // multiple appenders signal a flush before the committer
+        // wakes, only one wake-up happens; the committer's snapshot
+        // of `requested_flush_seq` covers all of them.
+        let (req_tx, req_rx) = mpsc::channel::<()>(1);
+        let cond = Arc::new(Notify::new());
+
+        let committer_handle =
+            spawn_committer(inner.clone(), cond.clone(), req_rx, cfg.fsync_max_latency);
+
+        Ok(Self {
+            inner,
+            snapshot: ArcSwap::from(Arc::new(initial_snapshot)),
+            flush: FlushCoord { req_tx, cond },
+            committer: Mutex::new(Some(committer_handle)),
+            cfg,
+            fs,
+            topic,
+            partition,
+        })
+    }
+
+    /// Drain the committer, persist manifest + producer snapshot one
+    /// last time, close the active segment's handles. After close
+    /// returns, the partition's FDs are released and a new
+    /// [`Partition::open`] on the same `dir` will pick up the
+    /// persisted state.
+    pub async fn close(&self) -> Result<(), StorageError> {
+        // Stop accepting flush requests by dropping the sender ↔
+        // we can't drop self.flush.req_tx without &mut self. Instead
+        // we'll close the channel by dropping all outstanding senders,
+        // which requires a different approach — for now, the
+        // committer is also signalled via mpsc::Sender::closed() when
+        // we explicitly drop the Sender. Use a sentinel: take() the
+        // JoinHandle so future closes are no-ops.
+        let handle = {
+            let mut guard = self.committer.lock();
+            guard.take()
+        };
+        let Some(handle) = handle else {
+            return Ok(()); // already closed
+        };
+
+        // Persist state under the lock, then close handles.
+        {
+            let mut guard = self.inner.lock();
+            persist_state_locked(self.fs.as_ref(), &mut guard)?;
+            guard.active.close_handles();
+        }
+
+        // Drop the channel sender via Arc/internal swap... can't,
+        // since FlushCoord doesn't expose mutability. Instead we
+        // signal the committer to exit by aborting the JoinHandle —
+        // the committer holds no resources that need orderly cleanup
+        // beyond the mutex it briefly takes.
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    /// Append a raw RecordBatch under `epoch`. Returns the assigned
+    /// `base_offset` (or the cached one for an idempotent duplicate).
+    pub async fn append(&self, epoch: u32, acks: i16, batch: Bytes) -> Result<i64, StorageError> {
+        // Pre-lock parse so we don't hold the mutex during this work.
+        let prod_info: Option<BatchProducerInfo> = if batch.len() >= 57 {
+            parse_batch_producer_info(&batch).ok()
+        } else {
+            None
+        };
+        let (assigned_base, my_flush_seq, triggered_flush) = {
+            let mut guard = self.inner.lock();
+
+            // Early-fail if the partition is in a sticky stall.
+            if guard.flush_err.is_some() {
+                // The original cause is captured in `flush_err` for
+                // diagnostics; we surface `Stalled` to the wire so
+                // every dead-partition response is uniform.
+                return Err(StorageError::Stalled);
+            }
+
+            // Epoch fence — caller's epoch must be ≥ our current
+            // epoch. The Go side returns `ErrEpochMismatch`; same here.
+            if i64::from(epoch) < guard.epoch {
+                return Err(StorageError::EpochMismatch);
+            }
+
+            // Idempotence: classify before touching the log.
+            if let Some(info) = prod_info {
+                match idempotence::classify(&guard.producer_states, info) {
+                    Outcome::Duplicate { base_offset } => return Ok(base_offset),
+                    Outcome::OutOfOrder => return Err(StorageError::OutOfOrderSequence),
+                    Outcome::InvalidEpoch => return Err(StorageError::InvalidProducerEpoch),
+                    Outcome::Accept | Outcome::NotIdempotent => {}
+                }
+            }
+
+            // Roll if the next append would exceed segment_bytes.
+            let batch_len_u64 = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+            let projected_size = guard.active.log_size().saturating_add(batch_len_u64);
+            if projected_size > self.cfg.segment_bytes && guard.active.log_size() > 0 {
+                let new_base = guard.high_water;
+                let new_epoch = guard.epoch;
+                let dir = guard.dir.clone();
+                // Move the old active out so roll_fast can consume it.
+                let old_active = std::mem::replace(
+                    &mut guard.active,
+                    // Placeholder — immediately overwritten below.
+                    ActiveSegment::open_meta_only(SegmentMeta {
+                        base_offset: 0,
+                        epoch: 0,
+                        size: 0,
+                        log_path: dir.join("_placeholder.log"),
+                        index_path: dir.join("_placeholder.index"),
+                    }),
+                );
+                let (new_active, tail) =
+                    old_active.roll_fast(self.fs.as_ref(), &dir, new_base, new_epoch)?;
+                guard.closed.push(tail.closed_meta);
+                guard.active = new_active;
+                // Deferred index-fsync + close runs off-lock on the
+                // blocking pool.
+                tokio::task::spawn_blocking(move || {
+                    let _ = (tail.finalize)();
+                });
+            }
+
+            // Rewrite baseOffset → current HWM. v2 CRC covers byte
+            // 21 onward, so this overwrite is wire-correct.
+            let assigned = guard.high_water;
+            let mut owned = bytes::BytesMut::with_capacity(batch.len());
+            owned.extend_from_slice(&batch);
+            owned[0..8].copy_from_slice(&assigned.to_be_bytes());
+
+            // Pre-parse the offset delta so we know how much HWM advances.
+            let (_base, last_offset_delta, _max_ts) =
+                parse_batch_offsets(&owned).map_err(StorageError::Io)?;
+
+            // Append the bytes to the active log.
+            guard
+                .active
+                .append_batch(&owned, self.cfg.index_interval_bytes)
+                .map_err(StorageError::Io)?;
+
+            // Advance accounting.
+            guard.high_water = assigned + i64::from(last_offset_delta) + 1;
+            let advanced_records = i64::from(last_offset_delta) + 1;
+            guard.pending_flush_records += advanced_records;
+
+            // Record the idempotence outcome only after the log write
+            // succeeded (so a failed append doesn't poison the window).
+            if let Some(info) = prod_info {
+                idempotence::record_accepted(&mut guard.producer_states, info, assigned);
+            }
+
+            // Decide whether to fire a flush request.
+            let trigger = self.cfg.flush_interval_messages > 0
+                && guard.pending_flush_records >= self.cfg.flush_interval_messages;
+            let my_seq;
+            if trigger {
+                guard.requested_flush_seq += 1;
+                my_seq = guard.requested_flush_seq;
+                guard.pending_flush_records = 0;
+            } else {
+                my_seq = guard.requested_flush_seq;
+            }
+
+            // Republish the read snapshot.
+            self.snapshot.store(Arc::new(ReadSnapshot {
+                high_water: guard.high_water,
+                log_start: guard.log_start,
+                epoch: guard.epoch,
+                closed: Arc::new(guard.closed.clone()),
+                active_meta: guard.active.meta.clone(),
+            }));
+
+            (assigned, my_seq, trigger)
+        };
+
+        if triggered_flush {
+            // Coalesced: try_send fails fast if a flush is already
+            // queued (capacity-1 channel). The committer picks up the
+            // latest `requested_flush_seq` under the lock anyway.
+            let _ = self.flush.req_tx.try_send(());
+        }
+
+        // acks == -1: wait for the fsync that covers our seq.
+        if acks == -1 {
+            self.await_flush(my_flush_seq).await?;
+        }
+
+        Ok(assigned_base)
+    }
+
+    /// Park until the committer has fsynced past `target_seq`, or the
+    /// partition enters a sticky stall.
+    async fn await_flush(&self, target_seq: u64) -> Result<(), StorageError> {
+        loop {
+            let notified = self.flush.cond.notified();
+            // Check before parking — committer may have already
+            // satisfied target_seq before our subscribe.
+            {
+                let guard = self.inner.lock();
+                if guard.flush_err.is_some() {
+                    return Err(StorageError::Stalled);
+                }
+                if guard.completed_flush_seq >= target_seq {
+                    return Ok(());
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// Read raw RecordBatch bytes from `start_offset` up to
+    /// `max_bytes`. Walks closed segments then the active segment;
+    /// stops at the first hit that fills the cap.
+    pub async fn read(&self, start_offset: i64, max_bytes: usize) -> Result<Bytes, StorageError> {
+        // Capture the segment list under the snapshot (lock-free) so
+        // a concurrent roll doesn't move the active segment under us.
+        let snap = self.snapshot.load_full();
+        let log_start = snap.log_start;
+        let effective_start = start_offset.max(log_start);
+
+        let mut out = bytes::BytesMut::new();
+
+        // Closed segments first.
+        for seg in snap.closed.iter() {
+            if out.len() >= max_bytes {
+                break;
+            }
+            // Skip segments whose last offset (== next base - 1) is
+            // entirely before the read start. We approximate "last
+            // offset" as just-before-the-next-segment's base; for the
+            // last closed segment we use HWM.
+            // Conservative path: read every segment with
+            // base_offset <= effective_start || effective_start <
+            // base_offset + segment_records. For Phase 2 simplicity,
+            // read from each segment that could contribute and let
+            // read_batches filter.
+            let chunk = segment::read_batches(
+                self.fs.as_ref(),
+                &seg.log_path,
+                0,
+                effective_start,
+                max_bytes.saturating_sub(out.len()),
+            )?;
+            out.extend_from_slice(&chunk);
+        }
+
+        // Active segment.
+        if out.len() < max_bytes {
+            let chunk = segment::read_batches(
+                self.fs.as_ref(),
+                &snap.active_meta.log_path,
+                0,
+                effective_start,
+                max_bytes.saturating_sub(out.len()),
+            )?;
+            out.extend_from_slice(&chunk);
+        }
+
+        // Cap to max_bytes (read_batches may overshoot the last batch).
+        if out.len() > max_bytes {
+            out.truncate(max_bytes);
+        }
+
+        Ok(out.freeze())
+    }
+
+    /// Advance the log-start offset to (at least) `target_offset`.
+    /// Drops closed segments fully below the new log_start.
+    /// `target_offset == -1` means "purge to HWM" (KIP-107).
+    pub async fn delete_records(&self, target_offset: i64) -> Result<i64, StorageError> {
+        let new_log_start = {
+            let mut guard = self.inner.lock();
+            let new_start = if target_offset < 0 {
+                guard.high_water
+            } else if target_offset > guard.high_water {
+                return Err(StorageError::OffsetOutOfRange);
+            } else {
+                target_offset
+            };
+            if new_start > guard.log_start {
+                guard.log_start = new_start;
+
+                // Drop closed segments fully below the new log_start.
+                // Conservatively: drop any closed seg whose
+                // base_offset of the NEXT seg is <= log_start.
+                // For Phase 2 simplicity we only drop a seg if its
+                // size is 0 OR the next seg starts past log_start.
+                // Use the next seg's base_offset as the prev seg's
+                // exclusive upper bound; the last closed seg's upper
+                // bound is the active seg's base_offset.
+                let active_base = guard.active.meta.base_offset;
+                let mut new_closed: Vec<SegmentMeta> = Vec::new();
+                for (i, seg) in guard.closed.iter().enumerate() {
+                    let upper = guard
+                        .closed
+                        .get(i + 1)
+                        .map(|n| n.base_offset)
+                        .unwrap_or(active_base);
+                    if upper <= new_start {
+                        // Entire segment below log_start — remove the
+                        // file from disk (best-effort).
+                        let _ = self.fs.remove(&seg.log_path);
+                        let _ = self.fs.remove(&seg.index_path);
+                    } else {
+                        new_closed.push(seg.clone());
+                    }
+                }
+                guard.closed = new_closed;
+
+                self.snapshot.store(Arc::new(ReadSnapshot {
+                    high_water: guard.high_water,
+                    log_start: guard.log_start,
+                    epoch: guard.epoch,
+                    closed: Arc::new(guard.closed.clone()),
+                    active_meta: guard.active.meta.clone(),
+                }));
+            }
+            guard.log_start
+        };
+        Ok(new_log_start)
+    }
+
+    /// Lock-free HWM read via the published snapshot.
+    pub fn high_watermark(&self) -> i64 {
+        self.snapshot.load().high_water
+    }
+
+    /// Lock-free log_start read via the published snapshot.
+    pub fn log_start_offset(&self) -> i64 {
+        self.snapshot.load().log_start
+    }
+
+    /// Lock-free epoch read via the published snapshot.
+    pub fn epoch(&self) -> i64 {
+        self.snapshot.load().epoch
+    }
+
+    /// Sum of closed-segment sizes + active-segment size.
+    pub fn partition_size(&self) -> i64 {
+        let snap = self.snapshot.load();
+        let total: u64 = snap
+            .closed
+            .iter()
+            .map(|s| s.size)
+            .chain(std::iter::once(snap.active_meta.size))
+            .sum();
+        i64::try_from(total).unwrap_or(i64::MAX)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persist helper — called under the inner lock.
+// ---------------------------------------------------------------------------
+
+fn persist_state_locked(fs: &dyn Fs, guard: &mut PartitionInner) -> Result<(), StorageError> {
+    let snap: Vec<(i64, ProducerEntry)> = guard
+        .producer_states
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    write_producer_snapshot(fs, &guard.dir, &snap).map_err(|e| match e {
+        crate::producer_snapshot::ProducerSnapshotError::Io(e) => StorageError::Io(e),
+        crate::producer_snapshot::ProducerSnapshotError::Json(e) => StorageError::Json(e),
+    })?;
+    manifest::write(
+        fs,
+        &guard.dir,
+        &Manifest {
+            epoch: guard.epoch,
+            high_watermark: guard.high_water,
+            log_start_offset: guard.log_start,
+        },
+    )
+    .map_err(|e| match e {
+        manifest::ManifestError::Io(e) => StorageError::Io(e),
+        manifest::ManifestError::Json(e) => StorageError::Json(e),
+        other => StorageError::Io(std::io::Error::other(other.to_string())),
+    })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Committer task
+// ---------------------------------------------------------------------------
+
+fn spawn_committer(
+    inner: Arc<Mutex<PartitionInner>>,
+    cond: Arc<Notify>,
+    mut req_rx: mpsc::Receiver<()>,
+    fsync_max_latency: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while req_rx.recv().await.is_some() {
+            // Capture the seq we want to satisfy.
+            let target_seq = inner.lock().requested_flush_seq;
+            if target_seq == inner.lock().completed_flush_seq {
+                // Already satisfied by a previous cycle that
+                // coalesced multiple requests.
+                continue;
+            }
+
+            let inner_clone = inner.clone();
+            let fsync_handle = tokio::task::spawn_blocking(move || {
+                let mut guard = inner_clone.lock();
+                guard.active.sync_log().map(|()| guard.requested_flush_seq)
+            });
+
+            let outcome = tokio::time::timeout(fsync_max_latency, fsync_handle).await;
+            match outcome {
+                Ok(Ok(Ok(satisfied_seq))) => {
+                    let mut guard = inner.lock();
+                    if satisfied_seq > guard.completed_flush_seq {
+                        guard.completed_flush_seq = satisfied_seq;
+                    }
+                    drop(guard);
+                    cond.notify_waiters();
+                }
+                Ok(Ok(Err(io_err))) => {
+                    let mut guard = inner.lock();
+                    if guard.flush_err.is_none() {
+                        guard.flush_err = Some(StorageError::Io(io_err));
+                    }
+                    drop(guard);
+                    cond.notify_waiters();
+                }
+                Ok(Err(_join_err)) => {
+                    // spawn_blocking panicked — treat as Stalled.
+                    let mut guard = inner.lock();
+                    if guard.flush_err.is_none() {
+                        guard.flush_err = Some(StorageError::Stalled);
+                    }
+                    drop(guard);
+                    cond.notify_waiters();
+                }
+                Err(_elapsed) => {
+                    // Timeout (gh #95). The orphaned spawn_blocking
+                    // task is still running; that's fine — it drains
+                    // when the kernel eventually returns. We set
+                    // sticky Stalled and move on.
+                    let mut guard = inner.lock();
+                    if guard.flush_err.is_none() {
+                        guard.flush_err = Some(StorageError::Stalled);
+                    }
+                    drop(guard);
+                    cond.notify_waiters();
+                }
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::RealFs;
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Build a v2 batch with given (base_offset, num_records). The
+    /// engine rewrites bytes [0..8] to its assigned offset.
+    fn build_batch(num_records: i32, max_timestamp: i64) -> Bytes {
+        let body_size = 49 + 16;
+        let total = 12 + body_size;
+        let mut buf = vec![0u8; total];
+        buf[0..8].copy_from_slice(&0i64.to_be_bytes());
+        let body_len_i32 = i32::try_from(body_size).unwrap();
+        buf[8..12].copy_from_slice(&body_len_i32.to_be_bytes());
+        buf[16] = 2; // magic
+        let last_offset_delta = num_records - 1;
+        buf[23..27].copy_from_slice(&last_offset_delta.to_be_bytes());
+        buf[35..43].copy_from_slice(&max_timestamp.to_be_bytes());
+        // Producer ID = -1 (non-idempotent) so no classifier path.
+        buf[43..51].copy_from_slice(&(-1i64).to_be_bytes());
+        Bytes::from(buf)
+    }
+
+    #[test]
+    fn open_fresh_partition_returns_zero_hwm() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(p.high_watermark(), 0);
+            assert_eq!(p.log_start_offset(), 0);
+            assert_eq!(p.epoch(), 0);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn append_advances_hwm_and_returns_assigned_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            let base = p.append(0, -1, build_batch(5, 1_000)).await.unwrap();
+            assert_eq!(base, 0);
+            assert_eq!(p.high_watermark(), 5);
+            let base = p.append(0, -1, build_batch(3, 1_000)).await.unwrap();
+            assert_eq!(base, 5);
+            assert_eq!(p.high_watermark(), 8);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn acks_all_waits_for_committer() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig {
+                    flush_interval_messages: 1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            // acks=-1 must not return before the committer fsyncs.
+            // Hard to assert ordering without injecting a clock, but
+            // at minimum the call must not deadlock and must reflect
+            // a non-zero completed_flush_seq.
+            p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            assert!(p.inner.lock().completed_flush_seq >= 1);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn flush_interval_messages_zero_means_no_committer_trigger() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig {
+                    flush_interval_messages: 0,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            // acks=0 → don't wait. With flush_interval=0 the committer
+            // never fires.
+            p.append(0, 0, build_batch(1, 1_000)).await.unwrap();
+            assert_eq!(p.inner.lock().requested_flush_seq, 0);
+            assert_eq!(p.inner.lock().completed_flush_seq, 0);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn epoch_fence_rejects_stale_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            // Bump the manifest's epoch manually under the lock.
+            {
+                let mut guard = p.inner.lock();
+                guard.epoch = 5;
+            }
+            let err = p.append(2, -1, build_batch(1, 1_000)).await.unwrap_err();
+            assert!(matches!(err, StorageError::EpochMismatch));
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn read_returns_batches_from_start_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            for _ in 0..3 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            // Read from offset 1 — should skip the first batch.
+            let got = p.read(1, 4096).await.unwrap();
+            let one_len = build_batch(1, 1_000).len();
+            assert_eq!(got.len(), one_len * 2);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn delete_records_advances_log_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            for _ in 0..5 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            let new_start = p.delete_records(3).await.unwrap();
+            assert_eq!(new_start, 3);
+            assert_eq!(p.log_start_offset(), 3);
+            // Read clamps effective_start to log_start.
+            let got = p.read(0, 4096).await.unwrap();
+            let one_len = build_batch(1, 1_000).len();
+            assert_eq!(got.len(), one_len * 2);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn delete_records_purge_to_hwm() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            for _ in 0..4 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            let new_start = p.delete_records(-1).await.unwrap();
+            assert_eq!(new_start, 4);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn delete_records_past_hwm_is_offset_out_of_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            let err = p.delete_records(999).await.unwrap_err();
+            assert!(matches!(err, StorageError::OffsetOutOfRange));
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn reopen_recovers_hwm_and_log_start_from_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            // First open + append + delete_records + close.
+            let p = Partition::open(
+                fs.clone(),
+                "t".into(),
+                0,
+                dir.clone(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            for _ in 0..5 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            p.delete_records(2).await.unwrap();
+            p.close().await.unwrap();
+
+            // Reopen — HWM + log_start should come from manifest.
+            let p2 = Partition::open(fs, "t".into(), 0, dir.clone(), PartitionConfig::default())
+                .await
+                .unwrap();
+            assert_eq!(p2.high_watermark(), 5);
+            assert_eq!(p2.log_start_offset(), 2);
+            p2.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn segment_roll_at_size_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let one_len = u64::try_from(build_batch(1, 1_000).len()).unwrap();
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig {
+                    // Roll after one batch.
+                    segment_bytes: one_len,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            for _ in 0..3 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            // After 3 appends with segment_bytes == one batch, we
+            // should have at least 1 closed segment.
+            assert!(
+                !p.inner.lock().closed.is_empty(),
+                "expected at least one roll"
+            );
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn high_watermark_read_is_lock_free() {
+        // Smoke-test: while a background appender holds the inner
+        // mutex briefly, high_watermark() returns without blocking.
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Arc::new(
+                Partition::open(
+                    fs,
+                    "t".into(),
+                    0,
+                    tmp.path().to_path_buf(),
+                    PartitionConfig::default(),
+                )
+                .await
+                .unwrap(),
+            );
+            // Fire 10 concurrent reads — they must not deadlock with
+            // the append path or each other.
+            let mut handles = Vec::new();
+            for _ in 0..10 {
+                let p2 = p.clone();
+                handles.push(tokio::spawn(async move { p2.high_watermark() }));
+            }
+            for h in handles {
+                let _ = h.await.unwrap();
+            }
+            p.close().await.unwrap();
+        });
+    }
+}

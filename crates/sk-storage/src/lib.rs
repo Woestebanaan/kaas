@@ -29,6 +29,7 @@ pub mod fs;
 pub mod idempotence;
 pub mod manifest;
 pub mod memory;
+pub mod partition;
 pub mod producer_snapshot;
 pub mod segment;
 pub mod topicconfig;
@@ -42,6 +43,7 @@ pub use idempotence::{
 };
 pub use manifest::Manifest;
 pub use memory::{MemoryStorage, MEMORY_DATA_DIR};
+pub use partition::{Partition, PartitionConfig, ReadSnapshot};
 pub use producer_snapshot::{
     read_producer_snapshot, write_producer_snapshot, ProducerSnapshot, ProducerSnapshotEntry,
     PRODUCER_SNAPSHOT_FILENAME, PRODUCER_SNAPSHOT_VERSION,
