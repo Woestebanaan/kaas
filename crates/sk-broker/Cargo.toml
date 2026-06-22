@@ -9,8 +9,21 @@ publish      = false
 description  = "Broker glue: Coordinator (assignment.json watcher), takeover, heartbeat client."
 
 [dependencies]
-prost = { workspace = true }
-tonic = { workspace = true }
+async-trait = { workspace = true }
+bytes       = { workspace = true }
+parking_lot = { workspace = true }
+prost       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+sk-codec    = { path = "../sk-codec" }
+sk-protocol = { path = "../sk-protocol" }
+sk-storage  = { path = "../sk-storage" }
+thiserror   = { workspace = true }
+tonic       = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [build-dependencies]
 tonic-build         = { workspace = true }

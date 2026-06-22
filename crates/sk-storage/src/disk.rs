@@ -255,6 +255,10 @@ impl StorageEngine for DiskStorageEngine {
         }
         Ok(())
     }
+
+    async fn drain(&self) -> Result<(), StorageError> {
+        self.relinquish_all().await
+    }
 }
 
 #[cfg(test)]

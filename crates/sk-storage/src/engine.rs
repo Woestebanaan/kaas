@@ -126,4 +126,12 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Release write ownership.
     async fn relinquish(&self, topic: &str, partition: i32) -> Result<(), StorageError>;
+
+    /// SIGTERM-time drain: close every open partition so the next
+    /// leader doesn't hit NFS silly-rename pain on takeover
+    /// (gh #61 + gh #139). Default impl is a no-op — `MemoryStorage`
+    /// has nothing to release; `DiskStorageEngine` overrides.
+    async fn drain(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
