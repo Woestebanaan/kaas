@@ -23,6 +23,7 @@
 //! Phase 2 plan.
 
 pub mod atomic_write;
+pub mod cleaner;
 pub mod disk;
 pub mod engine;
 pub mod errors;
@@ -35,6 +36,7 @@ pub mod producer_snapshot;
 pub mod segment;
 pub mod topicconfig;
 
+pub use cleaner::{FixedPolicySource, PolicySource, RetentionCleaner, RetentionPolicy};
 pub use disk::DiskStorageEngine;
 pub use engine::StorageEngine;
 pub use errors::StorageError;

@@ -609,6 +609,54 @@ impl Partition {
             .sum();
         i64::try_from(total).unwrap_or(i64::MAX)
     }
+
+    /// Size-based retention: return the `target_offset` that
+    /// [`Partition::delete_records`] should advance to in order to
+    /// keep the partition under `retention_bytes`. Returns `None`
+    /// when no cleanup is needed.
+    ///
+    /// Lock-free — reads via the [`ReadSnapshot`] only. Closed
+    /// segments are walked oldest-first; segments are virtually
+    /// dropped while `cumulative_size <= surplus`. The returned
+    /// offset is the `base_offset` of the first segment we KEEP,
+    /// or the active segment's `base_offset` if all closed segments
+    /// would be dropped (active is never touched here —
+    /// `DeleteRecords` handles active-segment reclaim).
+    pub fn cleanup_target_for_size_bytes(&self, retention_bytes: u64) -> Option<i64> {
+        let snap = self.snapshot.load();
+        let active_size = snap.active_meta.size;
+        let active_base = snap.active_meta.base_offset;
+        let closed_sizes: Vec<u64> = snap.closed.iter().map(|s| s.size).collect();
+        let total: u64 = closed_sizes.iter().sum::<u64>().saturating_add(active_size);
+        if total <= retention_bytes {
+            return None;
+        }
+        let mut surplus = total - retention_bytes;
+        // Walk oldest-first.
+        for (i, seg) in snap.closed.iter().enumerate() {
+            if seg.size > surplus {
+                // Dropping this segment would over-shoot retention.
+                // Stop here — keep this segment, return its base.
+                return Some(seg.base_offset);
+            }
+            surplus -= seg.size;
+            if surplus == 0 {
+                // Exactly at retention after dropping up to and
+                // including segment `i`. Target = next segment's
+                // base (or active if this was the last closed).
+                return Some(
+                    snap.closed
+                        .get(i + 1)
+                        .map(|n| n.base_offset)
+                        .unwrap_or(active_base),
+                );
+            }
+        }
+        // Dropping all closed segments still leaves a surplus
+        // (active alone exceeds retention). Cap at active_base —
+        // the active segment is not reclaimed by the cleaner.
+        Some(active_base)
+    }
 }
 
 // ---------------------------------------------------------------------------

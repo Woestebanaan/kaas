@@ -89,6 +89,22 @@ impl DiskStorageEngine {
         }
     }
 
+    /// Snapshot the currently-open partition keys. Lets the retention
+    /// cleaner iterate without holding DashMap shards across await
+    /// points.
+    pub fn iter_partition_keys(&self) -> Vec<(String, i32)> {
+        self.partitions.iter().map(|kv| kv.key().clone()).collect()
+    }
+
+    /// Look up a currently-open [`Partition`] by `(topic, partition)`.
+    /// Returns `None` if the partition is not open in this engine
+    /// (the cleaner / compactor skip it).
+    pub fn partition(&self, topic: &str, partition: i32) -> Option<Arc<Partition>> {
+        self.partitions
+            .get(&(topic.to_owned(), partition))
+            .map(|e| e.value().clone())
+    }
+
     /// Close every open partition (drain committers, persist state,
     /// release FDs). Used by the SIGTERM drain path (gh #61 + gh #139).
     pub async fn relinquish_all(&self) -> Result<(), StorageError> {
