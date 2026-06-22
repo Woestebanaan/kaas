@@ -1079,6 +1079,7 @@ name = "sk-storage"
 version = "0.0.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "bytes",
  "dashmap",
  "parking_lot",

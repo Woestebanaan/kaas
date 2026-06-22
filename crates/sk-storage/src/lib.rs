@@ -23,14 +23,17 @@
 //! Phase 2 plan.
 
 pub mod atomic_write;
+pub mod engine;
 pub mod errors;
 pub mod fs;
 pub mod idempotence;
 pub mod manifest;
+pub mod memory;
 pub mod producer_snapshot;
 pub mod segment;
 pub mod topicconfig;
 
+pub use engine::StorageEngine;
 pub use errors::StorageError;
 pub use fs::{Fs, RealFs};
 pub use idempotence::{
@@ -38,6 +41,7 @@ pub use idempotence::{
     RecentBatch, RING_SIZE,
 };
 pub use manifest::Manifest;
+pub use memory::{MemoryStorage, MEMORY_DATA_DIR};
 pub use producer_snapshot::{
     read_producer_snapshot, write_producer_snapshot, ProducerSnapshot, ProducerSnapshotEntry,
     PRODUCER_SNAPSHOT_FILENAME, PRODUCER_SNAPSHOT_VERSION,
