@@ -12,5 +12,20 @@ description  = "skafka broker binary."
 name = "skafka"
 path = "src/main.rs"
 
+[dependencies]
+anyhow             = { workspace = true }
+sk-broker          = { path = "../../crates/sk-broker" }
+sk-codec           = { path = "../../crates/sk-codec" }
+sk-protocol        = { path = "../../crates/sk-protocol" }
+sk-storage         = { path = "../../crates/sk-storage" }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+bytes      = { workspace = true }
+tempfile   = { workspace = true }
+
 [lints]
 workspace = true
