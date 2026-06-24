@@ -19,6 +19,9 @@ rustls-pemfile     = { workspace = true }
 sk-auth            = { path = "../../crates/sk-auth" }
 sk-broker          = { path = "../../crates/sk-broker" }
 sk-codec           = { path = "../../crates/sk-codec" }
+sk-controller      = { path = "../../crates/sk-controller" }
+sk-coordinator     = { path = "../../crates/sk-coordinator" }
+sk-k8s             = { path = "../../crates/sk-k8s" }
 sk-protocol        = { path = "../../crates/sk-protocol" }
 sk-storage         = { path = "../../crates/sk-storage" }
 tokio              = { workspace = true }

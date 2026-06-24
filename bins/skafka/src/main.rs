@@ -1,9 +1,16 @@
 //! skafka broker binary.
 //!
-//! Phase 4: per-listener auth + cluster-wide authorization + quotas.
-//! Listens on every configured listener, serves Produce / Fetch /
-//! ListOffsets / Metadata / ApiVersions / InitProducerId / SASL
-//! against either an on-disk or in-memory storage engine.
+//! Phase 5: per-listener auth + cluster-wide authorization +
+//! quotas + consumer-group coordinator + assignment-driven
+//! ownership. Listens on every configured listener, serves
+//! Produce / Fetch / ListOffsets / Metadata / ApiVersions /
+//! InitProducerId / SASL + the full key 8–16 / 42 / 47
+//! consumer-group surface against either an on-disk or in-memory
+//! storage engine.
+//!
+//! Cluster bring-up lives in [`cluster::install`] — see that
+//! module for the dev / single-broker-disk / cluster mode
+//! decision tree.
 //!
 //! Storage selection:
 //! - `SKAFKA_DATA_DIR` set → `DiskStorageEngine` rooted there.
@@ -14,6 +21,8 @@
 //! `SKAFKA_SUPER_USERS` / `SKAFKA_SSL_PRINCIPAL_MAPPING_RULES`).
 //! `auth_disabled=true` forces `AllowAllAuthorizer` + `NoQuotaChecker`
 //! across the board.
+
+mod cluster;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -72,12 +81,28 @@ async fn main() -> Result<()> {
     let auth = build_auth(&cli)?;
     let broker = Arc::new(Broker::with_auth(
         engine.clone(),
-        topics,
+        topics.clone(),
         cli.cluster_id.clone(),
         cli.broker_id,
         auth.authorizer.clone(),
         auth.quotas.clone(),
     ));
+
+    let cancel = CancellationToken::new();
+
+    // Phase 5: bring up the consumer-group Manager + (in disk
+    // mode) the Coordinator + AssignmentLoop + takeover drivers.
+    // install() is a no-op for the Phase-3/4 surface — it only
+    // adds capabilities, never replaces them.
+    let cluster_rt = cluster::install(
+        broker.clone(),
+        topics.clone(),
+        engine.clone(),
+        cli.data_dir.clone(),
+        cli.broker_id,
+        &cli.cluster_id,
+        cancel.clone(),
+    )?;
 
     // Spawn the credential / ACL reloader before the listeners go up
     // so the first served request sees the latest disk state.
@@ -87,7 +112,6 @@ async fn main() -> Result<()> {
     let listeners = parse_listeners(&cli.listeners, &auth.engines, &auth.principal_mapper)?;
     let server = Server::new(ServerConfigBuilder::new(listeners), Arc::new(dispatcher));
 
-    let cancel = CancellationToken::new();
     let serve_cancel = cancel.clone();
     let serve = tokio::spawn(async move { server.serve(serve_cancel).await });
 
@@ -98,6 +122,12 @@ async fn main() -> Result<()> {
         Ok(Ok(())) => {}
         Ok(Err(err)) => warn!(%err, "server task ended with error"),
         Err(join_err) => warn!(%join_err, "server task join error"),
+    }
+
+    // Abort cluster background tasks before draining storage so
+    // their in-flight writes don't race the drain.
+    for handle in cluster_rt.tasks {
+        handle.abort();
     }
 
     info!("draining storage engine");
