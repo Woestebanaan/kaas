@@ -7,19 +7,39 @@
 //! generated at build time by `tonic-build` from
 //! `proto/heartbeat.proto` and is Phase-5-consumer-only for now.
 
+pub mod assignment;
 pub mod broker;
 pub mod cli;
+pub mod coordinator;
+pub mod group_hash;
+pub mod group_takeover;
 pub mod handlers;
 pub mod local_lease;
+pub mod self_fence;
+pub mod takeover;
 pub mod topic_registry;
 
+pub use assignment::{
+    Assignment, AssignmentChangeHandler, BrokerAssignment, BrokerHealth, ConsumerGroupAssignment,
+    PartitionAssignment, PartitionRole,
+};
 pub use broker::Broker;
 pub use cli::{Cli, ListenerEntry, TlsConfig as CliTlsConfig};
+pub use coordinator::{
+    partition_key, Coordinator, HeartbeatSource, LeaseEpochSource, LocalHeartbeat, LocalLeaseEpoch,
+};
+pub use group_hash::{
+    coordinator_slot, group_coordinator_slot, pick_coordinator, pick_group_coordinator,
+    pick_txn_coordinator, txn_coordinator_slot,
+};
+pub use group_takeover::GroupTakeoverDriver;
 pub use handlers::{
     ApiVersionsHandler, FetchHandler, InitProducerIdHandler, ListOffsetsHandler, MetadataHandler,
     ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
 };
 pub use local_lease::LocalLeaseManager;
+pub use self_fence::{is_heartbeat_fresh, DEFAULT_HEARTBEAT_TIMEOUT};
+pub use takeover::TakeoverDriver;
 pub use topic_registry::{ConfigError as TopicConfigError, TopicMeta, TopicRegistry};
 
 pub mod heartbeatpb {

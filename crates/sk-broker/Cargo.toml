@@ -9,23 +9,28 @@ publish      = false
 description  = "Broker glue: Coordinator (assignment.json watcher), takeover, heartbeat client."
 
 [dependencies]
-async-trait = { workspace = true }
-bytes       = { workspace = true }
-parking_lot = { workspace = true }
-prost       = { workspace = true }
-serde       = { workspace = true }
-serde_json  = { workspace = true }
-sk-auth     = { path = "../sk-auth" }
-sk-codec    = { path = "../sk-codec" }
-sk-protocol = { path = "../sk-protocol" }
-sk-storage  = { path = "../sk-storage" }
-thiserror   = { workspace = true }
-tonic       = { workspace = true }
-tracing     = { workspace = true }
+arc-swap       = { workspace = true }
+async-trait    = { workspace = true }
+bytes          = { workspace = true }
+notify         = { workspace = true }
+parking_lot    = { workspace = true }
+prost          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+sk-auth        = { path = "../sk-auth" }
+sk-codec       = { path = "../sk-codec" }
+sk-coordinator = { path = "../sk-coordinator" }
+sk-protocol    = { path = "../sk-protocol" }
+sk-storage     = { path = "../sk-storage" }
+thiserror      = { workspace = true }
+tokio          = { workspace = true }
+tonic          = { workspace = true }
+tracing        = { workspace = true }
 
 [dev-dependencies]
-sk-auth = { path = "../sk-auth", features = ["test-helpers"] }
-tokio   = { workspace = true }
+sk-auth  = { path = "../sk-auth", features = ["test-helpers"] }
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 
 [build-dependencies]
 tonic-build         = { workspace = true }

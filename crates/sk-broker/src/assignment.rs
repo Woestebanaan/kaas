@@ -1,0 +1,213 @@
+//! Cluster assignment — Rust analogue of Go's `kafkaapi.Assignment`.
+//!
+//! `<data_dir>/__cluster/assignment.json` is the authoritative cluster
+//! state: which broker leads which partition (and serves which
+//! consumer group) at which epoch. The controller broker is the only
+//! writer; every other broker is a reader and observes changes via
+//! [`Coordinator`].
+//!
+//! Serde shape matches the Go side byte-for-byte (`camelCase` field
+//! names, `RFC3339Nano` timestamp encoding) so a Rust-written file
+//! decodes cleanly under the Go reader and vice-versa — the Phase 9
+//! cutover requirement.
+//!
+//! [`Coordinator`]: crate::coordinator::Coordinator
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// Health of one broker, as recorded by the controller.
+///
+/// The hash routing in [`crate::group_hash::pick_coordinator`] treats
+/// only [`BrokerHealth::Alive`] as "available to coordinate";
+/// `Draining` brokers fall through to the deterministic alternate
+/// alive broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrokerHealth {
+    Alive,
+    Draining,
+    Dead,
+}
+
+/// Role a broker plays for a partition. Skafka is single-writer-per-
+/// partition so the only role today is `Leader`; the field is kept
+/// for forward compatibility with a v2 replicated extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PartitionRole {
+    Leader,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerAssignment {
+    pub id: String,
+    pub health: BrokerHealth,
+    /// RFC3339Nano timestamp. Stored as a string so the Rust↔Go
+    /// timestamp byte equality is exact — `chrono` / `time` add
+    /// trailing-zero variance.
+    pub last_seen: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionAssignment {
+    pub topic: String,
+    pub partition: i32,
+    pub broker: String,
+    pub epoch: u32,
+    pub role: PartitionRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsumerGroupAssignment {
+    pub group_id: String,
+    pub broker: String,
+    pub epoch: u32,
+}
+
+/// Cluster-wide authoritative assignment, persisted under
+/// `__cluster/assignment.json`. See the Go shape in
+/// `archive/pkg/kafkaapi/assignment.go`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Assignment {
+    pub controller_epoch: i64,
+    pub assignment_version: i64,
+    /// RFC3339Nano. See [`BrokerAssignment::last_seen`].
+    pub generated_at: String,
+    pub controller: String,
+    pub brokers: Vec<BrokerAssignment>,
+    pub partitions: Vec<PartitionAssignment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumer_groups: Vec<ConsumerGroupAssignment>,
+}
+
+impl Assignment {
+    /// File name relative to the `__cluster/` directory. The shared
+    /// directory layout puts it at
+    /// `<data_dir>/__cluster/assignment.json`.
+    pub const FILE_NAME: &'static str = "assignment.json";
+
+    pub fn path_in(data_dir: &Path) -> PathBuf {
+        data_dir.join("__cluster").join(Self::FILE_NAME)
+    }
+
+    /// `(brokers, alive)` views: the full ordered set of brokers
+    /// and a map from broker id → alive (only `Alive` health counts).
+    /// `Draining` is treated as down so fresh traffic doesn't route
+    /// to a broker that's winding down.
+    pub fn broker_sets(&self) -> (Vec<String>, std::collections::HashMap<String, bool>) {
+        let mut brokers = Vec::with_capacity(self.brokers.len());
+        let mut alive = std::collections::HashMap::with_capacity(self.brokers.len());
+        for b in &self.brokers {
+            brokers.push(b.id.clone());
+            alive.insert(b.id.clone(), matches!(b.health, BrokerHealth::Alive));
+        }
+        (brokers, alive)
+    }
+}
+
+/// `(prev, next)` handler signature fired by
+/// [`Coordinator::on_assignment_change`]. Pre-change `prev` is `None`
+/// on the very first apply.
+///
+/// [`Coordinator::on_assignment_change`]:
+///     crate::coordinator::Coordinator::on_assignment_change
+pub type AssignmentChangeHandler =
+    std::sync::Arc<dyn Fn(Option<&Assignment>, &Assignment) + Send + Sync + 'static>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde_round_trip_matches_go_shape() {
+        let a = Assignment {
+            controller_epoch: 1,
+            assignment_version: 7,
+            generated_at: "2025-01-02T03:04:05.123456789Z".to_owned(),
+            controller: "skafka-0".to_owned(),
+            brokers: vec![BrokerAssignment {
+                id: "skafka-0".to_owned(),
+                health: BrokerHealth::Alive,
+                last_seen: "2025-01-02T03:04:05.123456789Z".to_owned(),
+            }],
+            partitions: vec![PartitionAssignment {
+                topic: "t1".to_owned(),
+                partition: 0,
+                broker: "skafka-0".to_owned(),
+                epoch: 1,
+                role: PartitionRole::Leader,
+            }],
+            consumer_groups: vec![ConsumerGroupAssignment {
+                group_id: "g1".to_owned(),
+                broker: "skafka-0".to_owned(),
+                epoch: 1,
+            }],
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        // Spot-check the camelCase + lowercase enum encodings.
+        assert!(json.contains("\"controllerEpoch\":1"));
+        assert!(json.contains("\"assignmentVersion\":7"));
+        assert!(json.contains("\"health\":\"alive\""));
+        assert!(json.contains("\"role\":\"leader\""));
+        let back: Assignment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+    }
+
+    #[test]
+    fn consumer_groups_omitted_when_empty() {
+        let a = Assignment {
+            controller_epoch: 1,
+            assignment_version: 1,
+            generated_at: "x".to_owned(),
+            controller: "skafka-0".to_owned(),
+            brokers: vec![],
+            partitions: vec![],
+            consumer_groups: vec![],
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(
+            !json.contains("consumerGroups"),
+            "empty consumerGroups should be omitted, got: {json}"
+        );
+    }
+
+    #[test]
+    fn broker_sets_treats_draining_as_not_alive() {
+        let a = Assignment {
+            controller_epoch: 1,
+            assignment_version: 1,
+            generated_at: "x".to_owned(),
+            controller: "skafka-0".to_owned(),
+            brokers: vec![
+                BrokerAssignment {
+                    id: "skafka-0".to_owned(),
+                    health: BrokerHealth::Alive,
+                    last_seen: "x".to_owned(),
+                },
+                BrokerAssignment {
+                    id: "skafka-1".to_owned(),
+                    health: BrokerHealth::Draining,
+                    last_seen: "x".to_owned(),
+                },
+                BrokerAssignment {
+                    id: "skafka-2".to_owned(),
+                    health: BrokerHealth::Dead,
+                    last_seen: "x".to_owned(),
+                },
+            ],
+            partitions: vec![],
+            consumer_groups: vec![],
+        };
+        let (brokers, alive) = a.broker_sets();
+        assert_eq!(brokers, vec!["skafka-0", "skafka-1", "skafka-2"]);
+        assert!(alive["skafka-0"]);
+        assert!(!alive["skafka-1"]);
+        assert!(!alive["skafka-2"]);
+    }
+}
