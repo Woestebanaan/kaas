@@ -14,17 +14,26 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow             = { workspace = true }
+rustls             = { workspace = true }
+rustls-pemfile     = { workspace = true }
+sk-auth            = { path = "../../crates/sk-auth" }
 sk-broker          = { path = "../../crates/sk-broker" }
 sk-codec           = { path = "../../crates/sk-codec" }
 sk-protocol        = { path = "../../crates/sk-protocol" }
 sk-storage         = { path = "../../crates/sk-storage" }
 tokio              = { workspace = true }
+tokio-rustls       = { workspace = true }
 tokio-util         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+base64     = { workspace = true }
 bytes      = { workspace = true }
+hmac       = { workspace = true }
+rcgen      = { workspace = true }
+sha2       = { workspace = true }
+sk-auth    = { path = "../../crates/sk-auth", features = ["test-helpers"] }
 tempfile   = { workspace = true }
 
 [lints]

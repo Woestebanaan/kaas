@@ -202,6 +202,8 @@ async fn produce_fetch_metadata_roundtrip() {
         name: "internal".to_owned(),
         addr: "127.0.0.1:0".to_owned(),
         advertised_host: Some("127.0.0.1".to_owned()),
+        tls: None,
+        authentication_type: None,
     }];
     let broker = build_test_broker(topic, 1);
     let dispatcher = build_dispatcher(broker.clone(), &listeners);
@@ -212,6 +214,7 @@ async fn produce_fetch_metadata_roundtrip() {
             addr: "127.0.0.1:0".parse().unwrap(),
             pre_bound: None,
             tls_config: None,
+            mtls: None,
         }]),
         dispatcher,
     );

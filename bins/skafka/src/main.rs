@@ -1,27 +1,47 @@
 //! skafka broker binary.
 //!
-//! Phase 3: single-broker, no auth, no cluster. Listens on every
-//! configured listener, serves Produce / Fetch / ListOffsets /
-//! Metadata / ApiVersions / InitProducerId against either an
-//! on-disk or in-memory storage engine.
+//! Phase 4: per-listener auth + cluster-wide authorization + quotas.
+//! Listens on every configured listener, serves Produce / Fetch /
+//! ListOffsets / Metadata / ApiVersions / InitProducerId / SASL
+//! against either an on-disk or in-memory storage engine.
 //!
 //! Storage selection:
 //! - `SKAFKA_DATA_DIR` set → `DiskStorageEngine` rooted there.
-//! - unset → `MemoryStorage` (dev mode; same path the legacy Go
-//!   broker takes when `MY_POD_NAME` is unset).
+//! - unset → `MemoryStorage` (dev mode).
+//!
+//! Auth selection (per-listener via `SKAFKA_LISTENERS`, cluster-wide
+//! via `SKAFKA_AUTH_DISABLED` / `SKAFKA_AUTHORIZATION_TYPE` /
+//! `SKAFKA_SUPER_USERS` / `SKAFKA_SSL_PRINCIPAL_MAPPING_RULES`).
+//! `auth_disabled=true` forces `AllowAllAuthorizer` + `NoQuotaChecker`
+//! across the board.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sk_broker::{
-    ApiVersionsHandler, Broker, Cli, FetchHandler, InitProducerIdHandler, ListOffsetsHandler,
-    MetadataHandler, ProduceHandler, TopicRegistry,
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig as RustlsServerConfig};
+use sk_auth::{
+    AclEngine, AllowAllAuthEngine, AllowAllAuthorizer, AuthEngine, AuthEngineSelector, Authorizer,
+    CredentialLoader, NoQuotaChecker, PerListenerAuthEngine, PrincipalMapper, QuotaChecker,
+    QuotaEnforcer, RealAuthEngine, SuperUserAuthorizer,
 };
-use sk_protocol::{Dispatcher, ListenerConfig, Server, ServerConfigBuilder};
+use sk_broker::{
+    ApiVersionsHandler, Broker, Cli, CliTlsConfig, FetchHandler, InitProducerIdHandler,
+    ListOffsetsHandler, ListenerEntry, MetadataHandler, ProduceHandler, SaslAuthenticateHandler,
+    SaslHandshakeHandler, TopicRegistry,
+};
+use sk_protocol::{Dispatcher, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
 use sk_storage::{DiskStorageEngine, MemoryStorage, PartitionConfig, RealFs, StorageEngine};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+/// Hot-reload interval for credentials.json + acls.json. 10 s
+/// matches the Go side's mtime poll. The Phase 4 plan calls out a
+/// follow-up to swap in `notify` inotify during Phase 8.
+const RELOAD_INTERVAL_SECS: u64 = 10;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,6 +52,8 @@ async fn main() -> Result<()> {
         cluster_id = cli.cluster_id.as_str(),
         listeners = cli.listeners.len(),
         data_dir = ?cli.data_dir,
+        auth_disabled = cli.auth_disabled,
+        authorization_type = cli.authorization_type.as_str(),
         "skafka starting",
     );
 
@@ -44,16 +66,23 @@ async fn main() -> Result<()> {
              Set the env var to a JSON array, e.g. [{{\"name\":\"t1\",\"partitions\":1}}]"
         );
     }
-    let broker = Arc::new(Broker::new(
+
+    let auth = build_auth(&cli)?;
+    let broker = Arc::new(Broker::with_auth(
         engine.clone(),
         topics,
         cli.cluster_id.clone(),
         cli.broker_id,
+        auth.authorizer.clone(),
+        auth.quotas.clone(),
     ));
 
-    let dispatcher = build_dispatcher(broker.clone(), &cli.listeners);
+    // Spawn the credential / ACL reloader before the listeners go up
+    // so the first served request sees the latest disk state.
+    let _reload_task = spawn_reloader(auth.creds.clone(), auth.acls.clone());
 
-    let listeners = parse_listeners(&cli.listeners)?;
+    let dispatcher = build_dispatcher(broker.clone(), &cli.listeners, auth.engines.clone());
+    let listeners = parse_listeners(&cli.listeners, &auth.engines, &auth.principal_mapper)?;
     let server = Server::new(ServerConfigBuilder::new(listeners), Arc::new(dispatcher));
 
     let cancel = CancellationToken::new();
@@ -77,6 +106,136 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+struct AuthSetup {
+    authorizer: Arc<dyn Authorizer>,
+    quotas: Arc<dyn QuotaChecker>,
+    engines: Arc<PerListenerAuthEngine>,
+    creds: Option<Arc<CredentialLoader>>,
+    acls: Option<Arc<AclEngine>>,
+    principal_mapper: Arc<PrincipalMapper>,
+}
+
+fn build_auth(cli: &Cli) -> Result<AuthSetup> {
+    let mapper = Arc::new(
+        PrincipalMapper::parse(&cli.ssl_principal_mapping_rules)
+            .context("parsing SKAFKA_SSL_PRINCIPAL_MAPPING_RULES")?,
+    );
+
+    if cli.auth_disabled {
+        info!("auth disabled — using AllowAllAuthorizer + NoQuotaChecker on every listener");
+        let allow_all: Arc<dyn AuthEngine> = Arc::new(AllowAllAuthEngine);
+        let engines = Arc::new(PerListenerAuthEngine::new(allow_all));
+        return Ok(AuthSetup {
+            authorizer: Arc::new(AllowAllAuthorizer),
+            quotas: Arc::new(NoQuotaChecker),
+            engines,
+            creds: None,
+            acls: None,
+            principal_mapper: mapper,
+        });
+    }
+
+    let cluster_dir = cli
+        .data_dir
+        .as_ref()
+        .map(|d| d.join("__cluster"))
+        .unwrap_or_else(|| PathBuf::from("/data/__cluster"));
+    let creds_path = cluster_dir.join("credentials.json");
+    let acls_path = cluster_dir.join("acls.json");
+
+    let creds = Arc::new(CredentialLoader::new(creds_path.clone()));
+    if let Err(err) = creds.reload() {
+        warn!(%err, path = %creds_path.display(), "auth: initial credentials reload failed (continuing)");
+    }
+    let acls = Arc::new(AclEngine::new(acls_path.clone()));
+    if let Err(err) = acls.reload() {
+        warn!(%err, path = %acls_path.display(), "auth: initial acls reload failed (continuing)");
+    }
+
+    // Per-listener engine map. Anonymous listeners (auth_type unset
+    // or "none") use AllowAllAuthEngine; scram/plain/mtls listeners
+    // use RealAuthEngine wrapped around the credential store.
+    let allow_all_engine: Arc<dyn AuthEngine> = Arc::new(AllowAllAuthEngine);
+    let real_engine: Arc<dyn AuthEngine> =
+        Arc::new(RealAuthEngine::new(creds.clone(), mapper.clone()));
+    let mut engines_map = PerListenerAuthEngine::new(allow_all_engine.clone());
+    for lc in &cli.listeners {
+        let engine_for_listener: Arc<dyn AuthEngine> =
+            match lc.authentication_type.as_deref().unwrap_or("none") {
+                "none" => allow_all_engine.clone(),
+                "scram-sha-512" | "plain" | "mtls" => real_engine.clone(),
+                other => {
+                    warn!(
+                        listener = lc.name.as_str(),
+                        authentication_type = other,
+                        "unknown authentication_type — falling back to AllowAllAuthEngine"
+                    );
+                    allow_all_engine.clone()
+                }
+            };
+        engines_map.insert(lc.name.clone(), engine_for_listener);
+    }
+    let engines = Arc::new(engines_map);
+
+    // Authorizer: AclEngine if "simple", AllowAll otherwise. Wrap in
+    // SuperUserAuthorizer when super_users is non-empty.
+    let base_authorizer: Arc<dyn Authorizer> = match cli.authorization_type.as_str() {
+        "simple" => acls.clone(),
+        "" => Arc::new(AllowAllAuthorizer),
+        other => {
+            warn!(
+                authorization_type = other,
+                "unknown SKAFKA_AUTHORIZATION_TYPE — falling back to AllowAll"
+            );
+            Arc::new(AllowAllAuthorizer)
+        }
+    };
+    let authorizer: Arc<dyn Authorizer> = if cli.super_users.is_empty() {
+        base_authorizer
+    } else {
+        Arc::new(SuperUserAuthorizer::new(
+            cli.super_users.clone(),
+            base_authorizer,
+        ))
+    };
+
+    // Quotas: backed by the credential store so per-user limits in
+    // credentials.json take effect.
+    let quotas: Arc<dyn QuotaChecker> = Arc::new(QuotaEnforcer::new(creds.clone()));
+
+    Ok(AuthSetup {
+        authorizer,
+        quotas,
+        engines,
+        creds: Some(creds),
+        acls: Some(acls),
+        principal_mapper: mapper,
+    })
+}
+
+fn spawn_reloader(
+    creds: Option<Arc<CredentialLoader>>,
+    acls: Option<Arc<AclEngine>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let creds = creds?;
+    let acls = acls?;
+    Some(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(RELOAD_INTERVAL_SECS));
+        // First tick fires immediately; skip it since we reloaded at
+        // boot.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if let Err(err) = creds.reload() {
+                warn!(%err, "auth: credentials hot-reload failed");
+            }
+            if let Err(err) = acls.reload() {
+                warn!(%err, "auth: acls hot-reload failed");
+            }
+        }
+    }))
+}
+
 fn init_tracing(log_level: &str) {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
@@ -90,11 +249,6 @@ fn build_engine(
     match data_dir {
         Some(dir) => {
             std::fs::create_dir_all(&dir).context("creating SKAFKA_DATA_DIR")?;
-            // PartitionConfig::default uses the conservative defaults
-            // the Phase 2 plan landed (4 KiB index interval, 1 GiB
-            // segment cap, group-commit on). SKAFKA_FLUSH_INTERVAL_MESSAGES
-            // wires into PartitionConfig in a Phase 2 follow-up; for now
-            // the engine honours its struct default.
             let cfg = PartitionConfig::default();
             let engine = DiskStorageEngine::new(Arc::new(RealFs), dir, cfg);
             Ok(Arc::new(engine))
@@ -103,7 +257,11 @@ fn build_engine(
     }
 }
 
-fn build_dispatcher(broker: Arc<Broker>, listeners: &[sk_broker::ListenerEntry]) -> Dispatcher {
+fn build_dispatcher(
+    broker: Arc<Broker>,
+    listeners: &[ListenerEntry],
+    engines: Arc<PerListenerAuthEngine>,
+) -> Dispatcher {
     let mut d = Dispatcher::new();
     d.register(0, 3, 9, Arc::new(ProduceHandler::new(broker.clone())));
     d.register(1, 4, 12, Arc::new(FetchHandler::new(broker.clone())));
@@ -114,12 +272,24 @@ fn build_dispatcher(broker: Arc<Broker>, listeners: &[sk_broker::ListenerEntry])
         10,
         Arc::new(MetadataHandler::new(broker.clone(), listeners)),
     );
+    d.register(17, 0, 1, Arc::new(SaslHandshakeHandler::new()));
     d.register(18, 0, 4, Arc::new(ApiVersionsHandler::new()));
     d.register(22, 0, 4, Arc::new(InitProducerIdHandler::new(broker)));
+    d.register(
+        36,
+        0,
+        2,
+        Arc::new(SaslAuthenticateHandler::new(engines.clone())),
+    );
+    d.set_auth(engines);
     d
 }
 
-fn parse_listeners(entries: &[sk_broker::ListenerEntry]) -> Result<Vec<ListenerConfig>> {
+fn parse_listeners(
+    entries: &[ListenerEntry],
+    engines: &Arc<PerListenerAuthEngine>,
+    mapper: &Arc<PrincipalMapper>,
+) -> Result<Vec<ListenerConfig>> {
     entries
         .iter()
         .map(|e| {
@@ -127,14 +297,79 @@ fn parse_listeners(entries: &[sk_broker::ListenerEntry]) -> Result<Vec<ListenerC
                 .addr
                 .parse::<std::net::SocketAddr>()
                 .with_context(|| format!("parsing listener addr {:?} for {}", e.addr, e.name))?;
+            let tls_config = match &e.tls {
+                None => None,
+                Some(tc) => {
+                    Some(Arc::new(load_tls(tc).with_context(|| {
+                        format!("loading TLS for listener {}", e.name)
+                    })?))
+                }
+            };
+            let mtls = if matches!(e.authentication_type.as_deref(), Some("mtls")) {
+                let engine = engines.for_listener(&e.name);
+                Some(MtlsConfig {
+                    engine,
+                    mapper: mapper.clone(),
+                })
+            } else {
+                None
+            };
             Ok(ListenerConfig {
                 name: e.name.clone(),
                 addr,
                 pre_bound: None,
-                tls_config: None,
+                tls_config,
+                mtls,
             })
         })
         .collect()
+}
+
+fn load_tls(cfg: &CliTlsConfig) -> Result<RustlsServerConfig> {
+    let certs = load_certs(&cfg.cert_path)?;
+    let key = load_private_key(&cfg.key_path)?;
+    let builder = RustlsServerConfig::builder();
+    let server = if let Some(ca_path) = &cfg.client_ca_path {
+        let mut roots = RootCertStore::empty();
+        for cert in load_certs(ca_path)? {
+            roots
+                .add(cert)
+                .context("installing client-CA cert into trust store")?;
+        }
+        let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .context("building client cert verifier")?;
+        builder.with_client_cert_verifier(verifier)
+    } else {
+        builder.with_no_client_auth()
+    };
+    server
+        .with_single_cert(certs, key)
+        .context("rustls server config with cert + key")
+}
+
+fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let f = std::fs::File::open(path)
+        .with_context(|| format!("opening cert file {}", path.display()))?;
+    let mut r = std::io::BufReader::new(f);
+    let mut out = Vec::new();
+    for cert in rustls_pemfile::certs(&mut r) {
+        out.push(cert.with_context(|| format!("parsing cert in {}", path.display()))?);
+    }
+    if out.is_empty() {
+        anyhow::bail!("no PEM certificates found in {}", path.display());
+    }
+    Ok(out)
+}
+
+fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+    let f = std::fs::File::open(path)
+        .with_context(|| format!("opening key file {}", path.display()))?;
+    let mut r = std::io::BufReader::new(f);
+    let key = rustls_pemfile::private_key(&mut r)
+        .with_context(|| format!("parsing private key in {}", path.display()))?
+        .ok_or_else(|| anyhow::anyhow!("no private key in {}", path.display()))?;
+    Ok(key)
 }
 
 async fn wait_for_shutdown_signal() -> Result<()> {
@@ -146,4 +381,11 @@ async fn wait_for_shutdown_signal() -> Result<()> {
         _ = int.recv()  => info!("SIGINT received"),
     }
     Ok(())
+}
+
+// HashMap import is unused in some builds — silence its dead-import
+// warning by referencing the type once.
+#[allow(dead_code)]
+fn _silence_unused_hashmap() -> HashMap<u8, u8> {
+    HashMap::new()
 }

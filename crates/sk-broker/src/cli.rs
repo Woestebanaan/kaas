@@ -1,8 +1,8 @@
 //! Env-var parsing for `bins/skafka/main.rs`.
 //!
-//! All knobs are env-only — Phase 3 ships no flag parser. Names
-//! match the Go broker (`SKAFKA_*`) so the chart's env block
-//! doesn't churn between flavours.
+//! All knobs are env-only — no flag parser. Names match the Go
+//! broker (`SKAFKA_*`) so the chart's env block doesn't churn
+//! between flavours.
 
 use std::env;
 use std::path::PathBuf;
@@ -23,18 +23,36 @@ pub enum ConfigError {
 }
 
 /// JSON entry in `SKAFKA_LISTENERS`. Mirrors the Helm chart's
-/// listener array shape (gh #126), narrowed to the Phase 3 fields.
+/// listener array shape (gh #126).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListenerEntry {
     pub name: String,
     /// `host:port`. Use `0.0.0.0:9092` to bind all interfaces.
     pub addr: String,
     /// Optional advertised host (defaults to listener `addr`'s host).
-    /// Phase 5 wires the per-broker external hostname template here;
-    /// Phase 3 always echoes `addr.host` so single-broker Metadata
-    /// responses make sense.
+    /// Phase 5 wires the per-broker external hostname template here.
     #[serde(default)]
     pub advertised_host: Option<String>,
+    /// Optional TLS config. `None` ↔ plaintext listener.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// Optional SASL mechanism / mTLS mode. `None` ↔ "none"
+    /// (anonymous listener). Recognised values:
+    /// `"scram-sha-512"`, `"plain"`, `"mtls"`.
+    #[serde(default, rename = "authenticationType")]
+    pub authentication_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsConfig {
+    #[serde(rename = "certPath")]
+    pub cert_path: PathBuf,
+    #[serde(rename = "keyPath")]
+    pub key_path: PathBuf,
+    /// `Some` ↔ require client cert (mTLS); the file is the trust
+    /// anchor used to verify the client.
+    #[serde(default, rename = "clientCaPath")]
+    pub client_ca_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -46,6 +64,20 @@ pub struct Cli {
     pub broker_id: i32,
     pub topics_seed: String,
     pub log_level: String,
+    /// `true` disables every auth/authz/quota path —
+    /// `AllowAllAuthorizer` + `NoQuotaChecker` regardless of listener
+    /// config. Dev-mode default.
+    pub auth_disabled: bool,
+    /// `""` (default) → `AllowAllAuthorizer`. `"simple"` → ACL-based
+    /// `AclEngine`. Mirrors `SKAFKA_AUTHORIZATION_TYPE` on the Go
+    /// side / Strimzi `authorization.type`.
+    pub authorization_type: String,
+    /// `User:foo,User:bar`-shape comma list. Wraps the chosen
+    /// authorizer in `SuperUserAuthorizer` for early-allow.
+    pub super_users: Vec<String>,
+    /// Apache `ssl.principal.mapping.rules` (gh #43, KIP-371).
+    /// Empty → CN unchanged.
+    pub ssl_principal_mapping_rules: String,
 }
 
 impl Cli {
@@ -86,6 +118,17 @@ impl Cli {
         let topics_seed = env::var("SKAFKA_TOPICS").unwrap_or_default();
         let log_level = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
 
+        let auth_disabled = parse_bool_env("SKAFKA_AUTH_DISABLED").unwrap_or(false);
+        let authorization_type = env::var("SKAFKA_AUTHORIZATION_TYPE").unwrap_or_default();
+        let super_users = env::var("SKAFKA_SUPER_USERS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let ssl_principal_mapping_rules =
+            env::var("SKAFKA_SSL_PRINCIPAL_MAPPING_RULES").unwrap_or_default();
+
         Ok(Self {
             listeners,
             data_dir,
@@ -94,8 +137,21 @@ impl Cli {
             broker_id,
             topics_seed,
             log_level,
+            auth_disabled,
+            authorization_type,
+            super_users,
+            ssl_principal_mapping_rules,
         })
     }
+}
+
+fn parse_bool_env(name: &str) -> Option<bool> {
+    env::var(name).ok().map(|s| {
+        matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn default_listeners() -> &'static str {
@@ -112,6 +168,8 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].name, "internal");
         assert!(v[0].advertised_host.is_none());
+        assert!(v[0].tls.is_none());
+        assert!(v[0].authentication_type.is_none());
     }
 
     #[test]
@@ -124,5 +182,26 @@ mod tests {
             v[0].advertised_host.as_deref(),
             Some("broker-0.cluster.local")
         );
+    }
+
+    #[test]
+    fn listener_with_tls_and_auth_parses() {
+        let v: Vec<ListenerEntry> = serde_json::from_str(
+            r#"[{
+                "name": "authed",
+                "addr": "0.0.0.0:9095",
+                "tls": {
+                    "certPath": "/etc/skafka/tls.crt",
+                    "keyPath":  "/etc/skafka/tls.key",
+                    "clientCaPath": "/etc/skafka/ca.crt"
+                },
+                "authenticationType": "mtls"
+            }]"#,
+        )
+        .unwrap();
+        let tls = v[0].tls.as_ref().unwrap();
+        assert_eq!(tls.cert_path, PathBuf::from("/etc/skafka/tls.crt"));
+        assert!(tls.client_ca_path.is_some());
+        assert_eq!(v[0].authentication_type.as_deref(), Some("mtls"));
     }
 }
