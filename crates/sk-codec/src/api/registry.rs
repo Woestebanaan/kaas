@@ -34,10 +34,21 @@ pub const ALL: &[ApiSpec] = &[
     crate::api::fetch::SPEC,
     crate::api::list_offsets::SPEC,
     crate::api::metadata::SPEC,
+    crate::api::offset_commit::SPEC,
+    crate::api::offset_fetch::SPEC,
+    crate::api::find_coordinator::SPEC,
+    crate::api::join_group::SPEC,
+    crate::api::heartbeat::SPEC,
+    crate::api::leave_group::SPEC,
+    crate::api::sync_group::SPEC,
+    crate::api::describe_groups::SPEC,
+    crate::api::list_groups::SPEC,
     crate::api::sasl_handshake::SPEC,
     crate::api::init_producer_id::SPEC,
     crate::api::sasl_authenticate::SPEC,
     crate::api::api_versions::SPEC,
+    crate::api::delete_groups::SPEC,
+    crate::api::offset_delete::SPEC,
 ];
 
 /// Look up the [`ApiSpec`] for a given API key, if registered.
@@ -69,5 +80,19 @@ mod tests {
         assert!(!spec.is_flexible(2));
         assert!(spec.is_flexible(3));
         assert!(spec.is_flexible(4));
+    }
+
+    /// Phase 5 exit criterion §A — registry pins to 19 entries:
+    /// keys 0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22,
+    /// 36, 42, 47. Bump this number when a new module lands.
+    #[test]
+    fn registry_size_phase5() {
+        assert_eq!(ALL.len(), 19);
+        let mut keys: Vec<i16> = ALL.iter().map(|s| s.key).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22, 36, 42, 47]
+        );
     }
 }
