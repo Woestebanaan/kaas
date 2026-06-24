@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use sk_auth::{AllowAllAuthorizer, Authorizer, NoQuotaChecker, QuotaChecker};
 use sk_storage::StorageEngine;
 
 use crate::local_lease::LocalLeaseManager;
@@ -19,6 +20,13 @@ pub struct Broker {
     pub local_lease: LocalLeaseManager,
     pub cluster_id: String,
     pub broker_id: i32,
+    /// Cluster-wide authorization decision surface. `AllowAllAuthorizer`
+    /// is the default when no `authorization` config is set
+    /// (Strimzi-compat semantic).
+    pub authorizer: Arc<dyn Authorizer>,
+    /// Cluster-wide quota check. `NoQuotaChecker` is the default for
+    /// anonymous-only brokers.
+    pub quotas: Arc<dyn QuotaChecker>,
     producer_id_counter: AtomicI64,
 }
 
@@ -37,11 +45,33 @@ impl std::fmt::Debug for Broker {
 }
 
 impl Broker {
+    /// Build a broker with the default open-everything authorization
+    /// surface (`AllowAllAuthorizer` + `NoQuotaChecker`). Tests and
+    /// dev mode call this; `bins/skafka/main.rs` uses
+    /// [`Broker::with_auth`] to swap in real implementations.
     pub fn new(
         engine: Arc<dyn StorageEngine>,
         topics: Arc<TopicRegistry>,
         cluster_id: impl Into<String>,
         broker_id: i32,
+    ) -> Self {
+        Self::with_auth(
+            engine,
+            topics,
+            cluster_id,
+            broker_id,
+            Arc::new(AllowAllAuthorizer),
+            Arc::new(NoQuotaChecker),
+        )
+    }
+
+    pub fn with_auth(
+        engine: Arc<dyn StorageEngine>,
+        topics: Arc<TopicRegistry>,
+        cluster_id: impl Into<String>,
+        broker_id: i32,
+        authorizer: Arc<dyn Authorizer>,
+        quotas: Arc<dyn QuotaChecker>,
     ) -> Self {
         Self {
             engine,
@@ -49,6 +79,8 @@ impl Broker {
             local_lease: LocalLeaseManager,
             cluster_id: cluster_id.into(),
             broker_id,
+            authorizer,
+            quotas,
             // Start at 1 so 0 stays available as an "unset" sentinel
             // for clients that read uninitialised pid.
             producer_id_counter: AtomicI64::new(1),

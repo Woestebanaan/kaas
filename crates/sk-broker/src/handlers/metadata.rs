@@ -212,11 +212,15 @@ mod tests {
                 name: "internal".to_owned(),
                 addr: "0.0.0.0:9092".to_owned(),
                 advertised_host: None,
+                tls: None,
+                authentication_type: None,
             },
             ListenerEntry {
                 name: "external".to_owned(),
                 addr: "0.0.0.0:9094".to_owned(),
                 advertised_host: Some("broker-0.cluster.local".to_owned()),
+                tls: None,
+                authentication_type: None,
             },
         ]
     }

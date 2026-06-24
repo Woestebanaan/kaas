@@ -15,6 +15,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use sk_auth::engine::AuthEngine;
+use sk_auth::principal_mapping::PrincipalMapper;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
 use tokio_util::sync::CancellationToken;
@@ -23,6 +25,23 @@ use tracing::{error, info, warn};
 use crate::connstate::ConnState;
 use crate::dispatch::Dispatcher;
 use crate::frame::{Connection, ProtoError};
+
+/// Per-listener TLS principal extraction. When `Some`, the accept
+/// loop pulls the peer's leaf cert after the TLS handshake and asks
+/// the engine to resolve it; on success the principal lands on
+/// `ConnState::principal` and `sasl_done = true` so the dispatcher's
+/// pre-auth gate lets subsequent requests through.
+#[derive(Clone)]
+pub struct MtlsConfig {
+    pub engine: Arc<dyn AuthEngine>,
+    pub mapper: Arc<PrincipalMapper>,
+}
+
+impl std::fmt::Debug for MtlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MtlsConfig").finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug)]
 pub struct ListenerConfig {
@@ -36,9 +55,12 @@ pub struct ListenerConfig {
     /// pre-bound socket — tests use this to allocate `127.0.0.1:0`
     /// themselves and capture the assigned port.
     pub pre_bound: Option<TcpListener>,
-    /// `Some(cfg)` wraps the bound listener with TLS. Phase 3 leaves
-    /// this `None` everywhere; Phase 4 wires cert loading.
+    /// `Some(cfg)` wraps the bound listener with TLS.
     pub tls_config: Option<Arc<ServerConfig>>,
+    /// `Some(...)` runs mTLS principal extraction after the TLS
+    /// handshake. Requires `tls_config` to also be `Some` and the
+    /// rustls `ServerConfig` to require a client certificate.
+    pub mtls: Option<MtlsConfig>,
 }
 
 #[derive(Debug)]
@@ -73,11 +95,17 @@ impl Server {
     pub async fn serve(self, cancel: CancellationToken) -> io::Result<()> {
         let bound = self.bind_all().await?;
         let mut handles = Vec::new();
-        for (lc_name, listener, max_frame, tls) in bound {
+        for bl in bound {
             let dispatcher = self.dispatcher.clone();
             let cancel = cancel.clone();
             handles.push(tokio::spawn(accept_loop(
-                lc_name, listener, max_frame, tls, dispatcher, cancel,
+                bl.name,
+                bl.listener,
+                bl.max_frame_bytes,
+                bl.tls,
+                bl.mtls,
+                dispatcher,
+                cancel,
             )));
         }
         for h in handles {
@@ -100,7 +128,7 @@ impl Server {
         ))
     }
 
-    async fn bind_all(&self) -> io::Result<Vec<(String, TcpListener, usize, Option<TlsAcceptor>)>> {
+    async fn bind_all(&self) -> io::Result<Vec<BoundListener>> {
         let mut out = Vec::with_capacity(self.cfg.listeners.len());
         for lc in &self.cfg.listeners {
             if lc.name.is_empty() {
@@ -116,10 +144,6 @@ impl Server {
                     // tests, which call `bind_all` once; treat the
                     // pre_bound field as advisory and re-bind via
                     // the listener's `local_addr`.
-                    // For now: pre_bound clients should set `addr` to
-                    // the local_addr of the pre_bound listener and
-                    // accept the re-bind cost. Tests do this via
-                    // `bind_to_port_zero` helper.
                     TcpListener::bind(lc.addr).await?
                 }
                 None => TcpListener::bind(lc.addr).await?,
@@ -132,26 +156,48 @@ impl Server {
                 addr = %ln.local_addr().map(|a| a.to_string()).unwrap_or_default(),
                 listener = lc.name.as_str(),
                 tls = tls.is_some(),
+                mtls = lc.mtls.is_some(),
                 "sk-protocol listening",
             );
-            out.push((lc.name.clone(), ln, self.cfg.max_frame_bytes, tls));
+            out.push(BoundListener {
+                name: lc.name.clone(),
+                listener: ln,
+                max_frame_bytes: self.cfg.max_frame_bytes,
+                tls,
+                mtls: lc.mtls.clone(),
+            });
         }
         Ok(out)
     }
 }
 
+struct BoundListener {
+    name: String,
+    listener: TcpListener,
+    max_frame_bytes: usize,
+    tls: Option<TlsAcceptor>,
+    mtls: Option<MtlsConfig>,
+}
+
+impl std::fmt::Debug for BoundListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundListener")
+            .field("name", &self.name)
+            .field("max_frame_bytes", &self.max_frame_bytes)
+            .field("tls", &self.tls.is_some())
+            .field("mtls", &self.mtls.is_some())
+            .finish()
+    }
+}
+
 pub struct BoundServer {
-    listeners: Vec<(String, TcpListener, usize, Option<TlsAcceptor>)>,
+    listeners: Vec<BoundListener>,
     max_frame_bytes: usize,
 }
 
 impl std::fmt::Debug for BoundServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let names: Vec<&str> = self
-            .listeners
-            .iter()
-            .map(|(n, _, _, _)| n.as_str())
-            .collect();
+        let names: Vec<&str> = self.listeners.iter().map(|bl| bl.name.as_str()).collect();
         f.debug_struct("BoundServer")
             .field("listeners", &names)
             .field("max_frame_bytes", &self.max_frame_bytes)
@@ -162,13 +208,12 @@ impl std::fmt::Debug for BoundServer {
 impl BoundServer {
     /// `(listener_name, bound_addr)` pairs in registration order.
     /// Tests use this to discover the `:0` port the kernel assigned.
-    /// Resolved `(listener_name, bound_addr)` pairs. Skips any
-    /// listener whose `local_addr()` lookup fails (which only
-    /// happens if the socket was already torn down).
+    /// Skips any listener whose `local_addr()` lookup fails (which
+    /// only happens if the socket was already torn down).
     pub fn local_addrs(&self) -> Vec<(String, SocketAddr)> {
         self.listeners
             .iter()
-            .filter_map(|(name, l, _, _)| l.local_addr().ok().map(|a| (name.clone(), a)))
+            .filter_map(|bl| bl.listener.local_addr().ok().map(|a| (bl.name.clone(), a)))
             .collect()
     }
 
@@ -179,11 +224,17 @@ impl BoundServer {
     /// Run accept loops until `cancel` fires. Consumes self.
     pub async fn serve(self, dispatcher: Arc<Dispatcher>, cancel: CancellationToken) {
         let mut handles = Vec::new();
-        for (name, listener, max_frame, tls) in self.listeners {
+        for bl in self.listeners {
             let d = dispatcher.clone();
             let c = cancel.clone();
             handles.push(tokio::spawn(accept_loop(
-                name, listener, max_frame, tls, d, c,
+                bl.name,
+                bl.listener,
+                bl.max_frame_bytes,
+                bl.tls,
+                bl.mtls,
+                d,
+                c,
             )));
         }
         for h in handles {
@@ -192,11 +243,13 @@ impl BoundServer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     listener_name: String,
     listener: TcpListener,
     max_frame_bytes: usize,
     tls: Option<TlsAcceptor>,
+    mtls: Option<MtlsConfig>,
     dispatcher: Arc<Dispatcher>,
     cancel: CancellationToken,
 ) {
@@ -214,8 +267,9 @@ async fn accept_loop(
                         let c = cancel.clone();
                         let name = listener_name.clone();
                         let tls = tls.clone();
+                        let mtls = mtls.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = serve_conn(name, stream, peer, max_frame_bytes, tls, d, c).await {
+                            if let Err(err) = serve_conn(name, stream, peer, max_frame_bytes, tls, mtls, d, c).await {
                                 tracing::debug!(%peer, %err, "connection closed with error");
                             }
                         });
@@ -230,27 +284,59 @@ async fn accept_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_conn(
     listener_name: String,
     stream: TcpStream,
     peer: SocketAddr,
     max_frame_bytes: usize,
     tls: Option<TlsAcceptor>,
+    mtls: Option<MtlsConfig>,
     dispatcher: Arc<Dispatcher>,
     cancel: CancellationToken,
 ) -> Result<(), ProtoError> {
-    let state = Arc::new(parking_lot::Mutex::new(ConnState::new(
-        &listener_name,
-        peer,
-    )));
+    let mut cs = ConnState::new(&listener_name, peer);
+    cs.is_tls = tls.is_some();
+    let state = Arc::new(parking_lot::Mutex::new(cs));
     if let Some(acceptor) = tls {
         let tls_stream = acceptor.accept(stream).await.map_err(ProtoError::Io)?;
+        // Run mTLS principal extraction if configured. Failure
+        // doesn't drop the connection — the dispatcher's pre-auth
+        // gate will reject non-pre-SASL APIs until the client
+        // completes a SASL handshake instead.
+        if let Some(mtls_cfg) = mtls.as_ref() {
+            if let Err(err) = extract_and_stamp_mtls(&tls_stream, mtls_cfg, &state) {
+                warn!(
+                    listener = listener_name.as_str(),
+                    %peer,
+                    %err,
+                    "mtls: principal extraction failed; client must complete SASL"
+                );
+            }
+        }
         let conn = Connection::with_max_frame(tls_stream, max_frame_bytes);
         request_loop(conn, dispatcher, state, cancel).await
     } else {
         let conn = Connection::with_max_frame(stream, max_frame_bytes);
         request_loop(conn, dispatcher, state, cancel).await
     }
+}
+
+fn extract_and_stamp_mtls(
+    tls_stream: &tokio_rustls::server::TlsStream<TcpStream>,
+    cfg: &MtlsConfig,
+    state: &Arc<parking_lot::Mutex<ConnState>>,
+) -> Result<(), sk_auth::AuthError> {
+    let (_, session) = tls_stream.get_ref();
+    let cert = session
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .ok_or(sk_auth::AuthError::BadCertificate)?;
+    let principal = sk_auth::mtls::extract_principal(cert.as_ref(), &cfg.mapper, &*cfg.engine)?;
+    let mut cs = state.lock();
+    cs.principal = Some(principal);
+    cs.sasl_done = true;
+    Ok(())
 }
 
 async fn request_loop<S>(
@@ -350,6 +436,7 @@ mod tests {
             addr: "127.0.0.1:0".parse().unwrap(),
             pre_bound: None,
             tls_config: None,
+            mtls: None,
         }]);
 
         let server = Server::new(cfg, dispatcher.clone());

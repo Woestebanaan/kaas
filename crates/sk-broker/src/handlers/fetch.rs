@@ -10,6 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
+use sk_auth::{Operation, Principal, Resource};
 use sk_codec::api::fetch;
 use sk_protocol::{ConnState, Handler, HandlerError};
 use sk_storage::StorageError;
@@ -19,6 +20,7 @@ use crate::broker::Broker;
 const ERR_UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 const ERR_OFFSET_OUT_OF_RANGE: i16 = 1;
 const ERR_NOT_LEADER_FOR_PARTITION: i16 = 6;
+const ERR_TOPIC_AUTHORIZATION_FAILED: i16 = 29;
 
 #[derive(Debug)]
 pub struct FetchHandler {
@@ -35,18 +37,27 @@ impl FetchHandler {
 impl Handler for FetchHandler {
     async fn handle(
         &self,
-        _conn: &Mutex<ConnState>,
+        conn: &Mutex<ConnState>,
         version: i16,
         body: Bytes,
     ) -> Result<BytesMut, HandlerError> {
         let mut body = body;
         let req = fetch::decode_request(&mut body, version)?;
 
+        let principal = conn
+            .lock()
+            .principal
+            .clone()
+            .unwrap_or_else(Principal::anonymous);
+
         let mut responses = Vec::with_capacity(req.topics.len());
+        let mut total_bytes: usize = 0;
         for t in &req.topics {
             let mut parts = Vec::with_capacity(t.partitions.len());
             for p in &t.partitions {
-                parts.push(self.read_one(&t.name, p).await);
+                let resp = self.read_one(&principal, &t.name, p).await;
+                total_bytes += resp.records.as_ref().map(|b| b.len()).unwrap_or(0);
+                parts.push(resp);
             }
             responses.push(fetch::TopicResponse {
                 name: t.name.clone(),
@@ -54,8 +65,13 @@ impl Handler for FetchHandler {
             });
         }
 
+        let throttle_time_ms = self
+            .broker
+            .quotas
+            .check_fetch_quota(&principal, total_bytes);
+
         let resp = fetch::Response {
-            throttle_time_ms: 0,
+            throttle_time_ms,
             error_code: 0,
             session_id: 0, // gh #4 — stateless contract
             responses,
@@ -67,9 +83,23 @@ impl Handler for FetchHandler {
 }
 
 impl FetchHandler {
-    async fn read_one(&self, topic: &str, p: &fetch::Partition) -> fetch::PartitionResponse {
+    async fn read_one(
+        &self,
+        principal: &Principal,
+        topic: &str,
+        p: &fetch::Partition,
+    ) -> fetch::PartitionResponse {
         if self.broker.topics.get(topic).is_none() {
             return error_partition(p.partition_index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
+        }
+
+        let resource = Resource::topic(topic);
+        if !self
+            .broker
+            .authorizer
+            .authorize(principal, &resource, Operation::Read)
+        {
+            return error_partition(p.partition_index, ERR_TOPIC_AUTHORIZATION_FAILED);
         }
 
         // Best-effort metadata; HWM = 0 if the partition has never

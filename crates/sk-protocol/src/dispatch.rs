@@ -15,6 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
+use sk_auth::selector::AuthEngineSelector;
 use sk_codec::api::registry;
 use sk_codec::headers::HeaderVersion;
 use sk_codec::primitives::write_i16;
@@ -29,8 +30,17 @@ pub const ERR_UNSUPPORTED_VERSION: i16 = 35;
 /// Apache wire error code for "cluster authorization failed". The
 /// dispatcher's pre-auth gate returns this when the connection hasn't
 /// completed SASL and the requested API is not in the pre-SASL
-/// allowlist. Phase 4 wires the gate; Phase 3 leaves it open.
+/// allowlist.
 pub const ERR_CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
+
+/// API keys allowed before SASL completes — handshake (17),
+/// ApiVersions (18), and authenticate (36). Same set as the Go
+/// `preSASLKeys` map.
+pub const PRE_AUTH_KEYS: &[i16] = &[17, 18, 36];
+
+pub fn is_pre_auth(api_key: i16) -> bool {
+    PRE_AUTH_KEYS.contains(&api_key)
+}
 
 #[derive(Debug, Error)]
 pub enum HandlerError {
@@ -67,6 +77,11 @@ struct HandlerSlot {
 /// path.
 pub struct Dispatcher {
     slots: Vec<Option<HandlerSlot>>,
+    /// Per-listener `AuthEngine` lookup. `None` ↔ pre-auth gate is
+    /// open (dev/test). The gate consults this on every request,
+    /// asking the listener's engine whether it requires SASL before
+    /// non-pre-auth APIs are allowed through.
+    engines: Option<Arc<dyn AuthEngineSelector>>,
 }
 
 impl std::fmt::Debug for Dispatcher {
@@ -79,6 +94,7 @@ impl std::fmt::Debug for Dispatcher {
             .collect();
         f.debug_struct("Dispatcher")
             .field("registered_keys", &registered)
+            .field("engines_wired", &self.engines.is_some())
             .finish()
     }
 }
@@ -97,7 +113,22 @@ impl Dispatcher {
         for _ in 0..SLOT_COUNT {
             slots.push(None);
         }
-        Self { slots }
+        Self {
+            slots,
+            engines: None,
+        }
+    }
+
+    /// Wire the per-listener auth selector. Call BEFORE serving
+    /// requests; the gate reads the field on the hot path so a
+    /// nil-to-non-nil transition mid-flight would race.
+    pub fn with_auth(mut self, engines: Arc<dyn AuthEngineSelector>) -> Self {
+        self.engines = Some(engines);
+        self
+    }
+
+    pub fn set_auth(&mut self, engines: Arc<dyn AuthEngineSelector>) {
+        self.engines = Some(engines);
     }
 
     pub fn register(&mut self, api_key: i16, min: i16, max: i16, handler: Arc<dyn Handler>) {
@@ -131,6 +162,22 @@ impl Dispatcher {
     ) -> (BytesMut, HeaderVersion) {
         let api_key = header.api_key;
         let spec = registry::lookup(api_key);
+
+        // Pre-auth gate (gh #124). When `engines` is wired and the
+        // listener's engine requires pre-auth, every non-pre-auth API
+        // is rejected until SASL completes. mTLS sets sasl_done=true
+        // at handshake time so the same gate works for cert clients.
+        if let Some(sel) = self.engines.as_ref() {
+            let (listener_name, sasl_done) = {
+                let cs = conn.lock();
+                (cs.listener_name.clone(), cs.sasl_done)
+            };
+            let eng = sel.for_listener(&listener_name);
+            if eng.requires_pre_auth() && !sasl_done && !is_pre_auth(api_key) {
+                return error_body(spec, header.api_version, ERR_CLUSTER_AUTHORIZATION_FAILED);
+            }
+        }
+
         let slot_idx = match usize::try_from(api_key) {
             Ok(i) if i < SLOT_COUNT => i,
             _ => return error_body(spec, header.api_version, ERR_UNSUPPORTED_VERSION),

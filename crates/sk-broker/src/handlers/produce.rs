@@ -9,6 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
+use sk_auth::{Operation, Principal, Resource};
 use sk_codec::api::produce;
 use sk_protocol::{ConnState, Handler, HandlerError};
 use sk_storage::StorageError;
@@ -19,6 +20,7 @@ use crate::broker::Broker;
 const ERR_UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 const ERR_LEADER_NOT_AVAILABLE: i16 = 5;
 const ERR_NOT_LEADER_FOR_PARTITION: i16 = 6;
+const ERR_TOPIC_AUTHORIZATION_FAILED: i16 = 29;
 const ERR_OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 const ERR_DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
 const ERR_INVALID_PRODUCER_EPOCH: i16 = 47;
@@ -39,7 +41,7 @@ impl ProduceHandler {
 impl Handler for ProduceHandler {
     async fn handle(
         &self,
-        _conn: &Mutex<ConnState>,
+        conn: &Mutex<ConnState>,
         version: i16,
         body: Bytes,
     ) -> Result<BytesMut, HandlerError> {
@@ -47,11 +49,25 @@ impl Handler for ProduceHandler {
         let req = produce::decode_request(&mut body, version)?;
 
         let acks = req.acks;
+        let principal = conn
+            .lock()
+            .principal
+            .clone()
+            .unwrap_or_else(Principal::anonymous);
+
+        // Cumulative byte count for the per-principal produce quota.
+        let total_bytes: usize = req
+            .topic_data
+            .iter()
+            .flat_map(|t| t.partition_data.iter())
+            .filter_map(|p| p.records.as_ref().map(|b| b.len()))
+            .sum();
+
         let mut responses = Vec::with_capacity(req.topic_data.len());
         for t in &req.topic_data {
             let mut partition_responses = Vec::with_capacity(t.partition_data.len());
             for p in &t.partition_data {
-                let pr = self.append_one(&t.name, p, acks).await;
+                let pr = self.append_one(&principal, &t.name, p, acks).await;
                 partition_responses.push(pr);
             }
             responses.push(produce::TopicResponse {
@@ -60,9 +76,14 @@ impl Handler for ProduceHandler {
             });
         }
 
+        let throttle_time_ms = self
+            .broker
+            .quotas
+            .check_produce_quota(&principal, total_bytes);
+
         let resp = produce::Response {
             responses,
-            throttle_time_ms: 0,
+            throttle_time_ms,
         };
         let mut out = BytesMut::new();
         produce::encode_response(&mut out, &resp, version)?;
@@ -73,6 +94,7 @@ impl Handler for ProduceHandler {
 impl ProduceHandler {
     async fn append_one(
         &self,
+        principal: &Principal,
         topic: &str,
         p: &produce::PartitionData,
         acks: i16,
@@ -81,6 +103,17 @@ impl ProduceHandler {
         // matches Apache's UNKNOWN_TOPIC_OR_PARTITION granularity.
         if self.broker.topics.get(topic).is_none() {
             return error_partition(p.index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
+        }
+
+        // Cluster-wide ACL check (gh #126). Topic-level Write is the
+        // canonical Apache mapping for Produce.
+        let resource = Resource::topic(topic);
+        if !self
+            .broker
+            .authorizer
+            .authorize(principal, &resource, Operation::Write)
+        {
+            return error_partition(p.index, ERR_TOPIC_AUTHORIZATION_FAILED);
         }
 
         let Some(records) = p.records.clone() else {

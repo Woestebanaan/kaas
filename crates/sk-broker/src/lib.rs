@@ -14,10 +14,10 @@ pub mod local_lease;
 pub mod topic_registry;
 
 pub use broker::Broker;
-pub use cli::{Cli, ListenerEntry};
+pub use cli::{Cli, ListenerEntry, TlsConfig as CliTlsConfig};
 pub use handlers::{
     ApiVersionsHandler, FetchHandler, InitProducerIdHandler, ListOffsetsHandler, MetadataHandler,
-    ProduceHandler,
+    ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
 };
 pub use local_lease::LocalLeaseManager;
 pub use topic_registry::{ConfigError as TopicConfigError, TopicMeta, TopicRegistry};

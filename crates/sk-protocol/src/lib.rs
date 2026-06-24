@@ -19,7 +19,8 @@ pub mod server;
 
 pub use connstate::{ConnState, Principal};
 pub use dispatch::{
-    Dispatcher, Handler, HandlerError, ERR_CLUSTER_AUTHORIZATION_FAILED, ERR_UNSUPPORTED_VERSION,
+    is_pre_auth, Dispatcher, Handler, HandlerError, ERR_CLUSTER_AUTHORIZATION_FAILED,
+    ERR_UNSUPPORTED_VERSION, PRE_AUTH_KEYS,
 };
 pub use frame::{Connection, ProtoError};
-pub use server::{BoundServer, ListenerConfig, Server, ServerConfigBuilder};
+pub use server::{BoundServer, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
