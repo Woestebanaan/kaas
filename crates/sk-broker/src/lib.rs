@@ -14,6 +14,7 @@ pub mod coordinator;
 pub mod group_hash;
 pub mod group_takeover;
 pub mod handlers;
+pub mod heartbeat_client;
 pub mod local_lease;
 pub mod self_fence;
 pub mod takeover;
@@ -40,6 +41,7 @@ pub use handlers::{
     OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler,
     SaslHandshakeHandler, SyncGroupHandler,
 };
+pub use heartbeat_client::{CommandHandler, HeartbeatClient, TargetResolver};
 pub use local_lease::LocalLeaseManager;
 pub use self_fence::{is_heartbeat_fresh, DEFAULT_HEARTBEAT_TIMEOUT};
 pub use takeover::TakeoverDriver;

@@ -21,6 +21,14 @@ pub mod election;
 pub mod heartbeat_server;
 pub mod k8s_mirror;
 
+#[cfg(feature = "kube-election")]
+pub mod kube_election;
+
+#[cfg(feature = "kube-election")]
+pub use kube_election::{
+    KubeLeaseElection, DEFAULT_LEASE_DURATION, DEFAULT_RENEW_DEADLINE, DEFAULT_RETRY_PERIOD,
+};
+
 pub use assignment_writer::{
     AssignmentLoop, AssignmentReason, BrokerSource, GroupSource, StaticSources, TopicSource,
 };

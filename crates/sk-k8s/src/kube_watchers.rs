@@ -1,79 +1,353 @@
-//! Kube-bound watcher pumps that feed events into
-//! [`crate::endpoints::BrokerRegistry`], [`crate::topic_watcher::TopicWatcher`],
-//! and the kube-backed [`crate::readiness::ReadinessGate`].
+//! Kube-bound implementations: `EndpointSlice` watcher,
+//! `Lease`-poll epoch source, and the `Pod` readiness patcher.
 //!
-//! Phase 5 ships only the function signatures + a `TODO` body — the
-//! real `kube::runtime::watcher::<EndpointSlice>` /
-//! `kube::runtime::watcher::<KafkaTopic>` plumbing lands in
-//! workstream H's `kind`-driven integration suite alongside the
-//! follow-up that wires `kube::Client` end-to-end (task #10). The
-//! pump signatures live here so `bins/skafka/main.rs` can call them
-//! today and the real implementation drops in without a wire
-//! change.
+//! Each helper takes a [`kube::Client`] (or a closure that produces
+//! one) and runs as a long-lived `tokio` task. Cancellation is via
+//! [`tokio_util::sync::CancellationToken`] — same shape the broker
+//! binary already uses everywhere else.
+//!
+//! The `KafkaTopic` watcher is parked for Phase 7, where the CR
+//! type lands in `sk-operator-api`. Phase 5 doesn't read the CR
+//! anyway — the broker takes its topic catalog from
+//! `SKAFKA_TOPICS` env JSON until the operator surfaces in
+//! Phase 7.
 
-#![cfg(feature = "kube-watchers")]
+// Module-gating is already done via `#[cfg(...)]` on the
+// `pub mod kube_watchers;` in lib.rs; the file-scope
+// `#![cfg(...)]` only repeats it and clippy flags it as
+// duplicated.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::StreamExt;
+use k8s_openapi::api::coordination::v1::Lease;
+use k8s_openapi::api::discovery::v1::EndpointSlice;
+use kube::api::{Api, ListParams};
+use kube::runtime::watcher::{watcher, Config as WatcherConfig, Event};
+use kube::Client;
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 
-use crate::endpoints::BrokerRegistry;
-use crate::readiness::ReadinessGate;
+use crate::endpoints::{BrokerRegistry, EndpointSliceData, EndpointSliceEntry};
 use crate::topic_watcher::TopicWatcher;
+use sk_broker::coordinator::LeaseEpochSource;
 
 #[derive(Debug, Error)]
 pub enum KubeWatchError {
+    #[error("kube error: {0}")]
+    Kube(#[from] kube::Error),
+
     #[error("kube watcher: {0}")]
     Other(String),
 }
 
-/// Stream `EndpointSlice` events for the headless service and pump
-/// them into the registry. Returns a `oneshot::Sender` the caller
-/// uses to signal shutdown.
+/// Lease-backed [`LeaseEpochSource`] — polls the
+/// `skafka-controller` Lease on a 1 s cadence and surfaces
+/// `spec.leaseTransitions` as the current controller epoch.
 ///
-/// **Phase 5 placeholder** — emits the implementation gap on first
-/// call so dev-mode binaries don't silently no-op. Real
-/// `kube::runtime::watcher::<EndpointSlice>` plumbing lands with
-/// the kube-backed `ControllerWatch` follow-up (task #10).
-pub async fn watch_endpoints(
-    _client: Arc<dyn KubeClient>,
-    _namespace: String,
-    _headless_service: String,
-    _registry: Arc<BrokerRegistry>,
-) -> Result<oneshot::Sender<()>, KubeWatchError> {
-    Err(KubeWatchError::Other(
-        "watch_endpoints: kube-rs pump not yet wired (Phase 5 follow-up #10)".to_owned(),
-    ))
+/// Phase 5 brokers read `current_epoch` on every
+/// [`sk_broker::Coordinator::apply_if_new`] call to reject writes
+/// from a partitioned ex-controller. Updates are atomic and lock-
+/// free; the poll loop is the only writer.
+///
+/// [`LeaseEpochSource`]:
+///     sk_broker::coordinator::LeaseEpochSource
+#[derive(Debug)]
+pub struct KubeLeaseEpoch {
+    epoch: AtomicI64,
+    holder: parking_lot::Mutex<Option<String>>,
 }
 
-/// Stream `KafkaTopic` CR events and pump them into the watcher.
-pub async fn watch_topics(
-    _client: Arc<dyn KubeClient>,
-    _namespace: String,
-    _watcher: Arc<TopicWatcher>,
-) -> Result<oneshot::Sender<()>, KubeWatchError> {
-    Err(KubeWatchError::Other(
-        "watch_topics: kube-rs pump not yet wired (Phase 5 follow-up #10)".to_owned(),
-    ))
+impl Default for KubeLeaseEpoch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KubeLeaseEpoch {
+    pub fn new() -> Self {
+        Self {
+            epoch: AtomicI64::new(0),
+            holder: parking_lot::Mutex::new(None),
+        }
+    }
+
+    pub fn current_epoch(&self) -> i64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    pub fn current_holder(&self) -> Option<String> {
+        self.holder.lock().clone()
+    }
+
+    fn store(&self, epoch: i64, holder: Option<String>) {
+        self.epoch.store(epoch, Ordering::Relaxed);
+        *self.holder.lock() = holder;
+    }
+}
+
+impl LeaseEpochSource for KubeLeaseEpoch {
+    fn current_epoch(&self) -> i64 {
+        Self::current_epoch(self)
+    }
+}
+
+/// Poll the `skafka-controller` Lease on a 1 s cadence and update
+/// the supplied [`KubeLeaseEpoch`]. Returns when `cancel` fires.
+pub async fn run_lease_watch(
+    client: Client,
+    namespace: String,
+    lease_name: String,
+    epoch: Arc<KubeLeaseEpoch>,
+    cancel: CancellationToken,
+) {
+    let api: Api<Lease> = Api::namespaced(client, &namespace);
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tick.tick() => {
+                match api.get_opt(&lease_name).await {
+                    Ok(Some(lease)) => {
+                        let transitions = lease
+                            .spec
+                            .as_ref()
+                            .and_then(|s| s.lease_transitions)
+                            .unwrap_or(0);
+                        let holder = lease
+                            .spec
+                            .as_ref()
+                            .and_then(|s| s.holder_identity.clone());
+                        epoch.store(i64::from(transitions), holder);
+                    }
+                    Ok(None) => {
+                        debug!(
+                            lease = lease_name.as_str(),
+                            "lease watch: lease not found yet (cluster still booting)"
+                        );
+                    }
+                    Err(err) => {
+                        warn!(%err, lease = lease_name.as_str(),
+                              "lease watch: get failed; will retry next tick");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Stream `EndpointSlice` events for the headless service and feed
+/// them into the registry. Selects slices by the standard
+/// `kubernetes.io/service-name` label so the broker only sees its
+/// own headless service's slices.
+pub async fn run_endpoint_watch(
+    client: Client,
+    namespace: String,
+    headless_service: String,
+    registry: Arc<BrokerRegistry>,
+    cancel: CancellationToken,
+) {
+    let api: Api<EndpointSlice> = Api::namespaced(client, &namespace);
+    let lp =
+        ListParams::default().labels(&format!("kubernetes.io/service-name={headless_service}"));
+    let cfg = WatcherConfig {
+        label_selector: Some(lp.label_selector.unwrap_or_default()),
+        ..Default::default()
+    };
+
+    let mut stream = watcher(api, cfg).boxed();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            evt = stream.next() => {
+                let evt = match evt {
+                    None => {
+                        debug!("endpoint watch: stream ended; restarting");
+                        return;
+                    }
+                    Some(Ok(e)) => e,
+                    Some(Err(err)) => {
+                        warn!(%err, "endpoint watch: error from stream");
+                        continue;
+                    }
+                };
+                handle_endpoint_event(&registry, evt);
+            }
+        }
+    }
+}
+
+fn handle_endpoint_event(registry: &BrokerRegistry, event: Event<EndpointSlice>) {
+    match event {
+        Event::Apply(slice) | Event::InitApply(slice) => {
+            registry.apply_slice(&convert_slice(&slice));
+        }
+        Event::Delete(slice) => {
+            registry.delete_slice(&convert_slice(&slice));
+        }
+        Event::Init => {}
+        Event::InitDone => {}
+    }
+}
+
+fn convert_slice(slice: &EndpointSlice) -> EndpointSliceData {
+    let kafka_port = slice.ports.as_ref().and_then(|ps| {
+        ps.iter()
+            .find(|p| p.name.as_deref() == Some("kafka"))
+            .and_then(|p| p.port)
+    });
+    let entries = slice
+        .endpoints
+        .iter()
+        .filter_map(|ep| {
+            let hostname = ep.hostname.clone()?;
+            let address = ep.addresses.first()?.clone();
+            let ready = ep
+                .conditions
+                .as_ref()
+                .and_then(|c| c.ready)
+                .unwrap_or(false);
+            Some(EndpointSliceEntry {
+                hostname,
+                address,
+                ready,
+            })
+        })
+        .collect();
+    EndpointSliceData {
+        entries,
+        kafka_port,
+    }
 }
 
 /// Patch the broker pod's `Status.Conditions` to flip the
 /// `skafka.io/PartitionsReady` readinessGate.
+///
+/// Returns `Ok(())` on the first successful patch; the caller can
+/// retry on failure.
 pub async fn patch_readiness(
-    _client: Arc<dyn KubeClient>,
+    client: Client,
+    namespace: String,
+    pod_name: String,
+    ready: bool,
+) -> Result<(), KubeWatchError> {
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::api::{Patch, PatchParams};
+
+    let api: Api<Pod> = Api::namespaced(client, &namespace);
+    let condition_status = if ready { "True" } else { "False" };
+    let patch = serde_json::json!({
+        "status": {
+            "conditions": [
+                {
+                    "type": crate::readiness::READINESS_CONDITION,
+                    "status": condition_status,
+                    "lastTransitionTime": chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "reason": "AssignmentApplied",
+                    "message": "broker has applied at least one assignment.json",
+                }
+            ]
+        }
+    });
+    api.patch_status(
+        &pod_name,
+        &PatchParams::apply("skafka").force(),
+        &Patch::Apply(&patch),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Phase 7 placeholder. The `KafkaTopic` CR type lands in
+/// `sk-operator-api` then; today the broker reads topics from
+/// `SKAFKA_TOPICS` env JSON so this watcher is unused. Kept as
+/// a typed signature so wiring it later doesn't need an API
+/// change at the call site.
+pub async fn run_topic_watch(
+    _client: Client,
     _namespace: String,
-    _pod_name: String,
-    _gate: Arc<dyn ReadinessGate>,
-    _ready: bool,
+    _watcher: Arc<TopicWatcher>,
+    _cancel: CancellationToken,
 ) -> Result<(), KubeWatchError> {
     Err(KubeWatchError::Other(
-        "patch_readiness: kube-rs path not yet wired (Phase 5 follow-up #10)".to_owned(),
+        "topic watcher: KafkaTopic CR type lands with sk-operator-api in Phase 7".to_owned(),
     ))
 }
 
-/// Narrow seam the kube-bound pumps use to reach the kube API. The
-/// kube-backed impl wraps a `kube::Client`; tests can wire a mock.
-/// Empty for now — methods land with the follow-up that ports
-/// `ControllerWatch`.
-pub trait KubeClient: Send + Sync + 'static {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
+    use kube::api::ObjectMeta;
+
+    #[test]
+    fn convert_slice_extracts_kafka_port_when_named() {
+        let slice = EndpointSlice {
+            metadata: ObjectMeta::default(),
+            address_type: "IPv4".to_owned(),
+            endpoints: vec![Endpoint {
+                hostname: Some("skafka-1".to_owned()),
+                addresses: vec!["10.0.0.5".to_owned()],
+                conditions: Some(EndpointConditions {
+                    ready: Some(true),
+                    serving: None,
+                    terminating: None,
+                }),
+                ..Default::default()
+            }],
+            ports: Some(vec![
+                EndpointPort {
+                    name: Some("kafka".to_owned()),
+                    port: Some(9092),
+                    ..Default::default()
+                },
+                EndpointPort {
+                    name: Some("metrics".to_owned()),
+                    port: Some(9090),
+                    ..Default::default()
+                },
+            ]),
+        };
+        let data = convert_slice(&slice);
+        assert_eq!(data.kafka_port, Some(9092));
+        assert_eq!(data.entries.len(), 1);
+        assert_eq!(data.entries[0].hostname, "skafka-1");
+        assert_eq!(data.entries[0].address, "10.0.0.5");
+        assert!(data.entries[0].ready);
+    }
+
+    #[test]
+    fn convert_slice_skips_entries_without_hostname() {
+        let slice = EndpointSlice {
+            metadata: ObjectMeta::default(),
+            address_type: "IPv4".to_owned(),
+            endpoints: vec![Endpoint {
+                hostname: None,
+                addresses: vec!["10.0.0.5".to_owned()],
+                ..Default::default()
+            }],
+            ports: None,
+        };
+        assert!(convert_slice(&slice).entries.is_empty());
+    }
+
+    #[test]
+    fn kube_lease_epoch_starts_at_zero() {
+        let e = KubeLeaseEpoch::new();
+        assert_eq!(e.current_epoch(), 0);
+        assert!(e.current_holder().is_none());
+    }
+
+    #[test]
+    fn kube_lease_epoch_stores_value() {
+        let e = KubeLeaseEpoch::new();
+        e.store(7, Some("skafka-0".to_owned()));
+        assert_eq!(e.current_epoch(), 7);
+        assert_eq!(e.current_holder().as_deref(), Some("skafka-0"));
+    }
+}
