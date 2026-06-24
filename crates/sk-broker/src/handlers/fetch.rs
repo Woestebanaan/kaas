@@ -93,6 +93,14 @@ impl FetchHandler {
             return error_partition(p.partition_index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
         }
 
+        // Phase 5 cluster check (mirrors Produce). Dev mode (no
+        // coordinator wired) falls through to the always-lead path.
+        if let Some(c) = self.broker.coordinator() {
+            if !c.owns(topic, p.partition_index) {
+                return error_partition(p.partition_index, ERR_NOT_LEADER_FOR_PARTITION);
+            }
+        }
+
         let resource = Resource::topic(topic);
         if !self
             .broker

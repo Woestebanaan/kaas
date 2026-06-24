@@ -34,8 +34,11 @@ pub use group_hash::{
 };
 pub use group_takeover::GroupTakeoverDriver;
 pub use handlers::{
-    ApiVersionsHandler, FetchHandler, InitProducerIdHandler, ListOffsetsHandler, MetadataHandler,
-    ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
+    ApiVersionsHandler, DeleteGroupsHandler, DescribeGroupsHandler, FetchHandler,
+    FindCoordinatorHandler, HeartbeatHandler, InitProducerIdHandler, JoinGroupHandler,
+    LeaveGroupHandler, ListGroupsHandler, ListOffsetsHandler, MetadataHandler, OffsetCommitHandler,
+    OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler,
+    SaslHandshakeHandler, SyncGroupHandler,
 };
 pub use local_lease::LocalLeaseManager;
 pub use self_fence::{is_heartbeat_fresh, DEFAULT_HEARTBEAT_TIMEOUT};

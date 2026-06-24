@@ -105,6 +105,16 @@ impl ProduceHandler {
             return error_partition(p.index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
         }
 
+        // Phase 5 cluster check: a real `Coordinator` answers "do I
+        // lead this partition?" against the most recently applied
+        // assignment.json. Dev mode (no coordinator wired) keeps the
+        // `LocalLeaseManager` "always lead" path.
+        if let Some(c) = self.broker.coordinator() {
+            if !c.owns(topic, p.index) {
+                return error_partition(p.index, ERR_NOT_LEADER_FOR_PARTITION);
+            }
+        }
+
         // Cluster-wide ACL check (gh #126). Topic-level Write is the
         // canonical Apache mapping for Produce.
         let resource = Resource::topic(topic);
@@ -135,7 +145,13 @@ impl ProduceHandler {
             return map_error(p.index, &err);
         }
 
-        let epoch = self.broker.local_lease.current_epoch();
+        // Real cluster epoch from `Coordinator::current_epoch` when
+        // wired; LocalLeaseManager (epoch 0) otherwise.
+        let epoch = self
+            .broker
+            .coordinator()
+            .and_then(|c| c.current_epoch(topic, p.index))
+            .unwrap_or_else(|| self.broker.local_lease.current_epoch());
         match self
             .broker
             .engine

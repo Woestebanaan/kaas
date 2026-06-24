@@ -29,9 +29,11 @@ use sk_auth::{
     QuotaEnforcer, RealAuthEngine, SuperUserAuthorizer,
 };
 use sk_broker::{
-    ApiVersionsHandler, Broker, Cli, CliTlsConfig, FetchHandler, InitProducerIdHandler,
-    ListOffsetsHandler, ListenerEntry, MetadataHandler, ProduceHandler, SaslAuthenticateHandler,
-    SaslHandshakeHandler, TopicRegistry,
+    ApiVersionsHandler, Broker, Cli, CliTlsConfig, DeleteGroupsHandler, DescribeGroupsHandler,
+    FetchHandler, FindCoordinatorHandler, HeartbeatHandler, InitProducerIdHandler,
+    JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler, ListOffsetsHandler, ListenerEntry,
+    MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler,
+    SaslAuthenticateHandler, SaslHandshakeHandler, SyncGroupHandler, TopicRegistry,
 };
 use sk_protocol::{Dispatcher, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
 use sk_storage::{DiskStorageEngine, MemoryStorage, PartitionConfig, RealFs, StorageEngine};
@@ -272,15 +274,42 @@ fn build_dispatcher(
         10,
         Arc::new(MetadataHandler::new(broker.clone(), listeners)),
     );
+    // Phase 5 consumer-group surface (keys 8-16, 42, 47).
+    d.register(8, 0, 8, Arc::new(OffsetCommitHandler::new(broker.clone())));
+    d.register(9, 1, 8, Arc::new(OffsetFetchHandler::new(broker.clone())));
+    d.register(
+        10,
+        0,
+        4,
+        Arc::new(FindCoordinatorHandler::new(broker.clone())),
+    );
+    d.register(11, 0, 9, Arc::new(JoinGroupHandler::new(broker.clone())));
+    d.register(12, 0, 4, Arc::new(HeartbeatHandler::new(broker.clone())));
+    d.register(13, 0, 5, Arc::new(LeaveGroupHandler::new(broker.clone())));
+    d.register(14, 0, 5, Arc::new(SyncGroupHandler::new(broker.clone())));
+    d.register(
+        15,
+        0,
+        5,
+        Arc::new(DescribeGroupsHandler::new(broker.clone())),
+    );
+    d.register(16, 0, 4, Arc::new(ListGroupsHandler::new(broker.clone())));
     d.register(17, 0, 1, Arc::new(SaslHandshakeHandler::new()));
     d.register(18, 0, 4, Arc::new(ApiVersionsHandler::new()));
-    d.register(22, 0, 4, Arc::new(InitProducerIdHandler::new(broker)));
+    d.register(
+        22,
+        0,
+        4,
+        Arc::new(InitProducerIdHandler::new(broker.clone())),
+    );
     d.register(
         36,
         0,
         2,
         Arc::new(SaslAuthenticateHandler::new(engines.clone())),
     );
+    d.register(42, 0, 2, Arc::new(DeleteGroupsHandler::new(broker.clone())));
+    d.register(47, 0, 0, Arc::new(OffsetDeleteHandler::new(broker)));
     d.set_auth(engines);
     d
 }
