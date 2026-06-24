@@ -34,7 +34,9 @@ pub const ALL: &[ApiSpec] = &[
     crate::api::fetch::SPEC,
     crate::api::list_offsets::SPEC,
     crate::api::metadata::SPEC,
+    crate::api::sasl_handshake::SPEC,
     crate::api::init_producer_id::SPEC,
+    crate::api::sasl_authenticate::SPEC,
     crate::api::api_versions::SPEC,
 ];
 

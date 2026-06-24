@@ -23,3 +23,5 @@ pub mod list_offsets;
 pub mod metadata;
 pub mod produce;
 pub mod registry;
+pub mod sasl_authenticate;
+pub mod sasl_handshake;
