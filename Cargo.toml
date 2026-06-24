@@ -45,7 +45,9 @@ tonic          = "0.12"
 prost-build    = "0.13"
 tonic-build    = "0.12"
 protoc-bin-vendored = "3"
+chrono         = { version = "0.4", default-features = false, features = ["std", "clock"] }
 crc32c         = "0.6"
+twox-hash      = { version = "2", default-features = false, features = ["xxhash64"] }
 uuid           = { version = "1.11", features = ["v4", "serde"] }
 base64         = "0.22"
 hmac           = "0.12"

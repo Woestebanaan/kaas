@@ -1,3 +1,33 @@
-//! sk-controller — balancer, assignment writer, heartbeat server.
+//! sk-controller — controller-side bring-up.
 //!
-//! Populated in Phase 5 of the rewrite.
+//! Phase 5 ships:
+//!
+//! - [`balancer`] — rendezvous-hash partition + consumer-group
+//!   placement with deterministic smoothing.
+//! - [`assignment_writer`] — atomic `assignment.json` writer with
+//!   the trait seams (`TopicSource`, `BrokerSource`,
+//!   `GroupSource`, `CrMirror`).
+//! - [`heartbeat_server`] — controller-side bidi gRPC server.
+//! - [`election`] + [`LocalElection`] — dev-mode "always elected"
+//!   stub. The kube-backed Lease implementation lands in workstream
+//!   E follow-up alongside `ControllerWatch`.
+//! - [`k8s_mirror`] — [`CrMirror`] trait + [`NoopMirror`] zero-
+//!   value impl. The real `KafkaClusterAssignments` writer is a
+//!   Phase 7 follow-up.
+
+pub mod assignment_writer;
+pub mod balancer;
+pub mod election;
+pub mod heartbeat_server;
+pub mod k8s_mirror;
+
+pub use assignment_writer::{
+    AssignmentLoop, AssignmentReason, BrokerSource, GroupSource, StaticSources, TopicSource,
+};
+pub use balancer::{
+    balance, balance_groups, group_hash, rendezvous_hash, rendezvous_pick, rendezvous_pick_group,
+    GroupSpec, TopicSpec,
+};
+pub use election::{LeaseElection, LocalElection};
+pub use heartbeat_server::{HeartbeatServer, HeartbeatService};
+pub use k8s_mirror::{CrMirror, NoopMirror};

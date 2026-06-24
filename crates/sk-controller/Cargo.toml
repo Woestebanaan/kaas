@@ -10,3 +10,24 @@ description  = "Controller-side: balancer, assignment writer, heartbeat server."
 
 [lints]
 workspace = true
+
+[dependencies]
+async-stream = "0.3"
+async-trait  = { workspace = true }
+chrono       = { workspace = true }
+parking_lot  = { workspace = true }
+prost        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+sk-broker    = { path = "../sk-broker" }
+sk-coordinator = { path = "../sk-coordinator" }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tokio-stream = "0.1"
+tonic        = { workspace = true }
+tracing      = { workspace = true }
+twox-hash    = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
