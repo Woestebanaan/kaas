@@ -8,5 +8,36 @@ rust-version.workspace = true
 publish      = false
 description  = "SCRAM-256/512, mTLS, ACLs, quotas, principal mapping."
 
+[features]
+# Exposes in-memory loader helpers for downstream test crates. Off
+# in production builds; on under `cargo test`. Don't depend on this
+# from `[dependencies]` — only from `[dev-dependencies]`.
+test-helpers = []
+
 [lints]
 workspace = true
+
+[dependencies]
+arc-swap     = { workspace = true }
+async-trait  = { workspace = true }
+base64       = { workspace = true }
+bytes        = { workspace = true }
+dashmap      = { workspace = true }
+hmac         = { workspace = true }
+parking_lot  = { workspace = true }
+rand         = { workspace = true }
+regex        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+sha2         = { workspace = true }
+subtle       = { workspace = true }
+thiserror    = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing      = { workspace = true }
+x509-parser  = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rcgen    = { workspace = true }
+tempfile = { workspace = true }
+tokio    = { workspace = true }
