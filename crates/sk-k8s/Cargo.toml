@@ -6,7 +6,37 @@ license.workspace      = true
 repository.workspace   = true
 rust-version.workspace = true
 publish      = false
-description  = "Broker-side K8s helpers: BrokerRegistry, TopicWatcher, TopicCRWriter, ReadinessUpdater."
+description  = "Broker-side K8s helpers: BrokerRegistry, TopicWatcher, ReadinessUpdater."
 
 [lints]
 workspace = true
+
+[dependencies]
+async-trait    = { workspace = true }
+parking_lot    = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+sk-broker      = { path = "../sk-broker" }
+sk-coordinator = { path = "../sk-coordinator" }
+thiserror      = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+
+# kube wiring — feature-gated so a dev binary without kube creds
+# still links. The trait surfaces ([`ReadinessGate`], etc.) ship
+# unconditionally.
+futures        = { workspace = true, optional = true }
+k8s-openapi    = { workspace = true, optional = true }
+kube           = { workspace = true, optional = true }
+
+[features]
+default = []
+# Pull in the kube-rs runtime + typed API impls. Opt-in for now —
+# the kube transitive crate `home` requires rustc 1.88 while the
+# workspace is pinned to 1.85, and the real watcher implementations
+# land in follow-up #10. Dev binaries that just need the
+# pure-state surface link without this feature.
+kube-watchers = ["dep:futures", "dep:k8s-openapi", "dep:kube"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
