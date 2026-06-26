@@ -176,9 +176,14 @@ pub fn install(
             );
             broker.install_coordinator(coordinator.clone());
 
-            // Hot-swap the Manager's group source to the
-            // assignment-aware Coordinator (gh #92).
+            // Hot-swap the Manager's group + txn sources to the
+            // assignment-aware Coordinator (gh #92, gh #91). Without
+            // the txn swap, FindCoordinator(KeyType=transaction)
+            // would keep returning self for every txnID — the
+            // LocalTxnSource bootstrap — instead of routing
+            // through hash(txnID) % numBrokers.
             manager.set_group_assignment_source(coordinator.clone());
+            manager.set_txn_assignment_source(coordinator.clone());
 
             // Drivers fire on every assignment apply.
             let takeover = TakeoverDriver::new(engine.clone(), self_id.clone());
