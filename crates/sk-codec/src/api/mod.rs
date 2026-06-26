@@ -15,10 +15,13 @@
 //! registered through [`registry::ALL`] so [`api_versions`] can emit a
 //! correct ApiVersions response without per-module bookkeeping.
 
+pub mod add_offsets_to_txn;
+pub mod add_partitions_to_txn;
 pub mod api_versions;
 pub mod common;
 pub mod delete_groups;
 pub mod describe_groups;
+pub mod end_txn;
 pub mod fetch;
 pub mod find_coordinator;
 pub mod heartbeat;
@@ -36,3 +39,5 @@ pub mod registry;
 pub mod sasl_authenticate;
 pub mod sasl_handshake;
 pub mod sync_group;
+pub mod txn_offset_commit;
+pub mod write_txn_markers;

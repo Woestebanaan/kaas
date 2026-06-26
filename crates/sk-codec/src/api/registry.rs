@@ -45,6 +45,11 @@ pub const ALL: &[ApiSpec] = &[
     crate::api::list_groups::SPEC,
     crate::api::sasl_handshake::SPEC,
     crate::api::init_producer_id::SPEC,
+    crate::api::add_partitions_to_txn::SPEC,
+    crate::api::add_offsets_to_txn::SPEC,
+    crate::api::end_txn::SPEC,
+    crate::api::write_txn_markers::SPEC,
+    crate::api::txn_offset_commit::SPEC,
     crate::api::sasl_authenticate::SPEC,
     crate::api::api_versions::SPEC,
     crate::api::delete_groups::SPEC,
@@ -82,17 +87,21 @@ mod tests {
         assert!(spec.is_flexible(4));
     }
 
-    /// Phase 5 exit criterion §A — registry pins to 19 entries:
+    /// Phase 6 exit criterion §A — registry pins to 24 entries:
     /// keys 0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22,
-    /// 36, 42, 47. Bump this number when a new module lands.
+    /// 24, 25, 26, 27, 28, 36, 42, 47. Bump this number when a new
+    /// module lands.
     #[test]
-    fn registry_size_phase5() {
-        assert_eq!(ALL.len(), 19);
+    fn registry_size_phase6() {
+        assert_eq!(ALL.len(), 24);
         let mut keys: Vec<i16> = ALL.iter().map(|s| s.key).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec![0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22, 36, 42, 47]
+            vec![
+                0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22, 24, 25, 26, 27, 28, 36,
+                42, 47,
+            ]
         );
     }
 }
