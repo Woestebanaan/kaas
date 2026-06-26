@@ -38,11 +38,13 @@ use sk_auth::{
     QuotaEnforcer, RealAuthEngine, SuperUserAuthorizer,
 };
 use sk_broker::{
-    ApiVersionsHandler, Broker, Cli, CliTlsConfig, DeleteGroupsHandler, DescribeGroupsHandler,
-    FetchHandler, FindCoordinatorHandler, HeartbeatHandler, InitProducerIdHandler,
-    JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler, ListOffsetsHandler, ListenerEntry,
-    MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler,
+    AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, ApiVersionsHandler, Broker, Cli,
+    CliTlsConfig, DeleteGroupsHandler, DescribeGroupsHandler, EndTxnHandler, FetchHandler,
+    FindCoordinatorHandler, HeartbeatHandler, InitProducerIdHandler, JoinGroupHandler,
+    LeaveGroupHandler, ListGroupsHandler, ListOffsetsHandler, ListenerEntry, MetadataHandler,
+    OffsetCommitHandler, OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler,
     SaslAuthenticateHandler, SaslHandshakeHandler, SyncGroupHandler, TopicRegistry,
+    TxnOffsetCommitHandler, WriteTxnMarkersHandler,
 };
 use sk_protocol::{Dispatcher, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
 use sk_storage::{DiskStorageEngine, MemoryStorage, PartitionConfig, RealFs, StorageEngine};
@@ -331,6 +333,32 @@ fn build_dispatcher(
         0,
         4,
         Arc::new(InitProducerIdHandler::new(broker.clone())),
+    );
+    // Phase 6 transactional surface (keys 24–28).
+    d.register(
+        24,
+        0,
+        3,
+        Arc::new(AddPartitionsToTxnHandler::new(broker.clone())),
+    );
+    d.register(
+        25,
+        0,
+        3,
+        Arc::new(AddOffsetsToTxnHandler::new(broker.clone())),
+    );
+    d.register(26, 0, 3, Arc::new(EndTxnHandler::new(broker.clone())));
+    d.register(
+        27,
+        0,
+        1,
+        Arc::new(WriteTxnMarkersHandler::new(broker.clone())),
+    );
+    d.register(
+        28,
+        0,
+        3,
+        Arc::new(TxnOffsetCommitHandler::new(broker.clone())),
     );
     d.register(
         36,

@@ -25,20 +25,28 @@
 //!   wires land.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use sk_broker::{
-    Broker, Coordinator, GroupTakeoverDriver, LocalHeartbeat, LocalLeaseEpoch, TakeoverDriver,
+    Broker, Coordinator, FenceWatcher, GroupTakeoverDriver, LocalHeartbeat, LocalLeaseEpoch,
+    ProducerEpochFencer, TakeoverDriver,
 };
 use sk_controller::{AssignmentLoop, AssignmentReason, LocalElection, StaticSources};
 use sk_coordinator::{
-    BrokerEndpoint, BrokerLookup, FnLookup, LocalGroupSource, Manager, OffsetStore,
+    fence_log_dir, BrokerEndpoint, BrokerLookup, FenceLog, FnLookup, LocalGroupSource,
+    LocalTxnSource, Manager, OffsetStore, TxnOffsetHook, TxnStateStore,
 };
 use sk_storage::StorageEngine;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use sk_broker::TopicRegistry;
+
+/// Cadence of the txn-timeout reaper. Matches Apache Kafka's
+/// `transaction.abort.timed.out.transaction.cleanup.interval.ms`
+/// default.
+const TXN_REAPER_INTERVAL: Duration = Duration::from_secs(10);
 
 /// What was installed. Returned so `main.rs` can drop the handles
 /// on shutdown.
@@ -51,6 +59,16 @@ pub struct ClusterRuntime {
     /// handle for the harness.
     #[allow(dead_code)]
     pub coordinator: Option<Arc<Coordinator>>,
+    /// Phase 6 transactional-state store. `Some` whenever a data
+    /// dir is configured (dev `MemoryStorage` paths use a tempdir so
+    /// the gh #22 rejoin contract still works under unit tests).
+    /// Broker holds an installed Arc; this is a convenient handle.
+    #[allow(dead_code)]
+    pub txn_state: Arc<TxnStateStore>,
+    /// Phase 6 outbound fence log (gh #108). Held so the Arc lives
+    /// at least as long as `main`.
+    #[allow(dead_code)]
+    pub fence_log: Arc<FenceLog>,
     /// Background tasks the runtime owns. Aborted on shutdown.
     pub tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -80,13 +98,66 @@ pub fn install(
         lookup,
         LocalGroupSource::new(self_id.clone()),
     );
+    // Phase 6 bootstrap: txn assignment source. Hot-swapped to the
+    // Coordinator below when a data dir is configured.
+    manager.set_txn_assignment_source(LocalTxnSource::new(self_id.clone()));
     broker.install_coord_manager(manager.clone());
     info!(
         broker_id = self_id.as_str(),
-        cluster_id, "installed Manager (LocalGroupSource bootstrap)"
+        cluster_id, "installed Manager (LocalGroupSource + LocalTxnSource bootstrap)"
     );
 
+    // Phase 6 transactional-state store + fence log. We always
+    // construct one — dev mode (no SKAFKA_DATA_DIR) gets a tempdir
+    // so the gh #22 rejoin contract still works under unit tests
+    // and single-binary smoke runs. Same shape as the offset store
+    // fallback above.
+    let cluster_dir = data_dir
+        .clone()
+        .map(|d| d.join("__cluster"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/skafka-cluster-mem"));
+    std::fs::create_dir_all(&cluster_dir)?;
+    let txn_state = Arc::new(TxnStateStore::open(&cluster_dir, 0)?);
+    broker.install_txn_state(txn_state.clone());
+    info!(
+        slots = txn_state.num_slots(),
+        cluster_dir = %cluster_dir.display(),
+        "installed TxnStateStore",
+    );
+
+    // EndTxn / reaper → group-coordinator offset commit/discard.
+    let hook: Arc<dyn TxnOffsetHook> = Arc::new(OffsetStoreHook {
+        manager: manager.clone(),
+    });
+    txn_state.set_offset_hook(hook);
+
+    let fence_dir = fence_log_dir(&cluster_dir);
+    let fence_log = Arc::new(FenceLog::open(&fence_dir, &self_id)?);
+    info!(path = %fence_log.path().display(), "opened FenceLog");
+
     let mut tasks = Vec::new();
+
+    // FenceWatcher: poll peer brokers' producer_fences/from-*.json
+    // every 2 s and dispatch new (pid, epoch) pairs. The wired
+    // fencer is a no-op until the storage engine grows a cross-
+    // partition fence_producer_epoch method (open follow-up); the
+    // watcher still runs so the dispatch path is exercised in
+    // production and the on-disk shape is round-tripped.
+    let fencer: Arc<dyn ProducerEpochFencer> = Arc::new(NoopFencer);
+    let watcher = Arc::new(FenceWatcher::new(fence_dir, &self_id, fencer));
+    let watcher_cancel = cancel.clone();
+    let watcher_clone = watcher.clone();
+    tasks.push(tokio::spawn(async move {
+        watcher_clone.run(watcher_cancel).await;
+    }));
+
+    // Txn-timeout reaper (gh #28). Walks every slot every 10 s,
+    // aborts Ongoing entries past their TransactionTimeoutMs.
+    let reaper_cancel = cancel.clone();
+    let reaper_store = txn_state.clone();
+    tasks.push(tokio::spawn(async move {
+        run_txn_reaper(reaper_store, reaper_cancel).await;
+    }));
     let coordinator = match data_dir {
         None => {
             info!("dev mode (MemoryStorage) — Coordinator + AssignmentLoop skipped");
@@ -144,8 +215,80 @@ pub fn install(
     Ok(ClusterRuntime {
         manager,
         coordinator,
+        txn_state,
+        fence_log,
         tasks,
     })
+}
+
+/// Bridges [`TxnOffsetHook`] (from the transactional coordinator)
+/// to the consumer-group `Manager`'s `OffsetStore`. On `EndTxn`
+/// commit, the txn coord fires the hook for each `(group, pid)`
+/// that staged offsets via `TxnOffsetCommit`; the hook materialises
+/// the pending entry into the durable offset map. On abort, it
+/// discards the pending entry.
+struct OffsetStoreHook {
+    manager: Arc<Manager>,
+}
+
+impl TxnOffsetHook for OffsetStoreHook {
+    fn on_end_txn(&self, group_id: &str, producer_id: i64, commit: bool) {
+        if commit {
+            if let Err(err) = self.manager.offsets.commit_pending(group_id, producer_id) {
+                warn!(
+                    group_id, producer_id, %err,
+                    "txn offset hook: commit_pending failed; staged offsets remain pending"
+                );
+            }
+        } else {
+            self.manager.offsets.discard_pending(group_id, producer_id);
+        }
+    }
+}
+
+/// Placeholder [`ProducerEpochFencer`] wired into the
+/// [`FenceWatcher`] until the storage engine exposes a
+/// cross-partition `fence_producer_epoch` walker. Receives peer
+/// brokers' epoch bumps and logs them — the on-disk shape is
+/// exercised but the engine-side application is open follow-up.
+struct NoopFencer;
+
+impl ProducerEpochFencer for NoopFencer {
+    fn fence_producer_epoch(&self, pid: i64, epoch: i16) {
+        tracing::debug!(
+            pid,
+            epoch,
+            "fence watcher: peer producer-epoch bump received; \
+             engine-side application is a follow-up (storage trait \
+             lacks cross-partition fence)"
+        );
+    }
+}
+
+async fn run_txn_reaper(store: Arc<TxnStateStore>, cancel: CancellationToken) {
+    let mut tick = tokio::time::interval(TXN_REAPER_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            _ = tick.tick() => {
+                // `now_ms` is wall-clock millis. UNIX_EPOCH
+                // conversion can't fail in practice (it would mean
+                // the system clock is pre-1970).
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+                    .unwrap_or(0);
+                let aborted = store.abort_overdue(now_ms);
+                if !aborted.is_empty() {
+                    info!(
+                        count = aborted.len(),
+                        "txn-timeout reaper aborted overdue Ongoing transactions"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Spawn an [`AssignmentLoop`] that runs in single-broker mode. The

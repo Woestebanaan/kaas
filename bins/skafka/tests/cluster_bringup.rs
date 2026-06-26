@@ -128,9 +128,15 @@ async fn in_memory_mode_installs_manager_but_no_coordinator() {
         broker.coordinator().is_none(),
         "Coordinator must stay unwired in MemoryStorage mode"
     );
-    assert!(
-        runtime.tasks.is_empty(),
-        "no background tasks in MemoryStorage mode"
+    // Phase 6 unconditionally spawns the FenceWatcher and the
+    // txn-timeout reaper so the transactional surface works in
+    // dev mode against MemoryStorage. The assignment loop +
+    // assignment.json watcher stay skipped (no data dir).
+    assert_eq!(
+        runtime.tasks.len(),
+        2,
+        "dev mode should spawn only the Phase 6 FenceWatcher + reaper"
     );
+    assert!(broker.txn_state().is_some());
     cancel.cancel();
 }
