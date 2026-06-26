@@ -91,11 +91,24 @@ pub fn encode_response(
     Ok(())
 }
 
+pub fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
+    let flexible = version >= MIN_FLEXIBLE;
+    let throttle_time_ms = crate::primitives::read_i32(buf)?;
+    let error_code = read_i16(buf)?;
+    if flexible {
+        tagged::read(buf)?;
+    }
+    Ok(Response {
+        throttle_time_ms,
+        error_code,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::common::write_str;
-    use crate::primitives::{read_i32, write_i64, write_i8};
+    use crate::primitives::{write_i64, write_i8};
 
     fn encode_request(buf: &mut BytesMut, req: &Request, version: i16) -> Result<(), CodecError> {
         let flexible = version >= MIN_FLEXIBLE;
@@ -110,16 +123,7 @@ mod tests {
     }
 
     fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
-        let flexible = version >= MIN_FLEXIBLE;
-        let throttle_time_ms = read_i32(buf)?;
-        let error_code = read_i16(buf)?;
-        if flexible {
-            tagged::read(buf)?;
-        }
-        Ok(Response {
-            throttle_time_ms,
-            error_code,
-        })
+        super::decode_response(buf, version)
     }
 
     fn roundtrip(version: i16, committed: bool) {

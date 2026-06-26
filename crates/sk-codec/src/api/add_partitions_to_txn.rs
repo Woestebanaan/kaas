@@ -140,6 +140,43 @@ pub fn encode_response(
     Ok(())
 }
 
+pub fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
+    let flexible = version >= MIN_FLEXIBLE;
+    let throttle_time_ms = read_i32(buf)?;
+    let topic_count = read_array_len(buf, flexible)?;
+    let mut results = Vec::with_capacity(topic_count);
+    for _ in 0..topic_count {
+        let name = read_str(buf, flexible)?;
+        let part_count = read_array_len(buf, flexible)?;
+        let mut partition_results = Vec::with_capacity(part_count);
+        for _ in 0..part_count {
+            let partition_index = read_i32(buf)?;
+            let error_code = read_i16(buf)?;
+            if flexible {
+                tagged::read(buf)?;
+            }
+            partition_results.push(PartitionResult {
+                partition_index,
+                error_code,
+            });
+        }
+        if flexible {
+            tagged::read(buf)?;
+        }
+        results.push(TopicResult {
+            name,
+            partition_results,
+        });
+    }
+    if flexible {
+        tagged::read(buf)?;
+    }
+    Ok(Response {
+        throttle_time_ms,
+        results,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,43 +202,6 @@ mod tests {
             tagged::write_empty(buf);
         }
         Ok(())
-    }
-
-    fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
-        let flexible = version >= MIN_FLEXIBLE;
-        let throttle_time_ms = read_i32(buf)?;
-        let topic_count = read_array_len(buf, flexible)?;
-        let mut results = Vec::with_capacity(topic_count);
-        for _ in 0..topic_count {
-            let name = read_str(buf, flexible)?;
-            let part_count = read_array_len(buf, flexible)?;
-            let mut partition_results = Vec::with_capacity(part_count);
-            for _ in 0..part_count {
-                let partition_index = read_i32(buf)?;
-                let error_code = read_i16(buf)?;
-                if flexible {
-                    tagged::read(buf)?;
-                }
-                partition_results.push(PartitionResult {
-                    partition_index,
-                    error_code,
-                });
-            }
-            if flexible {
-                tagged::read(buf)?;
-            }
-            results.push(TopicResult {
-                name,
-                partition_results,
-            });
-        }
-        if flexible {
-            tagged::read(buf)?;
-        }
-        Ok(Response {
-            throttle_time_ms,
-            results,
-        })
     }
 
     fn sample_request() -> Request {

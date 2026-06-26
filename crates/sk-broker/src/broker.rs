@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use sk_auth::{AllowAllAuthorizer, Authorizer, NoQuotaChecker, QuotaChecker};
-use sk_coordinator::Manager;
+use sk_coordinator::{Manager, TxnStateStore};
 use sk_storage::StorageEngine;
 
 use crate::coordinator::Coordinator;
@@ -54,6 +54,12 @@ pub struct Broker {
     /// through this; when `None`, the local-lease "always lead" path
     /// stays in effect — the gh #92 fallback contract.
     coordinator: RwLock<Option<Arc<Coordinator>>>,
+    /// Persistent transactional-state store (Phase 6). `None` in
+    /// dev mode and Phase-3/4 tests; handlers that read this fall
+    /// back to fresh-PID-every-time for transactional requests and
+    /// log a warning once. `bins/skafka/main.rs` installs the real
+    /// store at boot.
+    txn_state: RwLock<Option<Arc<TxnStateStore>>>,
     producer_id_counter: AtomicI64,
 }
 
@@ -112,6 +118,7 @@ impl Broker {
             quotas,
             coord_manager: RwLock::new(None),
             coordinator: RwLock::new(None),
+            txn_state: RwLock::new(None),
             // Start at 1 so 0 stays available as an "unset" sentinel
             // for clients that read uninitialised pid.
             producer_id_counter: AtomicI64::new(1),
@@ -157,6 +164,35 @@ impl Broker {
     /// fall back to the `LocalLeaseManager` "always lead" path.
     pub fn coordinator(&self) -> Option<Arc<Coordinator>> {
         self.coordinator.read().clone()
+    }
+
+    /// Install the Phase 6 [`TxnStateStore`]. Called once from
+    /// `bins/skafka/main.rs` at boot. Tests can call it directly to
+    /// wire a per-test store.
+    pub fn install_txn_state(&self, s: Arc<TxnStateStore>) {
+        *self.txn_state.write() = Some(s);
+    }
+
+    /// Read the installed [`TxnStateStore`]. Returns `None` when no
+    /// store is wired; transactional handlers fall back to either a
+    /// `COORDINATOR_NOT_AVAILABLE` (15) response or — for
+    /// `InitProducerId` — a fresh PID with `epoch = 0` plus a one-
+    /// shot warning, matching the Go reference's stage-A degradation.
+    pub fn txn_state(&self) -> Option<Arc<TxnStateStore>> {
+        self.txn_state.read().clone()
+    }
+
+    /// Does this broker own the txn coordinator slot for `txn_id`?
+    /// Delegates to the installed [`Coordinator`] (gh #91 hash
+    /// routing) when present; always returns `true` in dev mode so
+    /// single-broker setups and unit tests still serve transactional
+    /// requests.
+    pub fn owns_txn(&self, txn_id: &str) -> bool {
+        use sk_coordinator::TxnAssignmentSource;
+        match self.coordinator() {
+            Some(c) => c.owns_txn(txn_id),
+            None => true,
+        }
     }
 }
 

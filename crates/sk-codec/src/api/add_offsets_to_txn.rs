@@ -91,6 +91,19 @@ pub fn encode_response(
     Ok(())
 }
 
+pub fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
+    let flexible = version >= MIN_FLEXIBLE;
+    let throttle_time_ms = crate::primitives::read_i32(buf)?;
+    let error_code = read_i16(buf)?;
+    if flexible {
+        tagged::read(buf)?;
+    }
+    Ok(Response {
+        throttle_time_ms,
+        error_code,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,16 +123,7 @@ mod tests {
     }
 
     fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
-        let flexible = version >= MIN_FLEXIBLE;
-        let throttle_time_ms = crate::primitives::read_i32(buf)?;
-        let error_code = read_i16(buf)?;
-        if flexible {
-            tagged::read(buf)?;
-        }
-        Ok(Response {
-            throttle_time_ms,
-            error_code,
-        })
+        super::decode_response(buf, version)
     }
 
     fn sample_request() -> Request {
