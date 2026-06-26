@@ -12,6 +12,7 @@ pub mod broker;
 pub mod cli;
 pub mod control_batch;
 pub mod coordinator;
+pub mod fence_watcher;
 pub mod group_hash;
 pub mod group_takeover;
 pub mod handlers;
@@ -31,6 +32,7 @@ pub use control_batch::build_control_batch;
 pub use coordinator::{
     partition_key, Coordinator, HeartbeatSource, LeaseEpochSource, LocalHeartbeat, LocalLeaseEpoch,
 };
+pub use fence_watcher::{FenceWatcher, ProducerEpochFencer, DEFAULT_POLL as FENCE_POLL_DEFAULT};
 pub use group_hash::{
     coordinator_slot, group_coordinator_slot, pick_coordinator, pick_group_coordinator,
     pick_txn_coordinator, txn_coordinator_slot,

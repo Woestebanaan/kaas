@@ -5,12 +5,14 @@
 
 pub mod atomic_write;
 pub mod errors;
+pub mod fence_log;
 pub mod group;
 pub mod manager;
 pub mod offset_store;
 pub mod txn_state;
 
 pub use errors::CoordError;
+pub use fence_log::{fence_log_dir, FenceLog, FENCE_DIR_NAME};
 pub use group::{
     error_codes, Group, GroupSnapshot, GroupState, HeartbeatRequest, JoinOutcome, JoinRequest,
     JoinedMember, MemberSnapshot, ProtocolMetadata, SyncAssignment, SyncOutcome, SyncRequest,
