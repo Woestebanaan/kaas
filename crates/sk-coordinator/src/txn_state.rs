@@ -1,0 +1,1103 @@
+//! Transaction-coordinator persistent state store.
+//!
+//! Port of `archive/internal/coordinator/txn_state.go`. Tracks
+//! `(producer_id, epoch, state, partitions, groups, ongoing_since_ms,
+//! transaction_timeout_ms)` per `transactional.id`, sharded across
+//! 50 JSON files under `<data_dir>/__cluster/txn_state/slot-<n>.json`.
+//!
+//! Mirrors Apache Kafka's `__transaction_state` internal topic:
+//! partition = slot, log replay = JSON file read. Skafka skips the
+//! log-replay step because the file *is* the materialised map the
+//! Apache coordinator builds from compacted log records.
+//!
+//! **Read-fresh-on-every-call** semantics: each public method
+//! re-reads the slot file from disk before mutating, then writes
+//! back via atomic `tmp + fsync + rename`. NFS close-to-open
+//! consistency means a fresh `File::open` sees the latest committed
+//! state from any other broker that recently wrote — so on
+//! coordinator failover the new owner continues from the same
+//! (PID, epoch) state without log replay.
+//!
+//! **Out of scope vs Go reference** (Phase 6 plan §B):
+//! - `migrateLegacy` (pre-#108 single-file → slot layout) — Phase 6
+//!   ships only the slot layout; deployments rolling forward from
+//!   Go upgrade through a stop-the-world cutover per
+//!   [`docs/phase-9.md`].
+//! - `migrateLayout` (slot count re-shard) — `NUM_SLOTS` is pinned
+//!   to `DEFAULT_NUM_SLOTS = 50` for the whole cluster.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::atomic_write::atomic_write_json;
+
+/// Matches Apache Kafka's `transaction.state.log.num.partitions=50`
+/// default. Pinning to a fixed cluster-wide constant decouples the
+/// storage layout from broker scale operations.
+pub const DEFAULT_NUM_SLOTS: usize = 50;
+
+/// Transaction state machine. Mirrors Apache's `TransactionState`
+/// (TransactionMetadata.scala). The on-disk JSON representation
+/// uses the same human-readable strings as Go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TxnState {
+    /// No transaction in progress (default).
+    #[serde(rename = "")]
+    #[default]
+    Empty,
+    /// At least one `AddPartitionsToTxn` or `AddOffsetsToTxn`
+    /// succeeded.
+    Ongoing,
+    /// `EndTxn(commit)` accepted, transition in flight.
+    PrepareCommit,
+    /// `EndTxn(abort)` accepted, transition in flight.
+    PrepareAbort,
+    /// Commit finished. Idempotent commit retries return `Ok(())`.
+    CompleteCommit,
+    /// Abort finished. Idempotent abort retries return `Ok(())`.
+    CompleteAbort,
+}
+
+impl TxnState {
+    fn is_empty(&self) -> bool {
+        matches!(self, TxnState::Empty)
+    }
+}
+
+/// One `(topic, partitions)` tuple inside a [`TxnEntry`]. Apache's
+/// wire/storage shape uses `TopicPartition` (a single `(topic, int32)`
+/// pair) but groups by topic on the wire; we store the same grouped
+/// form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxnTopic {
+    pub topic: String,
+    pub partitions: Vec<i32>,
+}
+
+/// Persistent record of one transactional producer. JSON shape is
+/// byte-identical to the Go reference so a Go-written slot file
+/// reads cleanly through this struct (and vice versa for the
+/// migration window).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TxnEntry {
+    pub pid: i64,
+    pub epoch: i16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<TxnTopic>,
+    /// Wall-clock millis when the entry entered `Ongoing`. Zero
+    /// in any other state. Reaper input.
+    #[serde(default, skip_serializing_if = "i64_is_zero")]
+    pub ongoing_since_ms: i64,
+    /// Mirrors `InitProducerIdRequest.transaction_timeout_ms`
+    /// (KIP-98).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub transaction_timeout_ms: i32,
+    #[serde(default, skip_serializing_if = "TxnState::is_empty")]
+    pub state: TxnState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+}
+
+fn i64_is_zero(v: &i64) -> bool {
+    *v == 0
+}
+fn i32_is_zero(v: &i32) -> bool {
+    *v == 0
+}
+
+/// Side-effect record [`TxnStateStore::abort_overdue_owned`] returns
+/// per aborted txn — feeds metrics, the future cross-broker marker
+/// writer (gh #114), and tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnAbortRecord {
+    pub txn_id: String,
+    pub pid: i64,
+    pub old_epoch: i16,
+    pub new_epoch: i16,
+    pub groups: Vec<String>,
+}
+
+/// Cross-coordinator signal that fires on every `EndTxn` (and
+/// reaper-driven abort) transition. The txn coordinator tells the
+/// group's offset store to either materialise (`commit = true`) or
+/// discard (`commit = false`) the pending offsets that
+/// `TxnOffsetCommit` staged earlier.
+///
+/// In Apache, this signal travels via `WriteTxnMarkers` to the
+/// `__consumer_offsets[partitionFor(group_id)]` partition's leader.
+/// Skafka stages it as a local hook — when txn coord and group
+/// coord live on the same broker it fires directly; cross-broker
+/// dispatch lands with gh #114.
+pub trait TxnOffsetHook: Send + Sync + 'static {
+    fn on_end_txn(&self, group_id: &str, producer_id: i64, commit: bool);
+}
+
+/// Errors mappable to Kafka wire codes by the txn handlers. Keeping
+/// the store transport-free lets each handler pick the v0-3 (per-
+/// partition error code) or v4+ (top-level error code) shape
+/// without leaking codec types into this crate.
+#[derive(Debug, Error)]
+pub enum TxnStateError {
+    /// Wire code 71 — INVALID_TRANSACTIONAL_ID.
+    #[error("txn state: empty transactional id")]
+    EmptyTxnId,
+    /// Wire code 49 — UNKNOWN_PRODUCER_ID.
+    #[error("txn state: unknown txn id or pid mismatch")]
+    UnknownProducer,
+    /// Wire code 47 — INVALID_PRODUCER_EPOCH.
+    #[error("txn state: producer epoch fenced")]
+    EpochFenced,
+    /// Wire code 51 — CONCURRENT_TRANSACTIONS.
+    #[error("txn state: concurrent transition in progress")]
+    Concurrent,
+    /// Wire code 50 — INVALID_TXN_STATE.
+    #[error("txn state: invalid state transition")]
+    InvalidState,
+    #[error("txn state: i/o: {0}")]
+    Io(#[from] io::Error),
+    #[error("txn state: decode: {0}")]
+    Decode(#[from] serde_json::Error),
+}
+
+type Result<T> = std::result::Result<T, TxnStateError>;
+
+/// Per-cluster transactional-state store. See module docs.
+pub struct TxnStateStore {
+    dir: PathBuf,
+    num_slots: usize,
+    /// Single global mutex serialises slot reads + writes. The Go
+    /// reference uses the same shape. The store sits off the hot
+    /// path (txn surface fires at producer boot + per-txn commit;
+    /// Produce/Fetch never touch it) so coarse locking is fine.
+    mu: Mutex<()>,
+    hook: RwLock<Option<Arc<dyn TxnOffsetHook>>>,
+}
+
+impl std::fmt::Debug for TxnStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxnStateStore")
+            .field("dir", &self.dir)
+            .field("num_slots", &self.num_slots)
+            .finish()
+    }
+}
+
+impl TxnStateStore {
+    /// Open the per-cluster transactional-state dir under
+    /// `parent_dir/txn_state/`. `num_slots == 0` falls back to
+    /// [`DEFAULT_NUM_SLOTS`]. Creates the directory if missing.
+    pub fn open(parent_dir: &Path, num_slots: usize) -> io::Result<Self> {
+        let num_slots = if num_slots == 0 {
+            DEFAULT_NUM_SLOTS
+        } else {
+            num_slots
+        };
+        let dir = parent_dir.join("txn_state");
+        fs::create_dir_all(&dir)?;
+        Ok(Self {
+            dir,
+            num_slots,
+            mu: Mutex::new(()),
+            hook: RwLock::new(None),
+        })
+    }
+
+    pub fn num_slots(&self) -> usize {
+        self.num_slots
+    }
+
+    /// Wire the cross-coordinator offset hook. Production sets this
+    /// from the broker bootstrap so `EndTxn` / reaper aborts
+    /// materialise or discard pending offsets staged by
+    /// `TxnOffsetCommit`. `None` (the default) leaves the hook
+    /// silent — pending offsets remain staged.
+    pub fn set_offset_hook(&self, hook: Arc<dyn TxnOffsetHook>) {
+        *self.hook.write() = Some(hook);
+    }
+
+    /// The gh #22 contract: first call for `txn_id` returns a fresh
+    /// PID with `epoch = 0`; every subsequent call returns the
+    /// **same** PID with `epoch += 1`.
+    pub fn get_or_allocate<F>(&self, txn_id: &str, alloc: F) -> Result<(i64, i16)>
+    where
+        F: FnOnce() -> i64,
+    {
+        self.get_or_allocate_with_timeout(txn_id, 0, alloc)
+    }
+
+    /// As [`get_or_allocate`] but also records the producer's
+    /// `transaction.timeout.ms`. `timeout_ms <= 0` leaves the
+    /// existing entry's timeout untouched (cooperative for the
+    /// non-transactional fast path).
+    pub fn get_or_allocate_with_timeout<F>(
+        &self,
+        txn_id: &str,
+        timeout_ms: i32,
+        alloc: F,
+    ) -> Result<(i64, i16)>
+    where
+        F: FnOnce() -> i64,
+    {
+        if txn_id.is_empty() {
+            return Err(TxnStateError::EmptyTxnId);
+        }
+        let _guard = self.mu.lock();
+        let slot = self.slot_for(txn_id);
+        let mut state = self.load_slot(slot)?;
+
+        let mut entry = match state.get(txn_id) {
+            None => TxnEntry {
+                pid: alloc(),
+                epoch: 0,
+                partitions: Vec::new(),
+                ongoing_since_ms: 0,
+                transaction_timeout_ms: 0,
+                state: TxnState::Empty,
+                groups: Vec::new(),
+            },
+            Some(existing) if existing.epoch == i16::MAX => TxnEntry {
+                pid: alloc(),
+                epoch: 0,
+                partitions: Vec::new(),
+                ongoing_since_ms: 0,
+                transaction_timeout_ms: existing.transaction_timeout_ms,
+                state: TxnState::Empty,
+                groups: Vec::new(),
+            },
+            Some(existing) => {
+                let mut e = existing.clone();
+                e.epoch += 1;
+                e
+            }
+        };
+        if timeout_ms > 0 {
+            entry.transaction_timeout_ms = timeout_ms;
+        }
+        let pid = entry.pid;
+        let epoch = entry.epoch;
+        state.insert(txn_id.to_owned(), entry);
+        self.persist_slot(slot, &state)?;
+        Ok((pid, epoch))
+    }
+
+    /// Union `additions` into the entry's partition list. gh #23.
+    /// Validation order matches Apache:
+    /// 1. empty `txn_id` → [`TxnStateError::EmptyTxnId`]
+    /// 2. no entry → [`TxnStateError::UnknownProducer`]
+    /// 3. PID mismatch → [`TxnStateError::UnknownProducer`]
+    /// 4. Epoch mismatch → [`TxnStateError::EpochFenced`]
+    /// 5. `Prepare*` state → [`TxnStateError::Concurrent`]
+    pub fn add_partitions(
+        &self,
+        txn_id: &str,
+        pid: i64,
+        epoch: i16,
+        additions: &[TxnTopic],
+        now_ms: i64,
+    ) -> Result<()> {
+        if txn_id.is_empty() {
+            return Err(TxnStateError::EmptyTxnId);
+        }
+        let _guard = self.mu.lock();
+        let slot = self.slot_for(txn_id);
+        let mut state = self.load_slot(slot)?;
+
+        let mut entry = state
+            .get(txn_id)
+            .cloned()
+            .ok_or(TxnStateError::UnknownProducer)?;
+        if entry.pid != pid {
+            return Err(TxnStateError::UnknownProducer);
+        }
+        if entry.epoch != epoch {
+            return Err(TxnStateError::EpochFenced);
+        }
+        match entry.state {
+            TxnState::PrepareCommit | TxnState::PrepareAbort => {
+                return Err(TxnStateError::Concurrent);
+            }
+            _ => {}
+        }
+
+        let merged = merge_partitions(&mut entry, additions);
+        let was_not_ongoing = entry.state != TxnState::Ongoing;
+        if was_not_ongoing {
+            entry.state = TxnState::Ongoing;
+            entry.ongoing_since_ms = now_ms;
+        }
+        if !merged && !was_not_ongoing {
+            // Idempotent no-op — every (topic, partition) already
+            // recorded AND no state change.
+            return Ok(());
+        }
+        state.insert(txn_id.to_owned(), entry);
+        self.persist_slot(slot, &state)?;
+        Ok(())
+    }
+
+    /// Record that the producer will commit offsets to consumer
+    /// group `group_id` as part of this transaction. gh #24.
+    /// Idempotent — re-adding the same group is a no-op.
+    pub fn add_offsets_to_txn(
+        &self,
+        txn_id: &str,
+        pid: i64,
+        epoch: i16,
+        group_id: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        if txn_id.is_empty() {
+            return Err(TxnStateError::EmptyTxnId);
+        }
+        if group_id.is_empty() {
+            return Err(TxnStateError::InvalidState);
+        }
+        let _guard = self.mu.lock();
+        let slot = self.slot_for(txn_id);
+        let mut state = self.load_slot(slot)?;
+
+        let mut entry = state
+            .get(txn_id)
+            .cloned()
+            .ok_or(TxnStateError::UnknownProducer)?;
+        if entry.pid != pid {
+            return Err(TxnStateError::UnknownProducer);
+        }
+        if entry.epoch != epoch {
+            return Err(TxnStateError::EpochFenced);
+        }
+        match entry.state {
+            TxnState::PrepareCommit | TxnState::PrepareAbort => {
+                return Err(TxnStateError::Concurrent);
+            }
+            _ => {}
+        }
+
+        let already_recorded = entry.groups.iter().any(|g| g == group_id);
+        let needs_state_advance = entry.state != TxnState::Ongoing;
+        if already_recorded && !needs_state_advance {
+            return Ok(());
+        }
+        if !already_recorded {
+            entry.groups.push(group_id.to_owned());
+        }
+        if needs_state_advance {
+            entry.state = TxnState::Ongoing;
+            entry.ongoing_since_ms = now_ms;
+        }
+        state.insert(txn_id.to_owned(), entry);
+        self.persist_slot(slot, &state)?;
+        Ok(())
+    }
+
+    /// The `EndTxn` (API key 26) state transition. gh #25 / #26.
+    ///
+    /// ```text
+    /// Ongoing       → CompleteCommit  (commit = true)
+    /// Ongoing       → CompleteAbort   (commit = false)
+    /// CompleteCommit + commit = true  → Ok(()) idempotent
+    /// CompleteAbort  + commit = false → Ok(()) idempotent
+    /// CompleteCommit + commit = false → InvalidState
+    /// CompleteAbort  + commit = true  → InvalidState
+    /// Empty                           → InvalidState
+    /// Prepare*                        → Concurrent
+    /// ```
+    ///
+    /// Skafka collapses `Prepare → Complete` into a single atomic
+    /// transition because the marker-write phase (gh #114) hasn't
+    /// landed; the Prepare* arms exist for forward compat.
+    pub fn end_txn(&self, txn_id: &str, pid: i64, epoch: i16, commit: bool) -> Result<()> {
+        if txn_id.is_empty() {
+            return Err(TxnStateError::EmptyTxnId);
+        }
+        let _guard = self.mu.lock();
+        let slot = self.slot_for(txn_id);
+        let mut state = self.load_slot(slot)?;
+
+        let mut entry = state
+            .get(txn_id)
+            .cloned()
+            .ok_or(TxnStateError::UnknownProducer)?;
+        if entry.pid != pid {
+            return Err(TxnStateError::UnknownProducer);
+        }
+        if entry.epoch != epoch {
+            return Err(TxnStateError::EpochFenced);
+        }
+
+        match entry.state {
+            TxnState::Ongoing => {
+                entry.state = if commit {
+                    TxnState::CompleteCommit
+                } else {
+                    TxnState::CompleteAbort
+                };
+                entry.partitions.clear();
+                entry.ongoing_since_ms = 0;
+                // Snapshot the group list before clearing so the
+                // hook fires after we drop our state lock copy.
+                let groups = std::mem::take(&mut entry.groups);
+                state.insert(txn_id.to_owned(), entry);
+                self.persist_slot(slot, &state)?;
+                let hook = self.hook.read().clone();
+                if let Some(hook) = hook {
+                    for g in &groups {
+                        hook.on_end_txn(g, pid, commit);
+                    }
+                }
+                Ok(())
+            }
+            TxnState::CompleteCommit => {
+                if !commit {
+                    Err(TxnStateError::InvalidState)
+                } else {
+                    Ok(())
+                }
+            }
+            TxnState::CompleteAbort => {
+                if commit {
+                    Err(TxnStateError::InvalidState)
+                } else {
+                    Ok(())
+                }
+            }
+            TxnState::PrepareCommit | TxnState::PrepareAbort => Err(TxnStateError::Concurrent),
+            TxnState::Empty => Err(TxnStateError::InvalidState),
+        }
+    }
+
+    /// As [`abort_overdue_owned`] without the ownership gate.
+    /// Tests / dev mode only — production multi-broker setups must
+    /// pass a real `owns_txn` closure.
+    pub fn abort_overdue(&self, now_ms: i64) -> Vec<TxnAbortRecord> {
+        self.abort_overdue_owned(now_ms, None)
+    }
+
+    /// Walk every slot, abort `Ongoing` entries past their
+    /// `ongoing_since_ms + transaction_timeout_ms` deadline. gh #28.
+    /// Bumps the producer epoch on abort so the next `InitProducerId`
+    /// from the stuck client fences out via the gh #22 path.
+    ///
+    /// `owns_txn` gates the sweep: when `Some`, only entries this
+    /// broker is the coordinator for are touched (gh #91). When
+    /// `None` (tests / dev / single broker) every slot is in scope.
+    pub fn abort_overdue_owned(
+        &self,
+        now_ms: i64,
+        owns_txn: Option<&dyn Fn(&str) -> bool>,
+    ) -> Vec<TxnAbortRecord> {
+        let _guard = self.mu.lock();
+        let mut aborted = Vec::new();
+        let hook = self.hook.read().clone();
+        for slot in 0..self.num_slots {
+            let mut state = match self.load_slot(slot) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let mut changed = false;
+            // Collect txn_ids first to avoid concurrent mutation
+            // of the map while iterating.
+            let candidate_ids: Vec<String> = state.keys().cloned().collect();
+            for txn_id in candidate_ids {
+                let entry = match state.get(&txn_id) {
+                    Some(e) if e.state == TxnState::Ongoing => e.clone(),
+                    _ => continue,
+                };
+                if let Some(owns) = owns_txn {
+                    if !owns(&txn_id) {
+                        continue;
+                    }
+                }
+                if entry.ongoing_since_ms == 0 || entry.transaction_timeout_ms <= 0 {
+                    continue;
+                }
+                let deadline = entry.ongoing_since_ms + i64::from(entry.transaction_timeout_ms);
+                if deadline > now_ms {
+                    continue;
+                }
+
+                let pid = entry.pid;
+                let old_epoch = entry.epoch;
+                let groups = entry.groups.clone();
+
+                let mut updated = entry;
+                updated.state = TxnState::CompleteAbort;
+                updated.partitions.clear();
+                updated.ongoing_since_ms = 0;
+                updated.epoch = if updated.epoch == i16::MAX {
+                    0
+                } else {
+                    updated.epoch + 1
+                };
+                updated.groups.clear();
+                let new_epoch = updated.epoch;
+                state.insert(txn_id.clone(), updated);
+                changed = true;
+
+                if let Some(hook) = hook.as_ref() {
+                    for g in &groups {
+                        hook.on_end_txn(g, pid, false);
+                    }
+                }
+                aborted.push(TxnAbortRecord {
+                    txn_id,
+                    pid,
+                    old_epoch,
+                    new_epoch,
+                    groups,
+                });
+            }
+            if changed {
+                let _ = self.persist_slot(slot, &state);
+            }
+        }
+        aborted
+    }
+
+    /// Copy of every txn entry across every slot. Tests only.
+    pub fn snapshot(&self) -> HashMap<String, TxnEntry> {
+        let _guard = self.mu.lock();
+        let mut out = HashMap::new();
+        for slot in 0..self.num_slots {
+            if let Ok(state) = self.load_slot(slot) {
+                out.extend(state);
+            }
+        }
+        out
+    }
+
+    fn slot_for(&self, txn_id: &str) -> usize {
+        // Same dance as `sk-broker::group_hash::coordinator_slot` —
+        // u32 → u64 → usize is safe on every target (usize ≥ 32 bits)
+        // and dodges the workspace `clippy::as-conversions` lint.
+        let h = u64::from(fnv1a_32(txn_id.as_bytes()));
+        let n = u64::try_from(self.num_slots).unwrap_or(u64::MAX);
+        usize::try_from(h % n).unwrap_or(0)
+    }
+
+    fn slot_path(&self, slot: usize) -> PathBuf {
+        self.dir.join(format!("slot-{slot}.json"))
+    }
+
+    fn load_slot(&self, slot: usize) -> Result<HashMap<String, TxnEntry>> {
+        let path = self.slot_path(slot);
+        let data = match fs::read(&path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+            Err(e) => return Err(e.into()),
+        };
+        if data.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let state: HashMap<String, TxnEntry> = serde_json::from_slice(&data)?;
+        Ok(state)
+    }
+
+    fn persist_slot(&self, slot: usize, state: &HashMap<String, TxnEntry>) -> Result<()> {
+        let name = format!("slot-{slot}.json");
+        atomic_write_json(&self.dir, &name, state)?;
+        Ok(())
+    }
+}
+
+/// Union `additions` into `entry.partitions` in place. Returns
+/// `true` if anything new was added; `false` if every
+/// `(topic, partition)` was already recorded.
+fn merge_partitions(entry: &mut TxnEntry, additions: &[TxnTopic]) -> bool {
+    let mut changed = false;
+    for add in additions {
+        if let Some(existing) = entry.partitions.iter_mut().find(|t| t.topic == add.topic) {
+            for p in &add.partitions {
+                if !existing.partitions.contains(p) {
+                    existing.partitions.push(*p);
+                    changed = true;
+                }
+            }
+        } else {
+            entry.partitions.push(TxnTopic {
+                topic: add.topic.clone(),
+                partitions: add.partitions.clone(),
+            });
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// FNV-1a 32-bit. Same algorithm as `crates/sk-broker/src/group_hash.rs`
+/// and Go's `hash/fnv`; inlined here so `sk-coordinator` doesn't pull
+/// in a fnv crate just for the slot hash.
+fn fnv1a_32(bytes: &[u8]) -> u32 {
+    const OFFSET: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    let mut h = OFFSET;
+    for b in bytes {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
+#[cfg(test)]
+#[allow(clippy::redundant_closure)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    fn store() -> (tempfile::TempDir, TxnStateStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TxnStateStore::open(tmp.path(), DEFAULT_NUM_SLOTS).unwrap();
+        (tmp, store)
+    }
+
+    fn pid_alloc() -> impl FnMut() -> i64 {
+        let counter = AtomicI64::new(100);
+        move || counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[test]
+    fn empty_txn_id_rejected() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        assert!(matches!(
+            s.get_or_allocate("", || a()),
+            Err(TxnStateError::EmptyTxnId)
+        ));
+    }
+
+    #[test]
+    fn first_call_allocates_epoch_zero_rejoin_bumps() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (pid1, e1) = s.get_or_allocate("tx-1", || a()).unwrap();
+        assert_eq!(e1, 0);
+        let (pid2, e2) = s.get_or_allocate("tx-1", || a()).unwrap();
+        assert_eq!(pid1, pid2);
+        assert_eq!(e2, 1);
+        let (pid3, e3) = s.get_or_allocate("tx-1", || a()).unwrap();
+        assert_eq!(pid1, pid3);
+        assert_eq!(e3, 2);
+    }
+
+    #[test]
+    fn distinct_txn_ids_get_distinct_pids() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (p1, _) = s.get_or_allocate("tx-a", || a()).unwrap();
+        let (p2, _) = s.get_or_allocate("tx-b", || a()).unwrap();
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn add_partitions_unknown_producer() {
+        let (_t, s) = store();
+        let err = s
+            .add_partitions(
+                "tx-1",
+                1,
+                0,
+                &[TxnTopic {
+                    topic: "t".into(),
+                    partitions: vec![0],
+                }],
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TxnStateError::UnknownProducer));
+    }
+
+    #[test]
+    fn add_partitions_happy_path_then_idempotent() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (pid, epoch) = s.get_or_allocate("tx-1", || a()).unwrap();
+        s.add_partitions(
+            "tx-1",
+            pid,
+            epoch,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0, 1],
+            }],
+            1_000,
+        )
+        .unwrap();
+        // Idempotent re-add — same tuples, no error, no spurious write.
+        s.add_partitions(
+            "tx-1",
+            pid,
+            epoch,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0],
+            }],
+            2_000,
+        )
+        .unwrap();
+        let snap = s.snapshot();
+        let entry = &snap["tx-1"];
+        assert_eq!(entry.state, TxnState::Ongoing);
+        assert_eq!(
+            entry.partitions,
+            vec![TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0, 1]
+            }]
+        );
+        assert_eq!(entry.ongoing_since_ms, 1_000);
+    }
+
+    #[test]
+    fn add_partitions_unions_across_calls() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (pid, epoch) = s.get_or_allocate("tx-1", || a()).unwrap();
+        s.add_partitions(
+            "tx-1",
+            pid,
+            epoch,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0],
+            }],
+            10,
+        )
+        .unwrap();
+        s.add_partitions(
+            "tx-1",
+            pid,
+            epoch,
+            &[
+                TxnTopic {
+                    topic: "t".into(),
+                    partitions: vec![1],
+                },
+                TxnTopic {
+                    topic: "u".into(),
+                    partitions: vec![5],
+                },
+            ],
+            20,
+        )
+        .unwrap();
+        let snap = s.snapshot();
+        let entry = &snap["tx-1"];
+        assert_eq!(
+            entry.partitions,
+            vec![
+                TxnTopic {
+                    topic: "t".into(),
+                    partitions: vec![0, 1]
+                },
+                TxnTopic {
+                    topic: "u".into(),
+                    partitions: vec![5]
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn epoch_mismatch_fences() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (pid, _) = s.get_or_allocate("tx-1", || a()).unwrap();
+        let err = s
+            .add_partitions(
+                "tx-1",
+                pid,
+                7, // wrong epoch
+                &[TxnTopic {
+                    topic: "t".into(),
+                    partitions: vec![0],
+                }],
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TxnStateError::EpochFenced));
+    }
+
+    #[test]
+    fn end_txn_happy_commit_clears_partitions_and_fires_hook() {
+        struct CapturingHook(parking_lot::Mutex<Vec<(String, i64, bool)>>);
+        impl TxnOffsetHook for CapturingHook {
+            fn on_end_txn(&self, group_id: &str, producer_id: i64, commit: bool) {
+                self.0
+                    .lock()
+                    .push((group_id.to_owned(), producer_id, commit));
+            }
+        }
+        let (_t, s) = store();
+        let hook = Arc::new(CapturingHook(parking_lot::Mutex::new(Vec::new())));
+        s.set_offset_hook(hook.clone());
+        let mut a = pid_alloc();
+        let (pid, epoch) = s.get_or_allocate("tx-1", || a()).unwrap();
+        s.add_partitions(
+            "tx-1",
+            pid,
+            epoch,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0],
+            }],
+            100,
+        )
+        .unwrap();
+        s.add_offsets_to_txn("tx-1", pid, epoch, "g1", 110).unwrap();
+        s.add_offsets_to_txn("tx-1", pid, epoch, "g2", 120).unwrap();
+        s.end_txn("tx-1", pid, epoch, true).unwrap();
+
+        let snap = s.snapshot();
+        let entry = &snap["tx-1"];
+        assert_eq!(entry.state, TxnState::CompleteCommit);
+        assert!(entry.partitions.is_empty());
+        assert!(entry.groups.is_empty());
+        assert_eq!(entry.ongoing_since_ms, 0);
+
+        let fired = hook.0.lock().clone();
+        assert_eq!(
+            fired,
+            vec![("g1".to_owned(), pid, true), ("g2".to_owned(), pid, true),]
+        );
+    }
+
+    #[test]
+    fn end_txn_idempotent_retry_returns_ok() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (pid, epoch) = s.get_or_allocate("tx-1", || a()).unwrap();
+        s.add_partitions(
+            "tx-1",
+            pid,
+            epoch,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0],
+            }],
+            0,
+        )
+        .unwrap();
+        s.end_txn("tx-1", pid, epoch, true).unwrap();
+        s.end_txn("tx-1", pid, epoch, true).unwrap(); // idempotent
+        assert!(matches!(
+            s.end_txn("tx-1", pid, epoch, false),
+            Err(TxnStateError::InvalidState)
+        ));
+    }
+
+    #[test]
+    fn end_txn_against_empty_is_invalid() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (pid, epoch) = s.get_or_allocate("tx-1", || a()).unwrap();
+        // No AddPartitions / AddOffsets — state stays Empty.
+        let err = s.end_txn("tx-1", pid, epoch, true).unwrap_err();
+        assert!(matches!(err, TxnStateError::InvalidState));
+    }
+
+    #[test]
+    fn reaper_aborts_overdue_bumps_epoch_fires_hook() {
+        struct CapturingHook(parking_lot::Mutex<Vec<(String, i64, bool)>>);
+        impl TxnOffsetHook for CapturingHook {
+            fn on_end_txn(&self, group_id: &str, producer_id: i64, commit: bool) {
+                self.0
+                    .lock()
+                    .push((group_id.to_owned(), producer_id, commit));
+            }
+        }
+        let (_t, s) = store();
+        let hook = Arc::new(CapturingHook(parking_lot::Mutex::new(Vec::new())));
+        s.set_offset_hook(hook.clone());
+        let mut a = pid_alloc();
+        let (pid, epoch) = s
+            .get_or_allocate_with_timeout("tx-1", 1_000, || a())
+            .unwrap();
+        s.add_partitions(
+            "tx-1",
+            pid,
+            epoch,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0],
+            }],
+            10_000,
+        )
+        .unwrap();
+        s.add_offsets_to_txn("tx-1", pid, epoch, "g1", 10_000)
+            .unwrap();
+
+        // Before the deadline — no abort.
+        let aborted = s.abort_overdue(10_500);
+        assert!(aborted.is_empty());
+
+        // Past the deadline — single abort, epoch bumped.
+        let aborted = s.abort_overdue(20_000);
+        assert_eq!(aborted.len(), 1);
+        assert_eq!(aborted[0].pid, pid);
+        assert_eq!(aborted[0].old_epoch, epoch);
+        assert_eq!(aborted[0].new_epoch, epoch + 1);
+        assert_eq!(aborted[0].groups, vec!["g1".to_owned()]);
+
+        let snap = s.snapshot();
+        let entry = &snap["tx-1"];
+        assert_eq!(entry.state, TxnState::CompleteAbort);
+        assert_eq!(entry.epoch, epoch + 1);
+        let fired = hook.0.lock().clone();
+        assert_eq!(fired, vec![("g1".to_owned(), pid, false)]);
+    }
+
+    #[test]
+    fn reaper_owns_gate_filters() {
+        let (_t, s) = store();
+        let mut a = pid_alloc();
+        let (pid, epoch) = s
+            .get_or_allocate_with_timeout("tx-mine", 1_000, || a())
+            .unwrap();
+        s.add_partitions(
+            "tx-mine",
+            pid,
+            epoch,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0],
+            }],
+            5_000,
+        )
+        .unwrap();
+        let (pid2, e2) = s
+            .get_or_allocate_with_timeout("tx-theirs", 1_000, || a())
+            .unwrap();
+        s.add_partitions(
+            "tx-theirs",
+            pid2,
+            e2,
+            &[TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0],
+            }],
+            5_000,
+        )
+        .unwrap();
+
+        let mine_only = |id: &str| id == "tx-mine";
+        let aborted = s.abort_overdue_owned(10_000, Some(&mine_only));
+        assert_eq!(aborted.len(), 1);
+        assert_eq!(aborted[0].txn_id, "tx-mine");
+    }
+
+    #[test]
+    fn slot_hashing_distributes_consistently() {
+        let (_t, s) = store();
+        // FNV-1a is deterministic — same input → same slot every call.
+        assert_eq!(s.slot_for("tx-1"), s.slot_for("tx-1"));
+        // Different inputs almost always land in different slots
+        // (50 slots, FNV spread is dense enough for a small sample).
+        let slots: Vec<usize> = (0..20).map(|i| s.slot_for(&format!("tx-{i}"))).collect();
+        let distinct: std::collections::HashSet<_> = slots.iter().copied().collect();
+        assert!(
+            distinct.len() > 10,
+            "expected reasonable spread, got {distinct:?}"
+        );
+    }
+
+    #[test]
+    fn epoch_overflow_rotates_to_fresh_pid() {
+        let (_t, s) = store();
+        // Seed the slot file by hand at epoch = MAX so the next
+        // get_or_allocate triggers rotation.
+        {
+            let slot = s.slot_for("tx-1");
+            let mut state = HashMap::new();
+            state.insert(
+                "tx-1".to_owned(),
+                TxnEntry {
+                    pid: 42,
+                    epoch: i16::MAX,
+                    partitions: vec![],
+                    ongoing_since_ms: 0,
+                    transaction_timeout_ms: 5_000,
+                    state: TxnState::Empty,
+                    groups: vec![],
+                },
+            );
+            s.persist_slot(slot, &state).unwrap();
+        }
+        let mut a = pid_alloc();
+        let (pid, epoch) = s.get_or_allocate("tx-1", || a()).unwrap();
+        assert_ne!(pid, 42);
+        assert_eq!(epoch, 0);
+    }
+
+    #[test]
+    fn persistence_round_trip_across_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut a = pid_alloc();
+        let pid;
+        {
+            let s = TxnStateStore::open(tmp.path(), DEFAULT_NUM_SLOTS).unwrap();
+            let (p, _e) = s.get_or_allocate("tx-1", || a()).unwrap();
+            pid = p;
+            s.add_partitions(
+                "tx-1",
+                p,
+                0,
+                &[TxnTopic {
+                    topic: "t".into(),
+                    partitions: vec![0, 1],
+                }],
+                100,
+            )
+            .unwrap();
+        }
+        // Reopen: same on-disk state surfaces.
+        let s2 = TxnStateStore::open(tmp.path(), DEFAULT_NUM_SLOTS).unwrap();
+        let snap = s2.snapshot();
+        let entry = &snap["tx-1"];
+        assert_eq!(entry.pid, pid);
+        assert_eq!(entry.epoch, 0);
+        assert_eq!(entry.state, TxnState::Ongoing);
+        assert_eq!(
+            entry.partitions,
+            vec![TxnTopic {
+                topic: "t".into(),
+                partitions: vec![0, 1]
+            }]
+        );
+    }
+
+    #[test]
+    fn add_partitions_concurrent_transition_rejected() {
+        let (_t, s) = store();
+        // Seed Prepare* state directly to test the rejection arm.
+        let mut a = pid_alloc();
+        let (pid, epoch) = s.get_or_allocate("tx-1", || a()).unwrap();
+        {
+            let slot = s.slot_for("tx-1");
+            let mut state = s.load_slot(slot).unwrap();
+            let entry = state.get_mut("tx-1").unwrap();
+            entry.state = TxnState::PrepareCommit;
+            s.persist_slot(slot, &state).unwrap();
+        }
+        let err = s
+            .add_partitions(
+                "tx-1",
+                pid,
+                epoch,
+                &[TxnTopic {
+                    topic: "t".into(),
+                    partitions: vec![0],
+                }],
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TxnStateError::Concurrent));
+    }
+}

@@ -8,6 +8,7 @@ pub mod errors;
 pub mod group;
 pub mod manager;
 pub mod offset_store;
+pub mod txn_state;
 
 pub use errors::CoordError;
 pub use group::{
@@ -20,3 +21,7 @@ pub use manager::{
     LocalTxnSource, Manager, TxnAssignmentSource,
 };
 pub use offset_store::{offset_key, FetchSpec, OffsetStore};
+pub use txn_state::{
+    TxnAbortRecord, TxnEntry, TxnOffsetHook, TxnState, TxnStateError, TxnStateStore, TxnTopic,
+    DEFAULT_NUM_SLOTS,
+};
