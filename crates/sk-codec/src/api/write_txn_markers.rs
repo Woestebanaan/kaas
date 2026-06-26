@@ -172,6 +172,48 @@ pub fn encode_response(
     Ok(())
 }
 
+pub fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
+    let flexible = version >= MIN_FLEXIBLE;
+    let marker_count = read_array_len(buf, flexible)?;
+    let mut markers = Vec::with_capacity(marker_count);
+    for _ in 0..marker_count {
+        let producer_id = read_i64(buf)?;
+        let topic_count = read_array_len(buf, flexible)?;
+        let mut topics = Vec::with_capacity(topic_count);
+        for _ in 0..topic_count {
+            let name = read_str(buf, flexible)?;
+            let part_count = read_array_len(buf, flexible)?;
+            let mut partitions = Vec::with_capacity(part_count);
+            for _ in 0..part_count {
+                let partition_index = read_i32(buf)?;
+                let error_code = read_i16(buf)?;
+                if flexible {
+                    tagged::read(buf)?;
+                }
+                partitions.push(WritableTxnMarkerPartitionResult {
+                    partition_index,
+                    error_code,
+                });
+            }
+            if flexible {
+                tagged::read(buf)?;
+            }
+            topics.push(WritableTxnMarkerTopicResult { name, partitions });
+        }
+        if flexible {
+            tagged::read(buf)?;
+        }
+        markers.push(WritableTxnMarkerResult {
+            producer_id,
+            topics,
+        });
+    }
+    if flexible {
+        tagged::read(buf)?;
+    }
+    Ok(Response { markers })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,45 +249,7 @@ mod tests {
     }
 
     fn decode_response(buf: &mut Bytes, version: i16) -> Result<Response, CodecError> {
-        let flexible = version >= MIN_FLEXIBLE;
-        let marker_count = read_array_len(buf, flexible)?;
-        let mut markers = Vec::with_capacity(marker_count);
-        for _ in 0..marker_count {
-            let producer_id = read_i64(buf)?;
-            let topic_count = read_array_len(buf, flexible)?;
-            let mut topics = Vec::with_capacity(topic_count);
-            for _ in 0..topic_count {
-                let name = read_str(buf, flexible)?;
-                let part_count = read_array_len(buf, flexible)?;
-                let mut partitions = Vec::with_capacity(part_count);
-                for _ in 0..part_count {
-                    let partition_index = read_i32(buf)?;
-                    let error_code = read_i16(buf)?;
-                    if flexible {
-                        tagged::read(buf)?;
-                    }
-                    partitions.push(WritableTxnMarkerPartitionResult {
-                        partition_index,
-                        error_code,
-                    });
-                }
-                if flexible {
-                    tagged::read(buf)?;
-                }
-                topics.push(WritableTxnMarkerTopicResult { name, partitions });
-            }
-            if flexible {
-                tagged::read(buf)?;
-            }
-            markers.push(WritableTxnMarkerResult {
-                producer_id,
-                topics,
-            });
-        }
-        if flexible {
-            tagged::read(buf)?;
-        }
-        Ok(Response { markers })
+        super::decode_response(buf, version)
     }
 
     fn sample_request() -> Request {

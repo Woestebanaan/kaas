@@ -10,6 +10,7 @@
 pub mod assignment;
 pub mod broker;
 pub mod cli;
+pub mod control_batch;
 pub mod coordinator;
 pub mod group_hash;
 pub mod group_takeover;
@@ -26,6 +27,7 @@ pub use assignment::{
 };
 pub use broker::Broker;
 pub use cli::{Cli, ListenerEntry, TlsConfig as CliTlsConfig};
+pub use control_batch::build_control_batch;
 pub use coordinator::{
     partition_key, Coordinator, HeartbeatSource, LeaseEpochSource, LocalHeartbeat, LocalLeaseEpoch,
 };
@@ -35,11 +37,12 @@ pub use group_hash::{
 };
 pub use group_takeover::GroupTakeoverDriver;
 pub use handlers::{
-    ApiVersionsHandler, DeleteGroupsHandler, DescribeGroupsHandler, FetchHandler,
-    FindCoordinatorHandler, HeartbeatHandler, InitProducerIdHandler, JoinGroupHandler,
-    LeaveGroupHandler, ListGroupsHandler, ListOffsetsHandler, MetadataHandler, OffsetCommitHandler,
-    OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler,
-    SaslHandshakeHandler, SyncGroupHandler,
+    AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, ApiVersionsHandler, DeleteGroupsHandler,
+    DescribeGroupsHandler, EndTxnHandler, FetchHandler, FindCoordinatorHandler, HeartbeatHandler,
+    InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
+    ListOffsetsHandler, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
+    OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
+    SyncGroupHandler, TxnOffsetCommitHandler, WriteTxnMarkersHandler,
 };
 pub use heartbeat_client::{CommandHandler, HeartbeatClient, TargetResolver};
 pub use local_lease::LocalLeaseManager;

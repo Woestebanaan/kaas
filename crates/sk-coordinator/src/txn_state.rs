@@ -125,6 +125,21 @@ pub struct TxnAbortRecord {
     pub groups: Vec<String>,
 }
 
+/// Return value of [`TxnStateStore::end_txn`]. Carries the
+/// partition + group lists snapshotted *before* the state
+/// transition cleared them so the handler can dispatch
+/// COMMIT / ABORT control batches to each partition leader
+/// (gh #114) and run any post-transition bookkeeping.
+/// `transition_fired = false` is the idempotent-retry path —
+/// state was already `CompleteCommit`/`CompleteAbort`, no fresh
+/// side effects required.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EndTxnOutcome {
+    pub partitions: Vec<TxnTopic>,
+    pub groups: Vec<String>,
+    pub transition_fired: bool,
+}
+
 /// Cross-coordinator signal that fires on every `EndTxn` (and
 /// reaper-driven abort) transition. The txn coordinator tells the
 /// group's offset store to either materialise (`commit = true`) or
@@ -414,7 +429,13 @@ impl TxnStateStore {
     /// Skafka collapses `Prepare → Complete` into a single atomic
     /// transition because the marker-write phase (gh #114) hasn't
     /// landed; the Prepare* arms exist for forward compat.
-    pub fn end_txn(&self, txn_id: &str, pid: i64, epoch: i16, commit: bool) -> Result<()> {
+    pub fn end_txn(
+        &self,
+        txn_id: &str,
+        pid: i64,
+        epoch: i16,
+        commit: bool,
+    ) -> Result<EndTxnOutcome> {
         if txn_id.is_empty() {
             return Err(TxnStateError::EmptyTxnId);
         }
@@ -440,11 +461,13 @@ impl TxnStateStore {
                 } else {
                     TxnState::CompleteAbort
                 };
-                entry.partitions.clear();
-                entry.ongoing_since_ms = 0;
-                // Snapshot the group list before clearing so the
-                // hook fires after we drop our state lock copy.
+                // Snapshot the partition + group lists BEFORE clearing
+                // so the handler can dispatch marker writes (gh #114
+                // same-broker fast path) and the offset hook fires
+                // against the right groups.
+                let partitions = std::mem::take(&mut entry.partitions);
                 let groups = std::mem::take(&mut entry.groups);
+                entry.ongoing_since_ms = 0;
                 state.insert(txn_id.to_owned(), entry);
                 self.persist_slot(slot, &state)?;
                 let hook = self.hook.read().clone();
@@ -453,20 +476,24 @@ impl TxnStateStore {
                         hook.on_end_txn(g, pid, commit);
                     }
                 }
-                Ok(())
+                Ok(EndTxnOutcome {
+                    partitions,
+                    groups,
+                    transition_fired: true,
+                })
             }
             TxnState::CompleteCommit => {
                 if !commit {
                     Err(TxnStateError::InvalidState)
                 } else {
-                    Ok(())
+                    Ok(EndTxnOutcome::default())
                 }
             }
             TxnState::CompleteAbort => {
                 if commit {
                     Err(TxnStateError::InvalidState)
                 } else {
-                    Ok(())
+                    Ok(EndTxnOutcome::default())
                 }
             }
             TxnState::PrepareCommit | TxnState::PrepareAbort => Err(TxnStateError::Concurrent),

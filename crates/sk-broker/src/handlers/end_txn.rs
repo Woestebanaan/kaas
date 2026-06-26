@@ -1,20 +1,26 @@
 //! EndTxn handler (key 26, v0–v3).
 //!
-//! Port of `archive/internal/protocol/handlers/end_txn.go`. Phase 6
-//! workstream C implements the state-machine path: validate ownership
-//! and (pid, epoch); transition Ongoing → CompleteCommit /
-//! CompleteAbort via [`TxnStateStore::end_txn`]; rely on the wired
-//! [`TxnOffsetHook`] (workstream F) to materialise or discard
-//! pending offsets staged by `TxnOffsetCommit`.
+//! Port of `archive/internal/protocol/handlers/end_txn.go` plus the
+//! Phase 6 plan §C.5 same-broker marker fast path that Go doesn't
+//! ship.
 //!
-//! The same-broker control-batch marker write — Apache's
-//! `WriteTxnMarkers` fast path — lands in workstream D. Without it,
-//! a `read_committed` consumer can't yet observe the commit; this
-//! handler returns `Ok` once the state has transitioned so callers
-//! see a successful response even though the records aren't yet
-//! marked.
+//! Sequence:
+//! 1. Validate ownership + (pid, epoch) and transition state via
+//!    [`TxnStateStore::end_txn`]. The wired [`TxnOffsetHook`]
+//!    (workstream F) materialises or discards pending offsets.
+//! 2. For every partition this broker leads from the snapshotted
+//!    partition list, build a COMMIT / ABORT control batch via
+//!    [`build_control_batch`] and `engine.append` it with
+//!    `acks = -1` so a `read_committed` consumer can immediately see
+//!    the commit. Partitions led by another broker are silently
+//!    skipped — the gh #114 cross-broker `WriteTxnMarkers` RPC picks
+//!    them up.
+//!
+//! `acks = -1` matches Go's marker dispatch: control markers commit
+//! transactions, so they must be durable before we ack the producer.
 //!
 //! [`TxnOffsetHook`]: sk_coordinator::TxnOffsetHook
+//! [`build_control_batch`]: crate::control_batch::build_control_batch
 
 use std::sync::Arc;
 
@@ -22,10 +28,11 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
 use sk_codec::api::end_txn;
-use sk_coordinator::TxnStateError;
+use sk_coordinator::{EndTxnOutcome, TxnStateError, TxnTopic};
 use sk_protocol::{ConnState, Handler, HandlerError};
 
 use crate::broker::Broker;
+use crate::control_batch::build_control_batch;
 
 const ERR_INVALID_REQUEST: i16 = 42;
 const ERR_NOT_COORDINATOR: i16 = 16;
@@ -34,6 +41,7 @@ const ERR_INVALID_PRODUCER_ID_MAPPING: i16 = 49;
 const ERR_PRODUCER_FENCED: i16 = 90;
 const ERR_CONCURRENT_TRANSACTIONS: i16 = 51;
 const ERR_INVALID_TXN_STATE: i16 = 50;
+const ACKS_ALL: i16 = -1;
 
 #[derive(Debug)]
 pub struct EndTxnHandler {
@@ -59,18 +67,7 @@ impl Handler for EndTxnHandler {
 
         let error_code = match self.classify(&req) {
             Some(code) => code,
-            None => match self.broker.txn_state() {
-                Some(store) => match store.end_txn(
-                    &req.transactional_id,
-                    req.producer_id,
-                    req.producer_epoch,
-                    req.committed,
-                ) {
-                    Ok(()) => 0,
-                    Err(e) => map_store_error(&e),
-                },
-                None => ERR_COORDINATOR_NOT_AVAILABLE,
-            },
+            None => self.transition_and_dispatch(&req).await,
         };
 
         let resp = end_txn::Response {
@@ -95,6 +92,89 @@ impl EndTxnHandler {
             return Some(ERR_COORDINATOR_NOT_AVAILABLE);
         }
         None
+    }
+
+    async fn transition_and_dispatch(&self, req: &end_txn::Request) -> i16 {
+        let store = match self.broker.txn_state() {
+            Some(s) => s,
+            None => return ERR_COORDINATOR_NOT_AVAILABLE,
+        };
+        let outcome = match store.end_txn(
+            &req.transactional_id,
+            req.producer_id,
+            req.producer_epoch,
+            req.committed,
+        ) {
+            Ok(o) => o,
+            Err(e) => return map_store_error(&e),
+        };
+        // Same-broker fast path: write markers for every partition we
+        // currently lead. Cross-broker partitions are left to gh #114.
+        // Idempotent retry returns `transition_fired = false` with an
+        // empty partition list, so this loop is a no-op there.
+        self.dispatch_markers(req, &outcome).await;
+        0
+    }
+
+    async fn dispatch_markers(&self, req: &end_txn::Request, outcome: &EndTxnOutcome) {
+        if !outcome.transition_fired || outcome.partitions.is_empty() {
+            return;
+        }
+        let batch = Bytes::from(build_control_batch(
+            req.producer_id,
+            req.producer_epoch,
+            req.committed,
+            // CoordinatorEpoch field — Apache populates it from the
+            // txn coordinator's lease epoch. Phase 6 doesn't track
+            // that distinctly from the assignment epoch; passing 0
+            // keeps the wire shape valid (consumers ignore the field
+            // for accept/reject — it's only used by the broker for
+            // marker dedup, which skafka collapses via the slot file).
+            0,
+        ));
+        for TxnTopic { topic, partitions } in &outcome.partitions {
+            for &p in partitions {
+                if !owns_partition(&self.broker, topic, p) {
+                    // Cross-broker case (gh #114). Silently skipped
+                    // — the marker write will eventually come from
+                    // the txn coord's cross-broker dispatch when
+                    // that lands.
+                    continue;
+                }
+                let epoch = self
+                    .broker
+                    .coordinator()
+                    .and_then(|c| c.current_epoch(topic, p))
+                    .unwrap_or_else(|| self.broker.local_lease.current_epoch());
+                // create_partition is idempotent on the engine; cheap
+                // safety net in case the partition wasn't pre-created.
+                let _ = self.broker.engine.create_partition(topic, p).await;
+                if let Err(err) = self
+                    .broker
+                    .engine
+                    .append(topic, p, epoch, ACKS_ALL, batch.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        topic,
+                        partition = p,
+                        %err,
+                        "EndTxn marker append failed; consumers in read_committed mode \
+                         will not see the txn as committed until the producer retries",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn owns_partition(broker: &Broker, topic: &str, partition: i32) -> bool {
+    match broker.coordinator() {
+        Some(c) => c.owns(topic, partition),
+        // Dev mode (no Coordinator) — every broker leads every
+        // partition by construction. Matches the Phase 3 / 4 produce
+        // path's local-lease fallback.
+        None => true,
     }
 }
 
@@ -162,7 +242,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_happy_path_clears_partitions() {
+    async fn commit_happy_path_writes_marker_to_owned_partition() {
         let (_t, b) = broker_with_txn();
         let store = b.txn_state().unwrap();
         let (pid, epoch) = store.get_or_allocate("tx-1", || 1).unwrap();
@@ -179,6 +259,11 @@ mod tests {
             )
             .unwrap();
 
+        // Pre-create the partition so the marker append has somewhere
+        // to land.
+        b.engine.create_partition("t", 0).await.unwrap();
+        let hwm_before = b.engine.high_watermark("t", 0).unwrap();
+
         let h = EndTxnHandler::new(b.clone());
         let resp = call(
             &h,
@@ -191,9 +276,15 @@ mod tests {
         )
         .await;
         assert_eq!(resp.error_code, 0);
+
+        // State was cleared and a marker batch appended (HWM advanced).
         let snap = store.snapshot();
-        let entry = &snap["tx-1"];
-        assert!(entry.partitions.is_empty());
+        assert!(snap["tx-1"].partitions.is_empty());
+        let hwm_after = b.engine.high_watermark("t", 0).unwrap();
+        assert!(
+            hwm_after > hwm_before,
+            "expected HWM to advance after marker append; before={hwm_before} after={hwm_after}"
+        );
     }
 
     #[tokio::test]
@@ -201,7 +292,6 @@ mod tests {
         let (_t, b) = broker_with_txn();
         let store = b.txn_state().unwrap();
         let (pid, epoch) = store.get_or_allocate("tx-1", || 1).unwrap();
-        // No AddPartitions — state stays Empty.
         let h = EndTxnHandler::new(b);
         let resp = call(
             &h,
@@ -227,11 +317,60 @@ mod tests {
             &end_txn::Request {
                 transactional_id: "tx-1".into(),
                 producer_id: pid,
-                producer_epoch: 99, // stale
+                producer_epoch: 99,
                 committed: true,
             },
         )
         .await;
         assert_eq!(resp.error_code, ERR_PRODUCER_FENCED);
+    }
+
+    #[tokio::test]
+    async fn idempotent_retry_after_commit_is_noop() {
+        let (_t, b) = broker_with_txn();
+        let store = b.txn_state().unwrap();
+        let (pid, epoch) = store.get_or_allocate("tx-1", || 1).unwrap();
+        store
+            .add_partitions(
+                "tx-1",
+                pid,
+                epoch,
+                &[TxnTopic {
+                    topic: "t".into(),
+                    partitions: vec![0],
+                }],
+                100,
+            )
+            .unwrap();
+        b.engine.create_partition("t", 0).await.unwrap();
+        let h = EndTxnHandler::new(b.clone());
+        call(
+            &h,
+            &end_txn::Request {
+                transactional_id: "tx-1".into(),
+                producer_id: pid,
+                producer_epoch: epoch,
+                committed: true,
+            },
+        )
+        .await;
+        let hwm_after_first = b.engine.high_watermark("t", 0).unwrap();
+        // Retry — should be Ok with no extra marker write.
+        let resp = call(
+            &h,
+            &end_txn::Request {
+                transactional_id: "tx-1".into(),
+                producer_id: pid,
+                producer_epoch: epoch,
+                committed: true,
+            },
+        )
+        .await;
+        assert_eq!(resp.error_code, 0);
+        let hwm_after_retry = b.engine.high_watermark("t", 0).unwrap();
+        assert_eq!(
+            hwm_after_first, hwm_after_retry,
+            "idempotent retry must not write a second marker"
+        );
     }
 }

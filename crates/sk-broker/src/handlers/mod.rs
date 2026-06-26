@@ -26,6 +26,7 @@ pub mod produce;
 pub mod sasl;
 pub mod sync_group;
 pub mod txn_offset_commit;
+pub mod write_txn_markers;
 
 pub use add_offsets_to_txn::AddOffsetsToTxnHandler;
 pub use add_partitions_to_txn::AddPartitionsToTxnHandler;
@@ -49,3 +50,4 @@ pub use produce::ProduceHandler;
 pub use sasl::{SaslAuthenticateHandler, SaslHandshakeHandler};
 pub use sync_group::SyncGroupHandler;
 pub use txn_offset_commit::TxnOffsetCommitHandler;
+pub use write_txn_markers::WriteTxnMarkersHandler;

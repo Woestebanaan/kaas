@@ -22,6 +22,6 @@ pub use manager::{
 };
 pub use offset_store::{offset_key, FetchSpec, OffsetStore};
 pub use txn_state::{
-    TxnAbortRecord, TxnEntry, TxnOffsetHook, TxnState, TxnStateError, TxnStateStore, TxnTopic,
-    DEFAULT_NUM_SLOTS,
+    EndTxnOutcome, TxnAbortRecord, TxnEntry, TxnOffsetHook, TxnState, TxnStateError, TxnStateStore,
+    TxnTopic, DEFAULT_NUM_SLOTS,
 };
