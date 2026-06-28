@@ -41,7 +41,29 @@ use crate::atomic_write::atomic_write_json;
 /// Matches Apache Kafka's `transaction.state.log.num.partitions=50`
 /// default. Pinning to a fixed cluster-wide constant decouples the
 /// storage layout from broker scale operations.
+///
+/// **Do not change this value on a deployed cluster.** The on-disk
+/// slot is computed as `fnv1a_32(txn_id) % NUM_SLOTS`; a different
+/// constant moves every existing entry to a different slot file and
+/// the next `get_or_allocate` for an existing `txn_id` reads an
+/// empty slot — silently breaking the gh #22 rejoin contract. Apache
+/// enforces this by reading `transaction.state.log.num.partitions`
+/// at first cluster start and ignoring later changes. Skafka relies
+/// on the constant staying constant; a re-shard path
+/// (Go's `migrateLayout`) is the documented follow-up on gh #174 for
+/// the day the value needs to change.
 pub const DEFAULT_NUM_SLOTS: usize = 50;
+
+// gh #174: compile-time guard. If a future edit changes the
+// constant, the build fails — the on-disk layout is shared with
+// existing deployments and silently re-slotting their entries on a
+// rolling upgrade breaks the gh #22 fence-on-rejoin contract.
+// Bump this assertion deliberately as part of the same change that
+// ships the migration path.
+const _: () = assert!(
+    DEFAULT_NUM_SLOTS == 50,
+    "NUM_SLOTS is shared with on-disk layout — see gh #174"
+);
 
 /// Transaction state machine. Mirrors Apache's `TransactionState`
 /// (TransactionMetadata.scala). The on-disk JSON representation
