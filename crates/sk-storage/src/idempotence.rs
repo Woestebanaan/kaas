@@ -143,6 +143,84 @@ pub enum IdempotenceParseError {
     BatchTooShort { got: usize },
 }
 
+/// Fields extracted from a v2 RecordBatch header that drive the
+/// per-partition transactional bookkeeping (gh #176). Read at
+/// append time so the [`crate::txn_index::OpenTxnIndex`] and
+/// [`crate::txn_index::AbortedTxnIndex`] can be updated under the
+/// partition mutex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchTxnInfo {
+    /// `attributes & 0x10 != 0` — the producer marked this batch as
+    /// part of a transaction.
+    pub is_transactional: bool,
+    /// `attributes & 0x20 != 0` — this is a COMMIT/ABORT marker
+    /// (control batch) rather than data.
+    pub is_control: bool,
+    pub producer_id: i64,
+    /// `Some` iff `is_control`. `Some(true)` = COMMIT, `Some(false)`
+    /// = ABORT. Decoded from the single control record's key (Apache
+    /// `ControlRecordType.{ABORT=0, COMMIT=1}`).
+    pub control_commit: Option<bool>,
+}
+
+/// Peek the v2 batch header for the txn-bookkeeping fields. Reads
+/// only the bytes needed — header through producer_id, plus
+/// (for control batches) one byte of the inline record's key. Does
+/// not decode records payload — the byte-opacity invariant holds
+/// for data batches; control batches are a single 1-record batch
+/// whose key shape is part of Apache's wire format.
+///
+/// Returns `None` when the batch is too short to parse the header
+/// (caller treats as "not a recognized v2 batch — skip the
+/// bookkeeping").
+pub fn parse_batch_txn_info(raw: &[u8]) -> Option<BatchTxnInfo> {
+    const HEADER_END: usize = 57;
+    if raw.len() < HEADER_END {
+        return None;
+    }
+    let mut attr_bytes = [0u8; 2];
+    attr_bytes.copy_from_slice(&raw[21..23]);
+    let attrs = i16::from_be_bytes(attr_bytes);
+    let is_transactional = (attrs & 0x10) != 0;
+    let is_control = (attrs & 0x20) != 0;
+
+    let mut pid_bytes = [0u8; 8];
+    pid_bytes.copy_from_slice(&raw[43..51]);
+    let producer_id = i64::from_be_bytes(pid_bytes);
+
+    let control_commit = if is_control {
+        // Control batch layout (per `crates/sk-broker/src/control_batch.rs`):
+        //   0..61   batch header (recordCount=1)
+        //   61      varint bodyLen (1 byte for the standard marker)
+        //   62      record attributes (i8 = 0)
+        //   63      varlong timestampDelta = 0 (1 byte)
+        //   64      varint offsetDelta = 0 (1 byte)
+        //   65      varint keyLen = 4 (1 byte = 0x08)
+        //   66..68  key version (i16 = 0)
+        //   68..70  key type (i16 — 0=ABORT, 1=COMMIT)
+        // Total minimum batch size = 70.
+        const TYPE_HI: usize = 68;
+        const TYPE_LO: usize = 69;
+        if raw.len() <= TYPE_LO {
+            None
+        } else {
+            let mut type_bytes = [0u8; 2];
+            type_bytes.copy_from_slice(&raw[TYPE_HI..=TYPE_LO]);
+            let control_type = i16::from_be_bytes(type_bytes);
+            Some(control_type == 1)
+        }
+    } else {
+        None
+    };
+
+    Some(BatchTxnInfo {
+        is_transactional,
+        is_control,
+        producer_id,
+        control_commit,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Pure classifier
 // ---------------------------------------------------------------------------
@@ -342,6 +420,78 @@ mod tests {
         assert_eq!(got.epoch, 7);
         assert_eq!(got.first_seq, 10);
         assert_eq!(got.last_seq, 14, "first_seq + lastOffsetDelta");
+    }
+
+    // ---- parse_batch_txn_info --------------------------------------------
+
+    fn make_data_batch(attrs: i16, pid: i64) -> Vec<u8> {
+        let mut hdr = vec![0u8; 61];
+        hdr[21..23].copy_from_slice(&attrs.to_be_bytes());
+        hdr[43..51].copy_from_slice(&pid.to_be_bytes());
+        hdr
+    }
+
+    fn make_control_batch(attrs: i16, pid: i64, control_type: i16) -> Vec<u8> {
+        // 61-byte header + 9-byte payload through key.type.
+        let mut buf = vec![0u8; 70];
+        buf[21..23].copy_from_slice(&attrs.to_be_bytes());
+        buf[43..51].copy_from_slice(&pid.to_be_bytes());
+        buf[68..70].copy_from_slice(&control_type.to_be_bytes());
+        buf
+    }
+
+    #[test]
+    fn txn_info_too_short_returns_none() {
+        assert!(parse_batch_txn_info(&[0u8; 56]).is_none());
+    }
+
+    #[test]
+    fn txn_info_non_transactional_data_batch() {
+        let raw = make_data_batch(0, 42);
+        let info = parse_batch_txn_info(&raw).unwrap();
+        assert!(!info.is_transactional);
+        assert!(!info.is_control);
+        assert_eq!(info.producer_id, 42);
+        assert!(info.control_commit.is_none());
+    }
+
+    #[test]
+    fn txn_info_transactional_data_batch() {
+        let raw = make_data_batch(0x10, 42);
+        let info = parse_batch_txn_info(&raw).unwrap();
+        assert!(info.is_transactional);
+        assert!(!info.is_control);
+        assert_eq!(info.producer_id, 42);
+        assert!(info.control_commit.is_none());
+    }
+
+    #[test]
+    fn txn_info_commit_marker() {
+        let raw = make_control_batch(0x30, 42, 1); // transactional | control, COMMIT
+        let info = parse_batch_txn_info(&raw).unwrap();
+        assert!(info.is_transactional);
+        assert!(info.is_control);
+        assert_eq!(info.producer_id, 42);
+        assert_eq!(info.control_commit, Some(true));
+    }
+
+    #[test]
+    fn txn_info_abort_marker() {
+        let raw = make_control_batch(0x30, 42, 0); // transactional | control, ABORT
+        let info = parse_batch_txn_info(&raw).unwrap();
+        assert_eq!(info.control_commit, Some(false));
+    }
+
+    #[test]
+    fn txn_info_control_batch_too_short_for_type_returns_none_commit() {
+        // is_control set but batch is truncated before the type byte.
+        let raw = make_data_batch(0x30, 42); // 61 bytes — type byte missing
+        let info = parse_batch_txn_info(&raw).unwrap();
+        assert!(info.is_control);
+        assert!(
+            info.control_commit.is_none(),
+            "truncated control batch must not guess the type"
+        );
     }
 
     // ---- classifier ------------------------------------------------------

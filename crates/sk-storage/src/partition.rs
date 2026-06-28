@@ -47,11 +47,13 @@ use tokio::task::JoinHandle;
 use crate::errors::StorageError;
 use crate::fs::Fs;
 use crate::idempotence::{
-    self, parse_batch_producer_info, BatchProducerInfo, Outcome, ProducerEntry,
+    self, parse_batch_producer_info, parse_batch_txn_info, BatchProducerInfo, Outcome,
+    ProducerEntry,
 };
 use crate::manifest::{self, Manifest, ReadResult};
 use crate::producer_snapshot::{read_producer_snapshot, write_producer_snapshot};
 use crate::segment::{self, parse_batch_offsets, ActiveSegment, SegmentMeta};
+use crate::txn_index::{AbortedTxn, AbortedTxnIndex, OpenTxnIndex};
 
 /// Per-partition tuning knobs. Ported from Go's
 /// `archive/internal/storage/engine.go::Config`.
@@ -121,6 +123,16 @@ struct PartitionInner {
     /// classify+record_accepted pair runs under the partition mutex
     /// without a nested lock.
     producer_states: HashMap<i64, ProducerEntry>,
+
+    /// gh #176 — first offset of each currently-open transactional
+    /// producer on this partition. `min(values)` is the Last Stable
+    /// Offset (LSO); `read_committed` Fetch reads only up to LSO.
+    /// Updated at append time alongside `producer_states`.
+    open_txns: OpenTxnIndex,
+    /// gh #176 — completed-but-aborted transactions whose ABORT
+    /// marker is still live in the log. Drives the Fetch response's
+    /// `AbortedTransactions[]` list. Evicted as `log_start` advances.
+    aborted_txns: AbortedTxnIndex,
 }
 
 struct FlushCoord {
@@ -256,6 +268,8 @@ impl Partition {
             completed_flush_seq: 0,
             flush_err: None,
             producer_states,
+            open_txns: OpenTxnIndex::new(),
+            aborted_txns: AbortedTxnIndex::new(),
         }));
 
         // Flush channel — capacity 1 with coalescing semantics. If
@@ -410,6 +424,36 @@ impl Partition {
             // succeeded (so a failed append doesn't poison the window).
             if let Some(info) = prod_info {
                 idempotence::record_accepted(&mut guard.producer_states, info, assigned);
+            }
+
+            // gh #176 — update the open + aborted-txn indexes off the
+            // same batch. Same byte-opacity contract: we only read the
+            // header attrs + pid + (for control batches) the key's
+            // type byte.
+            if let Some(txn_info) = parse_batch_txn_info(&owned) {
+                if txn_info.is_transactional {
+                    if txn_info.is_control {
+                        // COMMIT or ABORT marker — close the open txn.
+                        if let Some(first_offset) =
+                            guard.open_txns.close(txn_info.producer_id)
+                        {
+                            if matches!(txn_info.control_commit, Some(false)) {
+                                guard.aborted_txns.record(AbortedTxn {
+                                    producer_id: txn_info.producer_id,
+                                    first_offset,
+                                    last_offset: assigned,
+                                });
+                            }
+                        }
+                    } else {
+                        // Transactional data batch — record the first
+                        // offset for this pid's current txn (no-op if
+                        // already recorded).
+                        guard
+                            .open_txns
+                            .record_data_batch(txn_info.producer_id, assigned);
+                    }
+                }
             }
 
             // Decide whether to fire a flush request.
@@ -596,6 +640,27 @@ impl Partition {
     /// Lock-free epoch read via the published snapshot.
     pub fn epoch(&self) -> i64 {
         self.snapshot.load().epoch
+    }
+
+    /// gh #176 — Last Stable Offset for `read_committed` Fetch.
+    /// The lowest offset across all currently-open transactional
+    /// producers on this partition, or HWM when no txn is open.
+    /// Mirrors Apache's `Log.lastStableOffset`.
+    pub fn last_stable_offset(&self) -> i64 {
+        let guard = self.inner.lock();
+        guard
+            .open_txns
+            .min_open_offset()
+            .unwrap_or(guard.high_water)
+    }
+
+    /// gh #176 — aborted transactions whose first-offset falls in
+    /// `[start_offset, end_offset)`. Used to populate the Fetch
+    /// response's `AbortedTransactions[]` list for `read_committed`
+    /// consumers.
+    pub fn aborted_in_range(&self, start_offset: i64, end_offset: i64) -> Vec<AbortedTxn> {
+        let guard = self.inner.lock();
+        guard.aborted_txns.in_range(start_offset, end_offset)
     }
 
     /// gh #30 / #108: bump the recorded producer epoch and clear
@@ -809,6 +874,173 @@ mod tests {
         // Producer ID = -1 (non-idempotent) so no classifier path.
         buf[43..51].copy_from_slice(&(-1i64).to_be_bytes());
         Bytes::from(buf)
+    }
+
+    /// Build a transactional v2 data batch (attributes bit 4 set).
+    /// PID is encoded; base_sequence is left at 0 so the
+    /// idempotence classifier accepts as a fresh first-batch.
+    fn build_txn_data_batch(pid: i64, num_records: i32) -> Bytes {
+        let body_size = 49 + 16;
+        let total = 12 + body_size;
+        let mut buf = vec![0u8; total];
+        buf[0..8].copy_from_slice(&0i64.to_be_bytes());
+        let body_len_i32 = i32::try_from(body_size).unwrap();
+        buf[8..12].copy_from_slice(&body_len_i32.to_be_bytes());
+        buf[16] = 2;
+        // attributes: bit 4 (transactional) only.
+        buf[21..23].copy_from_slice(&0x0010i16.to_be_bytes());
+        let last_offset_delta = num_records - 1;
+        buf[23..27].copy_from_slice(&last_offset_delta.to_be_bytes());
+        buf[43..51].copy_from_slice(&pid.to_be_bytes());
+        // baseSequence at [53..57] stays 0 = first batch of a fresh
+        // PID per the idempotence classifier.
+        Bytes::from(buf)
+    }
+
+    /// Build a control batch (COMMIT or ABORT marker). attributes
+    /// has bits 4 (transactional) | 5 (control) set; base_sequence
+    /// = -1 so the idempotence classifier returns NotIdempotent
+    /// (markers don't consume sequence slots).
+    fn build_marker_batch(pid: i64, commit: bool) -> Bytes {
+        let mut buf = vec![0u8; 70];
+        buf[0..8].copy_from_slice(&0i64.to_be_bytes());
+        // body_size = 58 (everything from attrs through the inline
+        // marker record); arbitrary for these tests since we never
+        // re-read records from the log.
+        buf[8..12].copy_from_slice(&58i32.to_be_bytes());
+        buf[16] = 2;
+        buf[21..23].copy_from_slice(&0x0030i16.to_be_bytes()); // transactional | control
+        buf[43..51].copy_from_slice(&pid.to_be_bytes());
+        buf[53..57].copy_from_slice(&(-1i32).to_be_bytes());
+        // key type at byte 69: 0=ABORT, 1=COMMIT
+        buf[69] = if commit { 1 } else { 0 };
+        Bytes::from(buf)
+    }
+
+    #[test]
+    fn lso_equals_hwm_when_no_txn_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            p.append(0, -1, build_batch(3, 1_000)).await.unwrap();
+            assert_eq!(p.last_stable_offset(), p.high_watermark());
+            assert!(p.aborted_in_range(0, i64::MAX).is_empty());
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn lso_holds_at_first_txn_offset_until_commit_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+
+            // Non-txn batch — LSO follows HWM.
+            p.append(0, -1, build_batch(2, 1_000)).await.unwrap();
+            assert_eq!(p.last_stable_offset(), 2);
+
+            // Open a txn: 3 transactional records at offset 2.
+            p.append(0, -1, build_txn_data_batch(42, 3)).await.unwrap();
+            assert_eq!(p.high_watermark(), 5);
+            assert_eq!(
+                p.last_stable_offset(),
+                2,
+                "LSO must stay at the txn's first offset while open"
+            );
+
+            // Another txn data batch for the same PID — LSO unchanged.
+            // (Same-pid second batch within the same open txn.)
+            // We can't easily re-use the txn classifier path here
+            // because the dedupe window would reject seq=0 a second
+            // time; just skip and go straight to commit.
+            let marker = build_marker_batch(42, true);
+            p.append(0, -1, marker).await.unwrap();
+            assert_eq!(p.high_watermark(), 6);
+            assert_eq!(
+                p.last_stable_offset(),
+                p.high_watermark(),
+                "LSO catches up to HWM once commit marker lands"
+            );
+            assert!(
+                p.aborted_in_range(0, i64::MAX).is_empty(),
+                "commit doesn't populate the aborted list"
+            );
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn abort_marker_populates_aborted_list_with_first_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            p.append(0, -1, build_txn_data_batch(42, 3)).await.unwrap();
+            p.append(0, -1, build_marker_batch(42, false)).await.unwrap();
+            let aborted = p.aborted_in_range(0, i64::MAX);
+            assert_eq!(aborted.len(), 1);
+            assert_eq!(aborted[0].producer_id, 42);
+            assert_eq!(aborted[0].first_offset, 0);
+            assert_eq!(p.last_stable_offset(), p.high_watermark());
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn lso_picks_lowest_across_concurrent_open_txns() {
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            // pid 1's first batch at offset 0
+            p.append(0, -1, build_txn_data_batch(1, 2)).await.unwrap();
+            // pid 2's first batch at offset 2
+            p.append(0, -1, build_txn_data_batch(2, 4)).await.unwrap();
+            assert_eq!(p.last_stable_offset(), 0, "min of {{0, 2}}");
+
+            // Commit pid 1 → LSO jumps to pid 2's first offset.
+            p.append(0, -1, build_marker_batch(1, true)).await.unwrap();
+            assert_eq!(p.last_stable_offset(), 2);
+
+            // Commit pid 2 → LSO catches HWM.
+            p.append(0, -1, build_marker_batch(2, true)).await.unwrap();
+            assert_eq!(p.last_stable_offset(), p.high_watermark());
+            p.close().await.unwrap();
+        });
     }
 
     #[test]

@@ -217,6 +217,26 @@ impl StorageEngine for DiskStorageEngine {
         }
     }
 
+    fn last_stable_offset(&self, topic: &str, partition: i32) -> Result<i64, StorageError> {
+        match self.partitions.get(&(topic.to_owned(), partition)) {
+            Some(p) => Ok(p.last_stable_offset()),
+            None => self.high_watermark(topic, partition),
+        }
+    }
+
+    fn aborted_transactions_in_range(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        end_offset: i64,
+    ) -> Vec<crate::txn_index::AbortedTxn> {
+        match self.partitions.get(&(topic.to_owned(), partition)) {
+            Some(p) => p.aborted_in_range(start_offset, end_offset),
+            None => Vec::new(),
+        }
+    }
+
     async fn create_partition(&self, topic: &str, partition: i32) -> Result<(), StorageError> {
         // Opening is creation — Partition::open creates the dir.
         self.ensure_open(topic, partition).await?;

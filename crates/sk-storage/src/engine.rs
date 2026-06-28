@@ -147,4 +147,28 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// future variants that don't track per-PID dedupe state
     /// compile without ceremony; `DiskStorageEngine` overrides.
     fn fence_producer_epoch(&self, _pid: i64, _new_epoch: i16) {}
+
+    /// gh #176 — Last Stable Offset for `read_committed` Fetch. The
+    /// lowest offset across all open transactional producers on this
+    /// partition, or HWM when no txn is open. Default falls back to
+    /// HWM (read_uncommitted-equivalent) so engines that don't track
+    /// per-partition txn state degrade gracefully — matches the
+    /// shortcut both Go and Rust have been taking until now.
+    fn last_stable_offset(&self, topic: &str, partition: i32) -> Result<i64, StorageError> {
+        self.high_watermark(topic, partition)
+    }
+
+    /// gh #176 — aborted transactions whose first-offset falls in
+    /// `[start_offset, end_offset)`. `read_committed` Fetch handler
+    /// uses this to build the response's `AbortedTransactions[]`
+    /// list. Default returns an empty list.
+    fn aborted_transactions_in_range(
+        &self,
+        _topic: &str,
+        _partition: i32,
+        _start_offset: i64,
+        _end_offset: i64,
+    ) -> Vec<crate::txn_index::AbortedTxn> {
+        Vec::new()
+    }
 }

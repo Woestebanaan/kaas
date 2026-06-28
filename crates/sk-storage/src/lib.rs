@@ -35,6 +35,7 @@ pub mod partition;
 pub mod producer_snapshot;
 pub mod segment;
 pub mod topicconfig;
+pub mod txn_index;
 
 pub use cleaner::{FixedPolicySource, PolicySource, RetentionCleaner, RetentionPolicy};
 pub use disk::DiskStorageEngine;
@@ -42,8 +43,8 @@ pub use engine::StorageEngine;
 pub use errors::StorageError;
 pub use fs::{Fs, RealFs};
 pub use idempotence::{
-    parse_batch_producer_info, BatchProducerInfo, Outcome, ProducerEntry, ProducerStates,
-    RecentBatch, RING_SIZE,
+    parse_batch_producer_info, parse_batch_txn_info, BatchProducerInfo, BatchTxnInfo, Outcome,
+    ProducerEntry, ProducerStates, RecentBatch, RING_SIZE,
 };
 pub use manifest::Manifest;
 pub use memory::{MemoryStorage, MEMORY_DATA_DIR};
@@ -58,3 +59,4 @@ pub use segment::{
     ActiveSegment, RolledTail, SegmentMeta, INDEX_ENTRY_SIZE,
 };
 pub use topicconfig::{read_topic_config, write_topic_config, TopicConfigFile};
+pub use txn_index::{AbortedTxn, AbortedTxnIndex, OpenTxnIndex};
