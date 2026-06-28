@@ -18,6 +18,7 @@ pub mod group_takeover;
 pub mod handlers;
 pub mod heartbeat_client;
 pub mod local_lease;
+pub mod marker_watcher;
 pub mod self_fence;
 pub mod takeover;
 pub mod topic_registry;
@@ -48,6 +49,9 @@ pub use handlers::{
 };
 pub use heartbeat_client::{CommandHandler, HeartbeatClient, TargetResolver};
 pub use local_lease::LocalLeaseManager;
+pub use marker_watcher::{
+    ApplyOutcome, MarkerApplier, MarkerWatcher, DEFAULT_POLL as MARKER_POLL_DEFAULT,
+};
 pub use self_fence::{is_heartbeat_fresh, DEFAULT_HEARTBEAT_TIMEOUT};
 pub use takeover::TakeoverDriver;
 pub use topic_registry::{ConfigError as TopicConfigError, TopicMeta, TopicRegistry};

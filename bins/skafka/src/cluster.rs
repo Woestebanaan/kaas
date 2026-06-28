@@ -28,14 +28,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use bytes::Bytes;
 use sk_broker::{
-    Broker, Coordinator, FenceWatcher, GroupTakeoverDriver, LocalHeartbeat, LocalLeaseEpoch,
-    ProducerEpochFencer, TakeoverDriver,
+    build_control_batch, ApplyOutcome, Broker, Coordinator, FenceWatcher, GroupTakeoverDriver,
+    LocalHeartbeat, LocalLeaseEpoch, MarkerApplier, MarkerWatcher, ProducerEpochFencer,
+    TakeoverDriver,
 };
 use sk_controller::{AssignmentLoop, AssignmentReason, LocalElection, StaticSources};
 use sk_coordinator::{
     fence_log_dir, BrokerEndpoint, BrokerLookup, FenceLog, FnLookup, LocalGroupSource,
-    LocalTxnSource, Manager, OffsetStore, TxnOffsetHook, TxnStateStore,
+    LocalTxnSource, Manager, MarkerEntry, MarkerQueue, OffsetStore, TxnOffsetHook, TxnStateStore,
 };
 use sk_storage::StorageEngine;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +71,9 @@ pub struct ClusterRuntime {
     /// at least as long as `main`.
     #[allow(dead_code)]
     pub fence_log: Arc<FenceLog>,
+    /// gh #175 cross-broker marker queue. Held for the same reason.
+    #[allow(dead_code)]
+    pub marker_queue: MarkerQueue,
     /// Background tasks the runtime owns. Aborted on shutdown.
     pub tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -136,6 +141,13 @@ pub fn install(
     broker.install_fence_log(fence_log.clone());
     info!(path = %fence_log.path().display(), "opened FenceLog");
 
+    let marker_queue = MarkerQueue::open(&cluster_dir)?;
+    broker.install_marker_queue(marker_queue.clone());
+    info!(
+        inbox = %marker_queue.inbox(&self_id).display(),
+        "opened MarkerQueue"
+    );
+
     let mut tasks = Vec::new();
 
     // FenceWatcher: poll peer brokers' producer_fences/from-*.json
@@ -149,6 +161,19 @@ pub fn install(
     let watcher_clone = watcher.clone();
     tasks.push(tokio::spawn(async move {
         watcher_clone.run(watcher_cancel).await;
+    }));
+
+    // gh #175 MarkerWatcher: poll the per-broker marker inbox every
+    // 2 s and apply each commit/abort marker to the partitions we
+    // currently lead.
+    let applier: Arc<dyn MarkerApplier> = Arc::new(BrokerMarkerApplier {
+        broker: broker.clone(),
+    });
+    let marker_watcher = Arc::new(MarkerWatcher::new(marker_queue.inbox(&self_id), applier));
+    let mw_cancel = cancel.clone();
+    let mw_clone = marker_watcher.clone();
+    tasks.push(tokio::spawn(async move {
+        mw_clone.run(mw_cancel).await;
     }));
 
     // Txn-timeout reaper (gh #28). Walks every slot every 10 s,
@@ -222,6 +247,7 @@ pub fn install(
         coordinator,
         txn_state,
         fence_log,
+        marker_queue,
         tasks,
     })
 }
@@ -265,6 +291,66 @@ struct EngineFencer {
 impl ProducerEpochFencer for EngineFencer {
     fn fence_producer_epoch(&self, pid: i64, epoch: i16) {
         self.engine.fence_producer_epoch(pid, epoch);
+    }
+}
+
+/// [`MarkerApplier`] adapter that bridges the inbound marker queue
+/// into the storage engine. For each `(topic, partition)` in the
+/// entry that this broker currently leads, builds a control batch
+/// via [`build_control_batch`] and appends it with `acks = -1`.
+/// Partitions led by another broker are silently skipped — the
+/// dispatcher should not have targeted us with them; logging
+/// preserves the breadcrumb.
+struct BrokerMarkerApplier {
+    broker: Arc<Broker>,
+}
+
+#[async_trait::async_trait]
+impl MarkerApplier for BrokerMarkerApplier {
+    async fn apply(&self, entry: &MarkerEntry) -> ApplyOutcome {
+        let batch = Bytes::from(build_control_batch(
+            entry.producer_id,
+            entry.producer_epoch,
+            entry.commit,
+            entry.coordinator_epoch,
+        ));
+        let coord = self.broker.coordinator();
+        for topic in &entry.partitions {
+            for &p in &topic.partitions {
+                let owns = coord.as_ref().is_none_or(|c| c.owns(&topic.topic, p));
+                if !owns {
+                    tracing::warn!(
+                        topic = %topic.topic,
+                        partition = p,
+                        pid = entry.producer_id,
+                        "MarkerWatcher: queue entry targeted us but we don't lead this \
+                         partition; assignment view may have drifted — marker dropped"
+                    );
+                    continue;
+                }
+                let epoch = coord
+                    .as_ref()
+                    .and_then(|c| c.current_epoch(&topic.topic, p))
+                    .unwrap_or_else(|| self.broker.local_lease.current_epoch());
+                let _ = self.broker.engine.create_partition(&topic.topic, p).await;
+                if let Err(err) = self
+                    .broker
+                    .engine
+                    .append(&topic.topic, p, epoch, -1, batch.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        topic = %topic.topic,
+                        partition = p,
+                        %err,
+                        "MarkerWatcher: control-batch append failed; keeping \
+                         queue file for retry next tick"
+                    );
+                    return ApplyOutcome::Retry;
+                }
+            }
+        }
+        ApplyOutcome::Applied
     }
 }
 

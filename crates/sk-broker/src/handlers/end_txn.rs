@@ -28,8 +28,10 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
 use sk_codec::api::end_txn;
-use sk_coordinator::{EndTxnOutcome, TxnStateError, TxnTopic};
+use sk_coordinator::{EndTxnOutcome, MarkerEntry, TxnStateError, TxnTopic};
 use sk_protocol::{ConnState, Handler, HandlerError};
+
+use std::collections::HashMap;
 
 use crate::broker::Broker;
 use crate::control_batch::build_control_batch;
@@ -120,61 +122,133 @@ impl EndTxnHandler {
         if !outcome.transition_fired || outcome.partitions.is_empty() {
             return;
         }
+
+        // Group partitions by which broker leads them. Same-broker
+        // partitions are written locally (low latency); peer-broker
+        // partitions go through the marker_queue (gh #175 file-queue
+        // dispatch). Coordinator-less dev mode treats every partition
+        // as same-broker.
+        let mut by_target: HashMap<Option<String>, Vec<(String, i32)>> = HashMap::new();
+        let coord = self.broker.coordinator();
+        for TxnTopic { topic, partitions } in &outcome.partitions {
+            for &p in partitions {
+                let leader = coord.as_ref().and_then(|c| c.leader_for(topic, p));
+                by_target
+                    .entry(leader)
+                    .or_default()
+                    .push((topic.clone(), p));
+            }
+        }
+
+        let self_id = self.broker.self_id.as_str();
+        // Splits: (local writes, per-target queue entries).
+        let mut local_partitions: Vec<(String, i32)> = Vec::new();
+        let mut queued: HashMap<String, Vec<(String, i32)>> = HashMap::new();
+        for (target, parts) in by_target {
+            match target {
+                None => local_partitions.extend(parts), // dev mode
+                Some(id) if id == self_id => local_partitions.extend(parts),
+                Some(id) => {
+                    queued.entry(id).or_default().extend(parts);
+                }
+            }
+        }
+
+        // Same-broker write — happens before the queue write so a
+        // crash mid-dispatch still leaves the local marker in place.
+        if !local_partitions.is_empty() {
+            self.write_local_markers(req, &local_partitions).await;
+        }
+
+        // Cross-broker dispatch via the shared-PVC queue. Receiver's
+        // MarkerWatcher picks it up within ~2 s and applies it on the
+        // peer leader (gh #175).
+        if !queued.is_empty() {
+            self.enqueue_cross_broker_markers(req, &queued);
+        }
+    }
+
+    async fn write_local_markers(&self, req: &end_txn::Request, partitions: &[(String, i32)]) {
         let batch = Bytes::from(build_control_batch(
             req.producer_id,
             req.producer_epoch,
             req.committed,
-            // CoordinatorEpoch field — Apache populates it from the
-            // txn coordinator's lease epoch. Phase 6 doesn't track
-            // that distinctly from the assignment epoch; passing 0
-            // keeps the wire shape valid (consumers ignore the field
-            // for accept/reject — it's only used by the broker for
-            // marker dedup, which skafka collapses via the slot file).
+            // CoordinatorEpoch — Apache populates it from the txn
+            // coordinator's lease epoch. Phase 6 doesn't track that
+            // distinctly from the assignment epoch; 0 keeps the wire
+            // shape valid (consumers don't act on the field).
             0,
         ));
-        for TxnTopic { topic, partitions } in &outcome.partitions {
-            for &p in partitions {
-                if !owns_partition(&self.broker, topic, p) {
-                    // Cross-broker case (gh #114). Silently skipped
-                    // — the marker write will eventually come from
-                    // the txn coord's cross-broker dispatch when
-                    // that lands.
-                    continue;
-                }
-                let epoch = self
-                    .broker
-                    .coordinator()
-                    .and_then(|c| c.current_epoch(topic, p))
-                    .unwrap_or_else(|| self.broker.local_lease.current_epoch());
-                // create_partition is idempotent on the engine; cheap
-                // safety net in case the partition wasn't pre-created.
-                let _ = self.broker.engine.create_partition(topic, p).await;
-                if let Err(err) = self
-                    .broker
-                    .engine
-                    .append(topic, p, epoch, ACKS_ALL, batch.clone())
-                    .await
-                {
-                    tracing::warn!(
-                        topic,
-                        partition = p,
-                        %err,
-                        "EndTxn marker append failed; consumers in read_committed mode \
-                         will not see the txn as committed until the producer retries",
-                    );
-                }
+        for (topic, p) in partitions {
+            let epoch = self
+                .broker
+                .coordinator()
+                .and_then(|c| c.current_epoch(topic, *p))
+                .unwrap_or_else(|| self.broker.local_lease.current_epoch());
+            let _ = self.broker.engine.create_partition(topic, *p).await;
+            if let Err(err) = self
+                .broker
+                .engine
+                .append(topic, *p, epoch, ACKS_ALL, batch.clone())
+                .await
+            {
+                tracing::warn!(
+                    topic,
+                    partition = p,
+                    %err,
+                    "EndTxn marker append failed; consumers in read_committed mode \
+                     will not see the txn as committed until the producer retries",
+                );
             }
         }
     }
-}
 
-fn owns_partition(broker: &Broker, topic: &str, partition: i32) -> bool {
-    match broker.coordinator() {
-        Some(c) => c.owns(topic, partition),
-        // Dev mode (no Coordinator) — every broker leads every
-        // partition by construction. Matches the Phase 3 / 4 produce
-        // path's local-lease fallback.
-        None => true,
+    fn enqueue_cross_broker_markers(
+        &self,
+        req: &end_txn::Request,
+        queued: &HashMap<String, Vec<(String, i32)>>,
+    ) {
+        let queue = match self.broker.marker_queue() {
+            Some(q) => q,
+            None => {
+                tracing::warn!(
+                    txn_id = %req.transactional_id,
+                    "EndTxn: cross-broker markers needed but no MarkerQueue is wired; \
+                     peer partitions will not see this commit/abort until the txn \
+                     coord retries",
+                );
+                return;
+            }
+        };
+        for (target_broker, parts) in queued {
+            // Pack into TxnTopic so the schema matches what
+            // MarkerWatcher applies on the other side.
+            let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
+            for (topic, p) in parts {
+                by_topic.entry(topic.clone()).or_default().push(*p);
+            }
+            let partitions: Vec<TxnTopic> = by_topic
+                .into_iter()
+                .map(|(topic, partitions)| TxnTopic { topic, partitions })
+                .collect();
+            let entry = MarkerEntry {
+                transactional_id: req.transactional_id.clone(),
+                producer_id: req.producer_id,
+                producer_epoch: req.producer_epoch,
+                commit: req.committed,
+                coordinator_epoch: 0,
+                partitions,
+            };
+            if let Err(err) = queue.enqueue(target_broker, &entry) {
+                tracing::warn!(
+                    target = %target_broker,
+                    txn_id = %req.transactional_id,
+                    %err,
+                    "EndTxn: marker queue enqueue failed; peer will not see this \
+                     commit/abort until the txn coord retries"
+                );
+            }
+        }
     }
 }
 

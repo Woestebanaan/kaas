@@ -8,6 +8,7 @@ pub mod errors;
 pub mod fence_log;
 pub mod group;
 pub mod manager;
+pub mod marker_queue;
 pub mod offset_store;
 pub mod txn_state;
 
@@ -22,6 +23,7 @@ pub use manager::{
     CoordinatorResolution, FnLookup, GroupAssignmentSource, LeaveOutcome, LocalGroupSource,
     LocalTxnSource, Manager, TxnAssignmentSource,
 };
+pub use marker_queue::{marker_queue_dir, MarkerEntry, MarkerQueue, MARKER_QUEUE_DIR_NAME};
 pub use offset_store::{offset_key, FetchSpec, OffsetStore};
 pub use txn_state::{
     EndTxnOutcome, TxnAbortRecord, TxnEntry, TxnOffsetHook, TxnState, TxnStateError, TxnStateStore,

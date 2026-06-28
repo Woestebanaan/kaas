@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use sk_auth::{AllowAllAuthorizer, Authorizer, NoQuotaChecker, QuotaChecker};
-use sk_coordinator::{FenceLog, Manager, TxnStateStore};
+use sk_coordinator::{FenceLog, Manager, MarkerQueue, TxnStateStore};
 use sk_storage::StorageEngine;
 
 use crate::coordinator::Coordinator;
@@ -67,6 +67,13 @@ pub struct Broker {
     /// tests — the local engine fence still fires; only the cross-
     /// broker broadcast is skipped.
     fence_log: RwLock<Option<Arc<FenceLog>>>,
+    /// Cross-broker COMMIT/ABORT marker dispatch queue (gh #175).
+    /// `Some` whenever the cluster runtime is up; `EndTxn` writes
+    /// one entry per peer broker that leads a participating
+    /// partition. `None` in pure-handler tests — the same-broker
+    /// marker fast path still fires; only the cross-broker leg is
+    /// skipped.
+    marker_queue: RwLock<Option<MarkerQueue>>,
     producer_id_counter: AtomicI64,
 }
 
@@ -127,6 +134,7 @@ impl Broker {
             coordinator: RwLock::new(None),
             txn_state: RwLock::new(None),
             fence_log: RwLock::new(None),
+            marker_queue: RwLock::new(None),
             // Start at 1 so 0 stays available as an "unset" sentinel
             // for clients that read uninitialised pid.
             producer_id_counter: AtomicI64::new(1),
@@ -216,6 +224,21 @@ impl Broker {
     /// disabled.
     pub fn fence_log(&self) -> Option<Arc<FenceLog>> {
         self.fence_log.read().clone()
+    }
+
+    /// Install the cross-broker [`MarkerQueue`]. Called once from
+    /// `bins/skafka/main.rs` cluster bring-up.
+    pub fn install_marker_queue(&self, q: MarkerQueue) {
+        *self.marker_queue.write() = Some(q);
+    }
+
+    /// Read the installed [`MarkerQueue`]. `EndTxn` uses this to
+    /// dispatch markers to peer-broker partition leaders. `None`
+    /// (handler-only tests, dev mode without a cluster runtime)
+    /// skips the cross-broker leg — same-broker partitions still
+    /// get markers written.
+    pub fn marker_queue(&self) -> Option<MarkerQueue> {
+        self.marker_queue.read().clone()
     }
 }
 

@@ -14,6 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow             = { workspace = true }
+async-trait        = { workspace = true }
+bytes              = { workspace = true }
 rustls             = { workspace = true }
 rustls-pemfile     = { workspace = true }
 sk-auth            = { path = "../../crates/sk-auth" }
@@ -32,7 +34,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 base64     = { workspace = true }
-bytes      = { workspace = true }
 hmac       = { workspace = true }
 rcgen      = { workspace = true }
 sha2       = { workspace = true }
