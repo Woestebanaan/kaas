@@ -1,0 +1,1 @@
+{"tx-ongoing":{"pid":102,"epoch":0,"partitions":[{"topic":"events","partitions":[8]}],"ongoingSinceMs":1782675758339,"transactionTimeoutMs":45000,"state":"Ongoing","groups":["consumer-group-d","consumer-group-e"]}}
