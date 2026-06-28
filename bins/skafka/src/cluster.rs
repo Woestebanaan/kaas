@@ -133,17 +133,17 @@ pub fn install(
 
     let fence_dir = fence_log_dir(&cluster_dir);
     let fence_log = Arc::new(FenceLog::open(&fence_dir, &self_id)?);
+    broker.install_fence_log(fence_log.clone());
     info!(path = %fence_log.path().display(), "opened FenceLog");
 
     let mut tasks = Vec::new();
 
     // FenceWatcher: poll peer brokers' producer_fences/from-*.json
-    // every 2 s and dispatch new (pid, epoch) pairs. The wired
-    // fencer is a no-op until the storage engine grows a cross-
-    // partition fence_producer_epoch method (open follow-up); the
-    // watcher still runs so the dispatch path is exercised in
-    // production and the on-disk shape is round-tripped.
-    let fencer: Arc<dyn ProducerEpochFencer> = Arc::new(NoopFencer);
+    // every 2s and dispatch new (pid, epoch) pairs into the local
+    // storage engine's cross-partition fence walker (gh #170).
+    let fencer: Arc<dyn ProducerEpochFencer> = Arc::new(EngineFencer {
+        engine: engine.clone(),
+    });
     let watcher = Arc::new(FenceWatcher::new(fence_dir, &self_id, fencer));
     let watcher_cancel = cancel.clone();
     let watcher_clone = watcher.clone();
@@ -251,22 +251,20 @@ impl TxnOffsetHook for OffsetStoreHook {
     }
 }
 
-/// Placeholder [`ProducerEpochFencer`] wired into the
-/// [`FenceWatcher`] until the storage engine exposes a
-/// cross-partition `fence_producer_epoch` walker. Receives peer
-/// brokers' epoch bumps and logs them — the on-disk shape is
-/// exercised but the engine-side application is open follow-up.
-struct NoopFencer;
+/// [`ProducerEpochFencer`] adapter that bridges the
+/// [`FenceWatcher`]'s per-peer fence dispatch into the storage
+/// engine's cross-partition `fence_producer_epoch` walker
+/// (gh #170). Inbound peer fences are applied to every partition
+/// this broker leads so a zombie batch from an old session is
+/// rejected even on partitions the new session hasn't yet
+/// touched (gh #30).
+struct EngineFencer {
+    engine: Arc<dyn StorageEngine>,
+}
 
-impl ProducerEpochFencer for NoopFencer {
+impl ProducerEpochFencer for EngineFencer {
     fn fence_producer_epoch(&self, pid: i64, epoch: i16) {
-        tracing::debug!(
-            pid,
-            epoch,
-            "fence watcher: peer producer-epoch bump received; \
-             engine-side application is a follow-up (storage trait \
-             lacks cross-partition fence)"
-        );
+        self.engine.fence_producer_epoch(pid, epoch);
     }
 }
 

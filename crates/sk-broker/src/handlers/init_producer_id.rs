@@ -114,15 +114,33 @@ impl InitProducerIdHandler {
                 };
             }
         };
-        let broker = self.broker.clone();
-        match store
-            .get_or_allocate_with_timeout(txn_id, timeout_ms, move || broker.next_producer_id())
-        {
+        let broker_for_alloc = self.broker.clone();
+        match store.get_or_allocate_with_timeout(txn_id, timeout_ms, move || {
+            broker_for_alloc.next_producer_id()
+        }) {
             Ok((pid, epoch)) => {
-                // TODO (workstream E): cross-broker fence broadcast
-                // when epoch > 0. Same-broker fence via
-                // engine.fence_producer_epoch lands with the
-                // FenceLog + FenceWatcher work.
+                // gh #30: on every epoch bump, fence locally + broadcast
+                // to peers via the outbound FenceLog so their
+                // FenceWatcher applies it within ~2s. `epoch == 0`
+                // covers two cases — first-ever alloc, and post-
+                // overflow rotation to a fresh PID — neither needs
+                // fencing (no earlier (pid, epoch) state exists, or
+                // the PID itself has changed).
+                if epoch > 0 {
+                    self.broker.engine.fence_producer_epoch(pid, epoch);
+                    if let Some(log) = self.broker.fence_log() {
+                        if let Err(err) = log.append(pid, epoch) {
+                            tracing::warn!(
+                                pid,
+                                epoch,
+                                %err,
+                                "InitProducerId: outbound FenceLog append failed; \
+                                 peer brokers will not see this epoch bump until \
+                                 a future bump succeeds (zombie window on cross-broker partitions)",
+                            );
+                        }
+                    }
+                }
                 init_producer_id::Response {
                     throttle_time_ms: 0,
                     error_code: 0,
@@ -270,6 +288,32 @@ mod tests {
         let a = call(&h, Some("tx-a"), 60_000).await;
         let bb = call(&h, Some("tx-b"), 60_000).await;
         assert_ne!(a.producer_id, bb.producer_id);
+    }
+
+    #[tokio::test]
+    async fn rejoin_appends_to_fence_log_for_broadcast() {
+        use sk_coordinator::FenceLog;
+        let (_t, b) = broker_with_txn();
+        let fence_dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(FenceLog::open(fence_dir.path(), "skafka-0").unwrap());
+        b.install_fence_log(log.clone());
+
+        let h = InitProducerIdHandler::new(b);
+        let r1 = call(&h, Some("tx-1"), 60_000).await;
+        // First call: epoch=0 → no fence broadcast.
+        assert_eq!(r1.producer_epoch, 0);
+        assert!(log.snapshot().is_empty(), "epoch=0 must not broadcast");
+
+        // Rejoin: epoch=1 → broadcast appended.
+        let r2 = call(&h, Some("tx-1"), 60_000).await;
+        assert_eq!(r2.producer_epoch, 1);
+        let snap = log.snapshot();
+        assert_eq!(snap.get(&r2.producer_id), Some(&1));
+
+        // Second rejoin: epoch=2 → overwrites the prior entry.
+        let r3 = call(&h, Some("tx-1"), 60_000).await;
+        assert_eq!(r3.producer_epoch, 2);
+        assert_eq!(log.snapshot().get(&r3.producer_id), Some(&2));
     }
 
     #[tokio::test]

@@ -598,6 +598,22 @@ impl Partition {
         self.snapshot.load().epoch
     }
 
+    /// gh #30 / #108: bump the recorded producer epoch and clear
+    /// this partition's dedupe window for `pid`. Idempotent — no-op
+    /// when the recorded epoch is already `>= new_epoch`. Called by
+    /// the storage engine's cross-partition `fence_producer_epoch`
+    /// walker after an `InitProducerId` epoch bump, both for the
+    /// local broker's in-process fence and for inbound peer fences
+    /// the `sk-broker::FenceWatcher` dispatches.
+    pub fn fence_producer(&self, pid: i64, new_epoch: i16) {
+        let mut guard = self.inner.lock();
+        let entry = guard.producer_states.entry(pid).or_default();
+        if new_epoch > entry.epoch {
+            entry.epoch = new_epoch;
+            entry.recent.clear();
+        }
+    }
+
     /// Sum of closed-segment sizes + active-segment size.
     pub fn partition_size(&self) -> i64 {
         let snap = self.snapshot.load();

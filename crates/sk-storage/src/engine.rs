@@ -134,4 +134,17 @@ pub trait StorageEngine: Send + Sync + 'static {
     async fn drain(&self) -> Result<(), StorageError> {
         Ok(())
     }
+
+    /// gh #30 / #108: walk every open partition and bump the
+    /// recorded epoch for `pid` to `new_epoch`. Idempotent — no-op
+    /// per-partition when the recorded epoch is already
+    /// `>= new_epoch`. Called both for the in-process fence
+    /// (`InitProducerId` bumped this PID's epoch on this broker)
+    /// and for inbound peer fences dispatched by the
+    /// `sk-broker::FenceWatcher`.
+    ///
+    /// Default impl is a no-op so `MemoryStorage`, fakes, and
+    /// future variants that don't track per-PID dedupe state
+    /// compile without ceremony; `DiskStorageEngine` overrides.
+    fn fence_producer_epoch(&self, _pid: i64, _new_epoch: i16) {}
 }

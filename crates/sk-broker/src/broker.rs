@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use sk_auth::{AllowAllAuthorizer, Authorizer, NoQuotaChecker, QuotaChecker};
-use sk_coordinator::{Manager, TxnStateStore};
+use sk_coordinator::{FenceLog, Manager, TxnStateStore};
 use sk_storage::StorageEngine;
 
 use crate::coordinator::Coordinator;
@@ -60,6 +60,13 @@ pub struct Broker {
     /// log a warning once. `bins/skafka/main.rs` installs the real
     /// store at boot.
     txn_state: RwLock<Option<Arc<TxnStateStore>>>,
+    /// Outbound producer-epoch fence log (gh #108). `Some` whenever
+    /// the cluster runtime is up; `InitProducerId` appends
+    /// `(pid, epoch)` here on epoch bumps so peer brokers'
+    /// `FenceWatcher` picks them up. `None` in pure-handler unit
+    /// tests — the local engine fence still fires; only the cross-
+    /// broker broadcast is skipped.
+    fence_log: RwLock<Option<Arc<FenceLog>>>,
     producer_id_counter: AtomicI64,
 }
 
@@ -119,6 +126,7 @@ impl Broker {
             coord_manager: RwLock::new(None),
             coordinator: RwLock::new(None),
             txn_state: RwLock::new(None),
+            fence_log: RwLock::new(None),
             // Start at 1 so 0 stays available as an "unset" sentinel
             // for clients that read uninitialised pid.
             producer_id_counter: AtomicI64::new(1),
@@ -193,6 +201,21 @@ impl Broker {
             Some(c) => c.owns_txn(txn_id),
             None => true,
         }
+    }
+
+    /// Install the outbound [`FenceLog`]. Called once from
+    /// `bins/skafka/main.rs` cluster bring-up.
+    pub fn install_fence_log(&self, log: Arc<FenceLog>) {
+        *self.fence_log.write() = Some(log);
+    }
+
+    /// Read the installed [`FenceLog`]. Handlers that need to
+    /// broadcast a producer-epoch bump (just `InitProducerId`
+    /// today) read this; `None` skips the broadcast — the local
+    /// engine fence still fires, only cross-broker propagation is
+    /// disabled.
+    pub fn fence_log(&self) -> Option<Arc<FenceLog>> {
+        self.fence_log.read().clone()
     }
 }
 

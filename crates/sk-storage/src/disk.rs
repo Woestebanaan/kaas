@@ -204,6 +204,19 @@ impl StorageEngine for DiskStorageEngine {
         p.delete_records(target_offset).await
     }
 
+    fn fence_producer_epoch(&self, pid: i64, new_epoch: i16) {
+        // Walk every open partition. Each Partition::fence_producer
+        // takes its own inner mutex; the DashMap iter holds shard
+        // read locks for the duration, which is fine because
+        // fence_producer doesn't recursively touch the partitions
+        // map. Partitions that aren't currently open on this broker
+        // pick up the fence on their next take_over via the
+        // producer-state snapshot path (gh #12).
+        for kv in self.partitions.iter() {
+            kv.value().fence_producer(pid, new_epoch);
+        }
+    }
+
     async fn create_partition(&self, topic: &str, partition: i32) -> Result<(), StorageError> {
         // Opening is creation — Partition::open creates the dir.
         self.ensure_open(topic, partition).await?;
