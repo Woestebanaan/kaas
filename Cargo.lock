@@ -2398,6 +2398,14 @@ version = "0.0.0"
 [[package]]
 name = "sk-operator-api"
 version = "0.0.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
 
 [[package]]
 name = "sk-operator-controllers"
