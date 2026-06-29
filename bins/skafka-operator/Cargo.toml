@@ -12,5 +12,19 @@ description  = "skafka Kubernetes operator binary."
 name = "skafka-operator"
 path = "src/main.rs"
 
+[dependencies]
+anyhow                  = { workspace = true }
+async-trait             = { workspace = true }
+axum                    = { workspace = true }
+futures                 = { workspace = true }
+kube                    = { workspace = true }
+sk-controller           = { path = "../../crates/sk-controller" }
+sk-operator-api         = { workspace = true }
+sk-operator-controllers = { workspace = true }
+tokio                   = { workspace = true }
+tokio-util              = { workspace = true }
+tracing                 = { workspace = true }
+tracing-subscriber      = { workspace = true }
+
 [lints]
 workspace = true
