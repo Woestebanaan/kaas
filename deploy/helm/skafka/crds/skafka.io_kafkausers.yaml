@@ -2,15 +2,14 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.20.1
   name: kafkausers.skafka.io
 spec:
   group: skafka.io
   names:
+    categories: []
     kind: KafkaUser
-    listKind: KafkaUserList
     plural: kafkausers
+    shortNames: []
     singular: kafkauser
   scope: Namespaced
   versions:
@@ -24,30 +23,15 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: Auto-generated derived type for KafkaUserSpec via `CustomResource`
         properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
           spec:
             properties:
               authentication:
                 properties:
                   certificateRef:
-                    description: Used when type=tls
+                    description: Used when `type = tls`. The operator stamps the CN into `credentials.json` as the mTLS principal.
+                    nullable: true
                     properties:
                       name:
                         type: string
@@ -55,7 +39,8 @@ spec:
                     - name
                     type: object
                   password:
-                    description: Used when type=scram-sha-512
+                    description: 'Input Secret carrying the SCRAM password (gh #136 — optional; when unset the operator auto-generates a stable 32-char password into the output Secret `<user>-kafka-credentials`).'
+                    nullable: true
                     properties:
                       key:
                         type: string
@@ -66,17 +51,11 @@ spec:
                     - name
                     type: object
                   scram:
-                    description: |-
-                      Scram is the runtime-rotation path for type=scram-sha-512 (gh #104,
-                      KIP-554 AlterUserScramCredentials API). When set, the operator uses
-                      the supplied (salt, storedKey, serverKey, iterations) verbatim and
-                      skips the Password → PBKDF2 derivation. The wire-level admin path
-                      computes these from the client-supplied SaltedPassword and patches
-                      this field; clients receive the rotated credential via the same
-                      AdminClient call that wrote it (Apache's model: the rotator knows
-                      the new password locally and doesn't need a Secret to learn it).
+                    description: 'Pre-derived SCRAM credential (gh #104, KIP-554). When set, the operator passes the salt/storedKey/serverKey/iterations through to `credentials.json` verbatim and skips PBKDF2 — the wire-level admin path uses this to rotate runtime credentials without an intermediate Secret.'
+                    nullable: true
                     properties:
                       iterations:
+                        format: int32
                         type: integer
                       salt:
                         type: string
@@ -91,7 +70,8 @@ spec:
                     - storedKey
                     type: object
                   serviceAccountRef:
-                    description: Used when type=kubernetes-serviceaccount
+                    description: Used when `type = kubernetes-serviceaccount`. Wired in Phase 7 alongside the JWT validation path.
+                    nullable: true
                     properties:
                       name:
                         type: string
@@ -102,37 +82,20 @@ spec:
                     - namespace
                     type: object
                   type:
-                    enum:
-                    - scram-sha-512
-                    - tls
-                    - kubernetes-serviceaccount
+                    description: '`scram-sha-512`, `tls`, or `kubernetes-serviceaccount`.'
+                    pattern: ^(scram-sha-512|tls|kubernetes-serviceaccount)$
                     type: string
                 required:
                 - type
                 type: object
               authorization:
-                description: |-
-                  Authorization carries the user's ACL rules inline (Strimzi-style).
-                  Pre-gh #135 ACLs lived in a separate KafkaAcl CR (and could also be
-                  attached to a KafkaUserGroup that listed multiple members). Both
-                  secondary CRs are removed in v0.1.117 — every rule that applies to
-                  a principal is authored on the principal's own KafkaUser CR.
+                nullable: true
                 properties:
                   acls:
                     items:
-                      description: |-
-                        KafkaUserACL is one access-control rule attached to this principal.
-                        Field naming matches Strimzi exactly: `type: allow|deny` (lowercase),
-                        optional `host`. Operations are validated against Apache Kafka's
-                        standard set. Defaults applied at the operator boundary (acls.go
-                        aclToEntry), not via apiserver +kubebuilder:default — see gh #137.
                       properties:
                         host:
-                          description: |-
-                            Source-IP filter. Empty means "any host" (the Apache Kafka
-                            authorizer's "*" wildcard). Reserved for forward-compat with the
-                            host filter; skafka enforces "any" only — non-empty values are
-                            stored in the CR for round-trip but ignored at the broker today.
+                          description: Source-IP filter. Empty = any host (Apache `*` wildcard). Stored for round-trip but ignored at the broker (only "any" is enforced today).
                           type: string
                         operations:
                           items:
@@ -140,35 +103,24 @@ spec:
                           minItems: 1
                           type: array
                         resource:
-                          description: |-
-                            KafkaUserACLResource identifies the Kafka resource the ACL applies to.
-                            Same shape as the prior AclResource type; renamed for namespace
-                            hygiene now that ACLs live inside KafkaUser. PatternType defaulting
-                            happens operator-side (acls.go), not via apiserver defaulting — see
-                            gh #137.
                           properties:
                             name:
                               type: string
                             patternType:
-                              enum:
-                              - literal
-                              - prefix
+                              description: '`literal` or `prefix`. Empty → operator-side default `literal` (gh #137).'
+                              pattern: ^(literal|prefix)?$
                               type: string
                             type:
-                              enum:
-                              - topic
-                              - group
-                              - cluster
-                              - transactionalId
+                              description: '`topic`, `group`, `cluster`, or `transactionalId`.'
+                              pattern: ^(topic|group|cluster|transactionalId)$
                               type: string
                           required:
                           - name
                           - type
                           type: object
                         type:
-                          enum:
-                          - allow
-                          - deny
+                          description: '`allow` or `deny`. Empty → operator-side default `allow` (gh #137 — no apiserver defaulting).'
+                          pattern: ^(allow|deny)?$
                           type: string
                       required:
                       - operations
@@ -176,90 +128,74 @@ spec:
                       type: object
                     type: array
                   type:
-                    enum:
-                    - simple
+                    description: '`simple` today. Field is reserved for forward compat (OPA / OIDC). **Not** apiserver-defaulted — gh #137. The operator treats empty as "simple" at reconcile time.'
+                    pattern: ^(simple)?$
                     type: string
                 required:
                 - acls
                 type: object
               quotas:
+                nullable: true
                 properties:
                   consumerMaxByteRatePerBroker:
-                    description: |-
-                      ConsumerMaxByteRatePerBroker caps consumer throughput at THIS broker
-                      only (same per-broker semantics as the producer field).
+                    description: Consumer cap at THIS broker only.
                     format: int64
-                    minimum: 0
+                    minimum: 0.0
+                    nullable: true
                     type: integer
                   producerMaxByteRatePerBroker:
-                    description: |-
-                      ProducerMaxByteRatePerBroker caps producer throughput at THIS broker
-                      only (Apache Kafka 3.7-style per-broker quota; KIP-13). With N brokers
-                      the effective cluster-wide ceiling is N × the configured value.
+                    description: 'Producer cap at THIS broker only (Apache Kafka 3.7 / KIP-13 per-broker semantics). With N brokers the effective cluster-wide ceiling is N × this. Gh #126 — the named- honestly divergence from Strimzi''s `producerByteRate`.'
                     format: int64
-                    minimum: 0
+                    minimum: 0.0
+                    nullable: true
                     type: integer
                   requestPercentage:
                     format: int32
-                    maximum: 100
-                    minimum: 0
+                    maximum: 100.0
+                    minimum: 0.0
+                    nullable: true
                     type: integer
                 type: object
             required:
             - authentication
             type: object
           status:
+            nullable: true
             properties:
               conditions:
                 items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
+                  description: One status condition. Field shapes mirror apimachinery's `metav1.Condition` exactly.
                   properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
+                    last_transition_time:
+                      description: RFC 3339 timestamp. Required.
                       type: string
                     message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
+                      description: Human-readable. Required, up to 32768 chars.
                       maxLength: 32768
                       type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
+                    observed_generation:
+                      description: '`metadata.generation` observed at transition. Optional; must be ≥ 0 when set.'
                       format: int64
-                      minimum: 0
+                      minimum: 0.0
+                      nullable: true
                       type: integer
                     reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
+                      description: Programmatic identifier. Required, CamelCase, 1..=1024 chars.
                       maxLength: 1024
                       minLength: 1
                       pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                       type: string
                     status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
+                      description: '`True`, `False`, or `Unknown`. Required.'
+                      pattern: ^(True|False|Unknown)$
                       type: string
                     type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      description: CamelCase or `foo.example.com/CamelCase`. Required.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
                   required:
-                  - lastTransitionTime
+                  - last_transition_time
                   - message
                   - reason
                   - status
@@ -267,8 +203,12 @@ spec:
                   type: object
                 type: array
               secret:
+                description: 'Output Secret name (gh #136 — populated for SCRAM users whose password the operator auto-generated).'
                 type: string
             type: object
+        required:
+        - spec
+        title: KafkaUser
         type: object
     served: true
     storage: true

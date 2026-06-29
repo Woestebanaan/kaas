@@ -2,15 +2,14 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.20.1
   name: kafkatopics.skafka.io
 spec:
   group: skafka.io
   names:
+    categories: []
     kind: KafkaTopic
-    listKind: KafkaTopicList
     plural: kafkatopics
+    shortNames: []
     singular: kafkatopic
   scope: Namespaced
   versions:
@@ -24,138 +23,98 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: Auto-generated derived type for KafkaTopicSpec via `CustomResource`
         properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
           spec:
             properties:
               config:
+                default: {}
+                description: Per-topic configuration knobs. All optional — unset = broker default. Field shapes mirror the operator-side JSON exactly so the broker's `sk_storage::TopicConfigFile` deserialises the same `.config.json` the operator writes.
                 properties:
                   cleanupPolicy:
-                    enum:
-                    - delete
-                    - compact
-                    - compact,delete
+                    description: '`delete`, `compact`, or `compact,delete`. Empty → broker default (`delete`). Validation is operator-side via the regex.'
+                    pattern: ^(delete|compact|compact,delete)?$
                     type: string
                   deleteRetentionMs:
                     format: int64
-                    minimum: 0
+                    minimum: 0.0
+                    nullable: true
                     type: integer
                   minCompactionLagMs:
                     format: int64
-                    minimum: 0
+                    minimum: 0.0
+                    nullable: true
                     type: integer
                   retentionBytes:
-                    description: |-
-                      RetentionBytes caps the per-partition log size. When the cleaner runs
-                      and a partition's total segment bytes exceed this value, oldest
-                      closed segments are deleted until the partition is back under the
-                      limit. Active segment is never touched. -1 = unlimited (Kafka
-                      convention); 0 = treat as unlimited too.
+                    description: Caps per-partition log size. When the cleaner runs and a partition's total segment bytes exceed this, oldest closed segments are deleted until the partition is back under the limit. Active segment is never touched. `-1` = unlimited (Kafka convention); `0` = treat as unlimited too.
                     format: int64
-                    minimum: -1
+                    minimum: -1.0
+                    nullable: true
                     type: integer
                   retentionMs:
-                    description: |-
-                      retention.ms in Kafka semantics: -1 means "infinite" (never
-                      delete by time). Streams sets this on its changelog topics.
+                    description: '`retention.ms` in Kafka semantics: `-1` = infinite (never delete by time). Streams sets this on changelog topics.'
                     format: int64
-                    minimum: -1
+                    minimum: -1.0
+                    nullable: true
                     type: integer
                   segmentBytes:
                     format: int64
-                    minimum: 1
+                    minimum: 1.0
+                    nullable: true
                     type: integer
                 type: object
               partitions:
+                description: Partition count. Cannot be decreased once set (the reconciler rejects with `InvalidPartitionCount`).
                 format: int32
-                minimum: 1
+                minimum: 1.0
                 type: integer
               topicName:
                 description: |-
-                  TopicName is the name of the Kafka topic on the wire. When unset
-                  (the common case), it defaults to metadata.name. Set this only
-                  when the desired Kafka name isn't a valid Kubernetes resource
-                  name — e.g. uppercase letters, double underscores, or names
-                  longer than 253 characters. Kafka allows up to 249 characters
-                  from [A-Za-z0-9._-]; Kubernetes resource names must follow RFC
-                  1123 (lowercase, dots/hyphens, start+end alphanumeric, ≤ 253).
-                  The admin-protocol path (gh #51 + #86) synthesises a
-                  hash-derived metadata.name and sets this field when the literal
-                  Kafka name fails RFC 1123. Mirrors Strimzi's spec.topicName
-                  (https://strimzi.io/docs).
+                  On-wire Kafka topic name. Empty → defaults to `metadata.name`. Use [`KafkaTopic::effective_topic_name`] in callers; never read this field directly.
+
+                  gh #86 admin-protocol path: when a literal Kafka topic name (uppercase, double underscores, > 253 chars) isn't a valid RFC 1123 K8s resource name, the broker synthesises a hash-derived `metadata.name` and stores the literal name here. Mirrors Strimzi's `spec.topicName`.
                 maxLength: 249
                 type: string
             required:
             - partitions
             type: object
           status:
+            nullable: true
             properties:
               conditions:
                 items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
+                  description: One status condition. Field shapes mirror apimachinery's `metav1.Condition` exactly.
                   properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
+                    last_transition_time:
+                      description: RFC 3339 timestamp. Required.
                       type: string
                     message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
+                      description: Human-readable. Required, up to 32768 chars.
                       maxLength: 32768
                       type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
+                    observed_generation:
+                      description: '`metadata.generation` observed at transition. Optional; must be ≥ 0 when set.'
                       format: int64
-                      minimum: 0
+                      minimum: 0.0
+                      nullable: true
                       type: integer
                     reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
+                      description: Programmatic identifier. Required, CamelCase, 1..=1024 chars.
                       maxLength: 1024
                       minLength: 1
                       pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                       type: string
                     status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
+                      description: '`True`, `False`, or `Unknown`. Required.'
+                      pattern: ^(True|False|Unknown)$
                       type: string
                     type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      description: CamelCase or `foo.example.com/CamelCase`. Required.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
                   required:
-                  - lastTransitionTime
+                  - last_transition_time
                   - message
                   - reason
                   - status
@@ -166,22 +125,12 @@ spec:
                 format: int32
                 type: integer
               topicId:
-                description: |-
-                  TopicID is the stable UUID for this topic (KIP-516, gh #105).
-                  The operator generates a random v4 UUID on first reconcile when
-                  missing and never rotates it; deleting + re-creating a topic
-                  produces a fresh UUID (matches Apache's "re-created topics have
-                  distinct IDs" contract).
-
-                  Format: 36-char canonical hyphenated UUID
-                  (8-4-4-4-12, e.g. "00112233-4455-6677-8899-aabbccddeeff"). The
-                  broker surfaces this on Metadata v10+ responses and on the
-                  CreateTopics v7+ response so AdminClient consumers can address
-                  topics by ID. Empty/missing → broker emits all-zero UUID
-                  (pre-#105 behaviour, preserved for CRs that never had a status
-                  populated).
+                description: 'Stable v4 UUID minted by the operator on first reconcile (gh #105, KIP-516). Never rotated; deleting + re-creating a topic mints a fresh UUID per Apache''s contract. The broker surfaces this on Metadata v10+ responses.'
                 type: string
             type: object
+        required:
+        - spec
+        title: KafkaTopic
         type: object
     served: true
     storage: true

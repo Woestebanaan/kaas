@@ -9,7 +9,11 @@ publish      = false
 description  = "Repo-wide chores: gen-proto, gen-crds, check-crd-drift, ci."
 
 [dependencies]
-anyhow = { workspace = true }
+anyhow          = { workspace = true }
+serde           = { workspace = true }
+serde_yaml      = "0.9"
+sk-operator-api = { workspace = true }
+kube            = { workspace = true }
 
 [lints]
 workspace = true

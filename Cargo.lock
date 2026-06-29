@@ -3291,6 +3291,10 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "kube",
+ "serde",
+ "serde_yaml",
+ "sk-operator-api",
 ]
 
 [[package]]

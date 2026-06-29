@@ -1,6 +1,23 @@
-use std::{env, process::Command};
+//! Repo-wide chores: `gen-proto`, `gen-crds`, `check-crd-drift`,
+//! `fmt-check`, `ci`.
+//!
+//! `gen-crds` (Phase 7) walks the four `kube-derive` types in
+//! `sk-operator-api`, canonicalises the generated YAML to drop the
+//! `controller-gen.kubebuilder.io/version` annotation (kube-rs
+//! doesn't run controller-gen, so the marker is meaningless), and
+//! writes the result to both `deploy/crds/` and
+//! `deploy/helm/skafka/crds/`. `check-crd-drift` runs the same and
+//! errors if the two trees diverge from `HEAD`.
 
-fn main() -> anyhow::Result<()> {
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::{env, fs};
+
+use anyhow::{bail, Context, Result};
+use kube::CustomResourceExt;
+use sk_operator_api::{KafkaCluster, KafkaClusterAssignments, KafkaTopic, KafkaUser};
+
+fn main() -> Result<()> {
     let task = env::args().nth(1).unwrap_or_default();
     match task.as_str() {
         "gen-proto" => gen_proto(),
@@ -15,20 +32,43 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn gen_proto() -> anyhow::Result<()> {
-    // tonic-build runs inside sk-broker's build.rs. Forcing a rebuild here means
-    // the generated code lands in target/ regardless of cargo's incremental cache.
+fn gen_proto() -> Result<()> {
+    // tonic-build runs inside sk-broker's build.rs. Forcing a rebuild
+    // here means the generated code lands in target/ regardless of
+    // cargo's incremental cache.
     run(&["cargo", "build", "-p", "sk-broker"])
 }
 
-fn gen_crds() -> anyhow::Result<()> {
-    // Phase 0 stub. Phase 7 replaces this with a schemars walker over
-    // sk-operator-api that writes deploy/crds/*.yaml + mirrors into the chart.
-    eprintln!("gen-crds: stub — implemented in Phase 7");
+fn gen_crds() -> Result<()> {
+    let root = repo_root()?;
+    let crds_root = root.join("deploy").join("crds");
+    let chart_crds = root.join("deploy").join("helm").join("skafka").join("crds");
+    fs::create_dir_all(&crds_root)?;
+    fs::create_dir_all(&chart_crds)?;
+
+    type Renderer = fn() -> Result<String>;
+    let entries: &[(&str, Renderer)] = &[
+        ("skafka.io_kafkaclusters.yaml", kafkacluster_yaml),
+        ("skafka.io_kafkatopics.yaml", kafkatopic_yaml),
+        ("skafka.io_kafkausers.yaml", kafkauser_yaml),
+        (
+            "skafka.io_kafkaclusterassignments.yaml",
+            kafkaclusterassignments_yaml,
+        ),
+    ];
+
+    for (filename, render) in entries {
+        let yaml = render().with_context(|| format!("rendering {filename}"))?;
+        let canonical =
+            canonicalise(&yaml).with_context(|| format!("canonicalising {filename}"))?;
+        write_atomic(&crds_root.join(filename), &canonical)?;
+        write_atomic(&chart_crds.join(filename), &canonical)?;
+    }
+    eprintln!("gen-crds: wrote {} CRDs", entries.len());
     Ok(())
 }
 
-fn check_crd_drift() -> anyhow::Result<()> {
+fn check_crd_drift() -> Result<()> {
     gen_crds()?;
     run(&[
         "git",
@@ -39,7 +79,7 @@ fn check_crd_drift() -> anyhow::Result<()> {
     ])
 }
 
-fn ci() -> anyhow::Result<()> {
+fn ci() -> Result<()> {
     run(&["cargo", "fmt", "--check"])?;
     run(&[
         "cargo",
@@ -55,10 +95,104 @@ fn ci() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(argv: &[&str]) -> anyhow::Result<()> {
+// --- CRD renderers --------------------------------------------------
+
+fn kafkacluster_yaml() -> Result<String> {
+    crd_yaml(&KafkaCluster::crd())
+}
+fn kafkatopic_yaml() -> Result<String> {
+    crd_yaml(&KafkaTopic::crd())
+}
+fn kafkauser_yaml() -> Result<String> {
+    crd_yaml(&KafkaUser::crd())
+}
+fn kafkaclusterassignments_yaml() -> Result<String> {
+    crd_yaml(&KafkaClusterAssignments::crd())
+}
+
+fn crd_yaml<T: serde::Serialize>(crd: &T) -> Result<String> {
+    // serde_yaml writes a leading `---` document separator only when
+    // we ask for it. controller-gen emits one, so we wrap the output
+    // to match.
+    let body = serde_yaml::to_string(crd)?;
+    Ok(if body.starts_with("---\n") {
+        body
+    } else {
+        format!("---\n{body}")
+    })
+}
+
+// --- canonicalisation ----------------------------------------------
+
+/// Drop the `controller-gen.kubebuilder.io/version` annotation
+/// (and the empty `metadata.annotations` map it leaves behind)
+/// before writing. kube-rs doesn't run controller-gen so stamping a
+/// version number that doesn't exist would be misleading; dropping
+/// it produces a stable, single one-shot diff at Phase 7 merge
+/// time, and every subsequent `cargo xtask gen-crds` run is a
+/// clean no-op.
+///
+/// Round-trip through `serde_yaml::Value` so the mutation is
+/// structural rather than text-substitution.
+fn canonicalise(yaml: &str) -> Result<String> {
+    use serde_yaml::Value;
+    let mut value: Value = serde_yaml::from_str(yaml)?;
+    if let Some(map) = value.as_mapping_mut() {
+        if let Some(meta) = map
+            .get_mut(Value::String("metadata".into()))
+            .and_then(Value::as_mapping_mut)
+        {
+            if let Some(annotations) = meta
+                .get_mut(Value::String("annotations".into()))
+                .and_then(Value::as_mapping_mut)
+            {
+                annotations.remove(Value::String(
+                    "controller-gen.kubebuilder.io/version".into(),
+                ));
+                if annotations.is_empty() {
+                    meta.remove(Value::String("annotations".into()));
+                }
+            }
+            // controller-gen also omits `creationTimestamp: null`; if
+            // serde_yaml emitted one, drop it.
+            if let Some(v) = meta.get(Value::String("creationTimestamp".into())) {
+                if v.is_null() {
+                    meta.remove(Value::String("creationTimestamp".into()));
+                }
+            }
+        }
+    }
+    let body = serde_yaml::to_string(&value)?;
+    Ok(if body.starts_with("---\n") {
+        body
+    } else {
+        format!("---\n{body}")
+    })
+}
+
+// --- shared helpers ------------------------------------------------
+
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let tmp = path.with_extension("yaml.tmp");
+    fs::write(&tmp, contents.as_bytes()).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("renaming {}", tmp.display()))?;
+    Ok(())
+}
+
+/// Repository root resolved from `CARGO_MANIFEST_DIR` (xtask's
+/// manifest is at `<repo>/xtask/Cargo.toml`).
+fn repo_root() -> Result<PathBuf> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .map(Path::to_path_buf)
+        .context("xtask Cargo.toml has no parent (repo root)")
+}
+
+fn run(argv: &[&str]) -> Result<()> {
     let status = Command::new(argv[0]).args(&argv[1..]).status()?;
     if !status.success() {
-        anyhow::bail!("{:?} failed: {status}", argv);
+        bail!("{:?} failed: {status}", argv);
     }
     Ok(())
 }

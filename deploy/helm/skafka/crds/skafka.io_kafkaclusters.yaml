@@ -2,15 +2,14 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.20.1
   name: kafkaclusters.skafka.io
 spec:
   group: skafka.io
   names:
+    categories: []
     kind: KafkaCluster
-    listKind: KafkaClusterList
     plural: kafkaclusters
+    shortNames: []
     singular: kafkacluster
   scope: Namespaced
   versions:
@@ -27,68 +26,72 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: |-
-          KafkaCluster is the top-level skafka cluster configuration. One KafkaCluster per
-          installation; the operator reconciles the broker StatefulSet and, if enabled,
-          the external listener resources (cert-manager Certificate, per-broker Services,
-          Gateway API TLSRoutes).
+        description: Auto-generated derived type for KafkaClusterSpec via `CustomResource`
         properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
           spec:
             properties:
               listeners:
+                default:
+                  external:
+                    enabled: false
+                    gateway:
+                      enabled: false
+                      gatewayRef: {}
+                    port: 9093
+                    service: {}
+                    tls:
+                      certManager:
+                        enabled: false
+                        issuerRef: {}
+                  internal:
+                    port: 9092
                 properties:
                   external:
+                    default:
+                      enabled: false
+                      gateway:
+                        enabled: false
+                        gatewayRef: {}
+                      port: 9093
+                      service: {}
+                      tls:
+                        certManager:
+                          enabled: false
+                          issuerRef: {}
                     properties:
                       bootstrapHostname:
-                        description: |-
-                          BootstrapHostname is an optional convenience hostname included in the
-                          certificate SANs. Not required for operation.
+                        description: Optional convenience hostname added to the certificate SANs. Not required for operation.
                         type: string
                       enabled:
                         type: boolean
                       gateway:
+                        default:
+                          enabled: false
+                          gatewayRef: {}
                         properties:
                           enabled:
                             type: boolean
                           gatewayRef:
+                            default: {}
                             properties:
                               name:
                                 type: string
                               namespace:
                                 type: string
-                            required:
-                            - name
                             type: object
                         required:
                         - enabled
                         type: object
                       hostnamePattern:
-                        description: |-
-                          HostnamePattern uses Go fmt-style %d for the broker ordinal.
-                          Example: "broker-%d.kafka.example.com"
+                        description: Go-fmt-style `%d` for the broker ordinal, e.g. `broker-%d.kafka.example.com`.
                         type: string
                       port:
                         default: 9093
+                        description: '`default: 9093` in the committed CRD (`...kafkaclusters.yaml:88`).'
                         format: int32
                         type: integer
                       service:
+                        default: {}
                         properties:
                           annotations:
                             additionalProperties:
@@ -96,23 +99,27 @@ spec:
                             type: object
                         type: object
                       tls:
+                        default:
+                          certManager:
+                            enabled: false
+                            issuerRef: {}
                         properties:
                           certManager:
+                            default:
+                              enabled: false
+                              issuerRef: {}
                             properties:
                               enabled:
                                 type: boolean
                               issuerRef:
+                                default: {}
                                 properties:
                                   kind:
-                                    enum:
-                                    - ClusterIssuer
-                                    - Issuer
+                                    description: '`ClusterIssuer` or `Issuer`. Empty defaults at reconcile time (operator side; we don''t apiserver-default it — gh #137).'
+                                    pattern: ^(ClusterIssuer|Issuer)?$
                                     type: string
                                   name:
                                     type: string
-                                required:
-                                - kind
-                                - name
                                 type: object
                             required:
                             - enabled
@@ -122,18 +129,22 @@ spec:
                     - enabled
                     type: object
                   internal:
+                    default:
+                      port: 9092
                     properties:
                       port:
                         default: 9092
+                        description: 'The committed CRD ships `default: 9092` (verifiable at `deploy/crds/skafka.io_kafkaclusters.yaml:127`). Apiserver defaulting fills this when the chart omits it. Schemars renders the helper via `#[schemars(default = ...)]`.'
                         format: int32
                         type: integer
                     type: object
                 type: object
               replicas:
                 format: int32
-                minimum: 1
+                minimum: 1.0
                 type: integer
               storage:
+                default: {}
                 properties:
                   className:
                     type: string
@@ -144,6 +155,7 @@ spec:
             - replicas
             type: object
           status:
+            nullable: true
             properties:
               bootstrapServers:
                 items:
@@ -151,54 +163,38 @@ spec:
                 type: array
               conditions:
                 items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
+                  description: One status condition. Field shapes mirror apimachinery's `metav1.Condition` exactly.
                   properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
+                    last_transition_time:
+                      description: RFC 3339 timestamp. Required.
                       type: string
                     message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
+                      description: Human-readable. Required, up to 32768 chars.
                       maxLength: 32768
                       type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
+                    observed_generation:
+                      description: '`metadata.generation` observed at transition. Optional; must be ≥ 0 when set.'
                       format: int64
-                      minimum: 0
+                      minimum: 0.0
+                      nullable: true
                       type: integer
                     reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
+                      description: Programmatic identifier. Required, CamelCase, 1..=1024 chars.
                       maxLength: 1024
                       minLength: 1
                       pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                       type: string
                     status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
+                      description: '`True`, `False`, or `Unknown`. Required.'
+                      pattern: ^(True|False|Unknown)$
                       type: string
                     type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      description: CamelCase or `foo.example.com/CamelCase`. Required.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
                   required:
-                  - lastTransitionTime
+                  - last_transition_time
                   - message
                   - reason
                   - status
@@ -206,6 +202,9 @@ spec:
                   type: object
                 type: array
             type: object
+        required:
+        - spec
+        title: KafkaCluster
         type: object
     served: true
     storage: true
