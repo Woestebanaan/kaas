@@ -34,8 +34,40 @@ pub fn atomic_write_json<T: Serialize>(
     name: &str,
     payload: &T,
 ) -> io::Result<()> {
+    atomic_write_json_inner(fs, dir, name, payload, false)
+}
+
+/// Same as [`atomic_write_json`] but pretty-printed (2-space indent +
+/// newline-terminated). The operator-side `credentials.json` /
+/// `acls.json` writers use this so the on-disk format stays
+/// byte-equal to Go's `json.MarshalIndent` output — humans inspect
+/// these files and the existing tooling expects multi-line layout.
+pub fn atomic_write_json_pretty<T: Serialize>(
+    fs: &dyn Fs,
+    dir: &Path,
+    name: &str,
+    payload: &T,
+) -> io::Result<()> {
+    atomic_write_json_inner(fs, dir, name, payload, true)
+}
+
+fn atomic_write_json_inner<T: Serialize>(
+    fs: &dyn Fs,
+    dir: &Path,
+    name: &str,
+    payload: &T,
+    pretty: bool,
+) -> io::Result<()> {
     fs.mkdir_all(dir)?;
-    let data = serde_json::to_vec(payload).map_err(io::Error::other)?;
+    let data = if pretty {
+        let mut v = serde_json::to_vec_pretty(payload).map_err(io::Error::other)?;
+        // Go's json.MarshalIndent doesn't add a trailing newline either,
+        // so don't append one — keep the output byte-identical.
+        v.shrink_to_fit();
+        v
+    } else {
+        serde_json::to_vec(payload).map_err(io::Error::other)?
+    };
 
     let mut tmp_name = String::from(name);
     tmp_name.push_str(".tmp");

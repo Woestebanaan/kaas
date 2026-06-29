@@ -69,7 +69,10 @@ fn kafkatopic_effective_topic_name_falls_back_to_metadata_name() {
         },
         status: None,
     };
-    assert_eq!(with_topic_name.effective_topic_name(), "explicit-Kafka-Name");
+    assert_eq!(
+        with_topic_name.effective_topic_name(),
+        "explicit-Kafka-Name"
+    );
 
     // spec.topic_name empty → falls back to metadata.name
     let without_topic_name = KafkaTopic {
