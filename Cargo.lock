@@ -2429,6 +2429,7 @@ dependencies = [
  "kube",
  "pbkdf2",
  "rand 0.8.6",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

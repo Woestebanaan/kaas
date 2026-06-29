@@ -43,6 +43,7 @@ chrono          = { workspace = true }
 [dev-dependencies]
 tempfile        = { workspace = true }
 tokio-test      = { workspace = true }
+regex           = { workspace = true }
 
 [lints]
 workspace = true

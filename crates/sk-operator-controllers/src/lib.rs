@@ -23,6 +23,9 @@ pub mod acls;
 pub mod conditions;
 pub mod credentials;
 pub mod errors;
+pub mod kafkacluster_controller;
+pub mod kafkatopic_controller;
+pub mod kafkauser_controller;
 pub mod observer;
 pub mod sweep;
 
@@ -33,5 +36,16 @@ pub use credentials::{
     CredentialsFile, SaCredential, ScramCredential, UserCredential, SCRAM_ITERATIONS,
 };
 pub use errors::ControllerError;
+pub use kafkacluster_controller::{
+    broker_hostnames, build_bootstrap_servers, error_policy as kafkacluster_error_policy,
+    reconcile_cluster, KafkaClusterReconciler,
+};
+pub use kafkatopic_controller::{
+    error_policy as kafkatopic_error_policy, generate_topic_uuid, reconcile_topic, topic_dir_for,
+    KafkaTopicReconciler,
+};
+pub use kafkauser_controller::{
+    error_policy as kafkauser_error_policy, reconcile_user, KafkaUserReconciler,
+};
 pub use observer::ReconcileObserver;
 pub use sweep::{sweep_credentials, sweep_topics};
