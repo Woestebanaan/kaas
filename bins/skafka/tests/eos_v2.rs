@@ -177,12 +177,7 @@ fn build_dispatcher(broker: Arc<Broker>, listeners: &[ListenerEntry]) -> Arc<Dis
         Arc::new(AddOffsetsToTxnHandler::new(broker.clone())),
     );
     d.register(26, 0, 3, Arc::new(EndTxnHandler::new(broker.clone())));
-    d.register(
-        28,
-        0,
-        3,
-        Arc::new(TxnOffsetCommitHandler::new(broker)),
-    );
+    d.register(28, 0, 3, Arc::new(TxnOffsetCommitHandler::new(broker)));
     Arc::new(d)
 }
 
@@ -320,7 +315,13 @@ fn end_txn_request(corr: i32, txn_id: &str, pid: i64, epoch: i16, commit: bool) 
     body.to_vec()
 }
 
-fn produce_txn_request(corr: i32, txn_id: &str, topic: &str, partition: i32, batch: &[u8]) -> Vec<u8> {
+fn produce_txn_request(
+    corr: i32,
+    txn_id: &str,
+    topic: &str,
+    partition: i32,
+    batch: &[u8],
+) -> Vec<u8> {
     let mut body = BytesMut::new();
     encode_request_header(&mut body, &header(0, 9, corr), HeaderVersion::V2).unwrap();
     write_nullable_str(&mut body, Some(txn_id), true).unwrap();
@@ -381,7 +382,7 @@ fn build_txn_batch(pid: i64, epoch: i16, num_records: i32) -> Bytes {
     let body_len_i32 = i32::try_from(body_size).unwrap();
     buf[8..12].copy_from_slice(&body_len_i32.to_be_bytes());
     buf[16] = 2; // magic
-    // attributes: bit 4 = transactional.
+                 // attributes: bit 4 = transactional.
     buf[21..23].copy_from_slice(&0x0010i16.to_be_bytes());
     let last_offset_delta = num_records - 1;
     buf[23..27].copy_from_slice(&last_offset_delta.to_be_bytes());
@@ -437,8 +438,7 @@ impl Harness {
         let port = bound.local_addrs()[0].1.port();
         let cancel = CancellationToken::new();
         let serve_cancel = cancel.clone();
-        let server_task =
-            tokio::spawn(async move { bound.serve(dispatcher, serve_cancel).await });
+        let server_task = tokio::spawn(async move { bound.serve(dispatcher, serve_cancel).await });
         let sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         Self {
             sock,
@@ -480,8 +480,7 @@ async fn run_txn_through_commit_or_abort(commit: bool) -> fetch::Response {
     )
     .await;
     let body = skip_response_header(&resp, HeaderVersion::V1);
-    let apt =
-        add_partitions_to_txn::decode_response(&mut Bytes::copy_from_slice(body), 3).unwrap();
+    let apt = add_partitions_to_txn::decode_response(&mut Bytes::copy_from_slice(body), 3).unwrap();
     for tr in &apt.results {
         for pr in &tr.partition_results {
             assert_eq!(pr.error_code, 0, "AddPartitionsToTxn err: {pr:?}");
@@ -490,7 +489,11 @@ async fn run_txn_through_commit_or_abort(commit: bool) -> fetch::Response {
 
     // 3. Produce a transactional batch (3 records) on events/0.
     let batch = build_txn_batch(pid, epoch, 3);
-    let resp = send(&mut h.sock, &produce_txn_request(3, "tx-1", topic, 0, &batch)).await;
+    let resp = send(
+        &mut h.sock,
+        &produce_txn_request(3, "tx-1", topic, 0, &batch),
+    )
+    .await;
     let body = skip_response_header(&resp, HeaderVersion::V1);
     let pr = produce::decode_response(&mut Bytes::copy_from_slice(body), 9).unwrap();
     let part = &pr.responses[0].partition_responses[0];

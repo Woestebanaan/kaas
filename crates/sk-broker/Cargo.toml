@@ -19,9 +19,11 @@ parking_lot    = { workspace = true }
 prost          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
+kube           = { workspace = true, optional = true }
 sk-auth        = { path = "../sk-auth" }
 sk-codec       = { path = "../sk-codec" }
 sk-coordinator = { path = "../sk-coordinator" }
+sk-operator-api = { path = "../sk-operator-api", optional = true }
 sk-protocol    = { path = "../sk-protocol" }
 sk-storage     = { path = "../sk-storage" }
 thiserror      = { workspace = true }
@@ -39,6 +41,15 @@ tokio    = { workspace = true, features = ["test-util", "macros", "rt-multi-thre
 [build-dependencies]
 tonic-build         = { workspace = true }
 protoc-bin-vendored = { workspace = true }
+
+[features]
+# `cr-writer` enables the kube-backed TopicCRWriter used by the
+# Phase 7 admin handlers (CreatePartitions, IncrementalAlterConfigs).
+# Off by default so the broker can be built without kube-rs in
+# environments that don't need the K8s admin write path (the
+# bins/skafka binary turns it on; tests don't).
+default   = []
+cr-writer = ["dep:kube", "dep:sk-operator-api"]
 
 [lints]
 workspace = true

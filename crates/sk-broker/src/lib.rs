@@ -21,6 +21,8 @@ pub mod local_lease;
 pub mod marker_watcher;
 pub mod self_fence;
 pub mod takeover;
+pub mod topic_config_defaults;
+pub mod topic_cr_writer;
 pub mod topic_registry;
 
 pub use assignment::{
@@ -40,8 +42,10 @@ pub use group_hash::{
 };
 pub use group_takeover::GroupTakeoverDriver;
 pub use handlers::{
-    AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, ApiVersionsHandler, DeleteGroupsHandler,
-    DescribeGroupsHandler, EndTxnHandler, FetchHandler, FindCoordinatorHandler, HeartbeatHandler,
+    AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
+    ApiVersionsHandler, CreatePartitionsHandler, DeleteGroupsHandler, DescribeClientQuotasHandler,
+    DescribeConfigsHandler, DescribeGroupsHandler, EndTxnHandler, FetchHandler,
+    FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
     InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
     ListOffsetsHandler, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
     OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
@@ -54,6 +58,10 @@ pub use marker_watcher::{
 };
 pub use self_fence::{is_heartbeat_fresh, DEFAULT_HEARTBEAT_TIMEOUT};
 pub use takeover::TakeoverDriver;
+pub use topic_cr_writer::{
+    config_key_to_json_field, config_value_to_json, ConfigOp, ConfigOpKind, ConfigOpWithValue,
+    NoopTopicCRWriter, TopicCRWriter, TopicWriteError,
+};
 pub use topic_registry::{ConfigError as TopicConfigError, TopicMeta, TopicRegistry};
 
 pub mod heartbeatpb {

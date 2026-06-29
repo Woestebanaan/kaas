@@ -38,13 +38,14 @@ use sk_auth::{
     QuotaEnforcer, RealAuthEngine, SuperUserAuthorizer,
 };
 use sk_broker::{
-    AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, ApiVersionsHandler, Broker, Cli,
-    CliTlsConfig, DeleteGroupsHandler, DescribeGroupsHandler, EndTxnHandler, FetchHandler,
-    FindCoordinatorHandler, HeartbeatHandler, InitProducerIdHandler, JoinGroupHandler,
-    LeaveGroupHandler, ListGroupsHandler, ListOffsetsHandler, ListenerEntry, MetadataHandler,
-    OffsetCommitHandler, OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler,
-    SaslAuthenticateHandler, SaslHandshakeHandler, SyncGroupHandler, TopicRegistry,
-    TxnOffsetCommitHandler, WriteTxnMarkersHandler,
+    AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
+    ApiVersionsHandler, Broker, Cli, CliTlsConfig, CreatePartitionsHandler, DeleteGroupsHandler,
+    DescribeClientQuotasHandler, DescribeConfigsHandler, DescribeGroupsHandler, EndTxnHandler,
+    FetchHandler, FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
+    InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
+    ListOffsetsHandler, ListenerEntry, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
+    OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
+    SyncGroupHandler, TopicRegistry, TxnOffsetCommitHandler, WriteTxnMarkersHandler,
 };
 use sk_protocol::{Dispatcher, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
 use sk_storage::{DiskStorageEngine, MemoryStorage, PartitionConfig, RealFs, StorageEngine};
@@ -367,6 +368,40 @@ fn build_dispatcher(
         Arc::new(SaslAuthenticateHandler::new(engines.clone())),
     );
     d.register(42, 0, 2, Arc::new(DeleteGroupsHandler::new(broker.clone())));
+    // Phase 7 admin handlers (workstream D). All five take an
+    // Arc<Broker>; the broker resolves the optional TopicCRWriter /
+    // QuotaEnforcer slots per-call so dev-mode (slots unset) maps
+    // cleanly to the documented wire error codes (31, 35).
+    d.register(
+        32,
+        0,
+        4,
+        Arc::new(DescribeConfigsHandler::new(broker.clone())),
+    );
+    d.register(
+        37,
+        0,
+        3,
+        Arc::new(CreatePartitionsHandler::new(broker.clone())),
+    );
+    d.register(
+        44,
+        0,
+        1,
+        Arc::new(IncrementalAlterConfigsHandler::new(broker.clone())),
+    );
+    d.register(
+        48,
+        0,
+        1,
+        Arc::new(DescribeClientQuotasHandler::new(broker.clone())),
+    );
+    d.register(
+        49,
+        0,
+        1,
+        Arc::new(AlterClientQuotasHandler::new(broker.clone())),
+    );
     d.register(47, 0, 0, Arc::new(OffsetDeleteHandler::new(broker)));
     d.set_auth(engines);
     d

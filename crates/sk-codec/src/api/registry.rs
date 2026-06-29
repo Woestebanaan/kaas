@@ -54,6 +54,12 @@ pub const ALL: &[ApiSpec] = &[
     crate::api::api_versions::SPEC,
     crate::api::delete_groups::SPEC,
     crate::api::offset_delete::SPEC,
+    // Phase 7 admin surface (workstream D)
+    crate::api::describe_configs::SPEC,
+    crate::api::create_partitions::SPEC,
+    crate::api::incremental_alter_configs::SPEC,
+    crate::api::describe_client_quotas::SPEC,
+    crate::api::alter_client_quotas::SPEC,
 ];
 
 /// Look up the [`ApiSpec`] for a given API key, if registered.
@@ -92,15 +98,18 @@ mod tests {
     /// 24, 25, 26, 27, 28, 36, 42, 47. Bump this number when a new
     /// module lands.
     #[test]
-    fn registry_size_phase6() {
-        assert_eq!(ALL.len(), 24);
+    fn registry_size_phase7() {
+        // Phase 7 workstream D added keys 32, 37, 44, 48, 49 — the
+        // admin surface (Describe/AlterConfigs, CreatePartitions,
+        // Describe/AlterClientQuotas).
+        assert_eq!(ALL.len(), 29);
         let mut keys: Vec<i16> = ALL.iter().map(|s| s.key).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
             vec![
-                0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22, 24, 25, 26, 27, 28, 36,
-                42, 47,
+                0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22, 24, 25, 26, 27, 28, 32,
+                36, 37, 42, 44, 47, 48, 49,
             ]
         );
     }

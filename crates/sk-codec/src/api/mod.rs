@@ -17,14 +17,19 @@
 
 pub mod add_offsets_to_txn;
 pub mod add_partitions_to_txn;
+pub mod alter_client_quotas;
 pub mod api_versions;
 pub mod common;
+pub mod create_partitions;
 pub mod delete_groups;
+pub mod describe_client_quotas;
+pub mod describe_configs;
 pub mod describe_groups;
 pub mod end_txn;
 pub mod fetch;
 pub mod find_coordinator;
 pub mod heartbeat;
+pub mod incremental_alter_configs;
 pub mod init_producer_id;
 pub mod join_group;
 pub mod leave_group;

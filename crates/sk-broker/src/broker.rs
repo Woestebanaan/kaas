@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use sk_auth::{AllowAllAuthorizer, Authorizer, NoQuotaChecker, QuotaChecker};
+use sk_auth::{AllowAllAuthorizer, Authorizer, NoQuotaChecker, QuotaChecker, QuotaEnforcer};
 use sk_coordinator::{FenceLog, Manager, MarkerQueue, TxnStateStore};
 use sk_storage::StorageEngine;
 
@@ -74,6 +74,21 @@ pub struct Broker {
     /// marker fast path still fires; only the cross-broker leg is
     /// skipped.
     marker_queue: RwLock<Option<MarkerQueue>>,
+    /// Phase 7 admin path: writes back to `KafkaTopic` CRs for
+    /// CreatePartitions (key 37) and IncrementalAlterConfigs (key
+    /// 44). `None` in dev mode and unit tests — the admin
+    /// handlers map a missing writer to
+    /// `CLUSTER_AUTHORIZATION_FAILED` (31) so a client gets a
+    /// clean wire response instead of a panic.
+    cr_writer: RwLock<Option<Arc<dyn crate::topic_cr_writer::TopicCRWriter>>>,
+    /// Concrete-typed [`QuotaEnforcer`] handle for the Phase 7
+    /// admin handlers (DescribeClientQuotas / AlterClientQuotas)
+    /// which need access to `set_user_quota` / `describe_user_quota`
+    /// / `list_user_quotas` — methods the `QuotaChecker` trait
+    /// doesn't expose. `None` when the broker runs without a
+    /// real quota enforcer (`auth.enabled=false`); the admin
+    /// handlers then surface `UNSUPPORTED_VERSION` (35).
+    quota_enforcer: RwLock<Option<Arc<QuotaEnforcer>>>,
     producer_id_counter: AtomicI64,
 }
 
@@ -135,6 +150,8 @@ impl Broker {
             txn_state: RwLock::new(None),
             fence_log: RwLock::new(None),
             marker_queue: RwLock::new(None),
+            cr_writer: RwLock::new(None),
+            quota_enforcer: RwLock::new(None),
             // Start at 1 so 0 stays available as an "unset" sentinel
             // for clients that read uninitialised pid.
             producer_id_counter: AtomicI64::new(1),
@@ -239,6 +256,37 @@ impl Broker {
     /// get markers written.
     pub fn marker_queue(&self) -> Option<MarkerQueue> {
         self.marker_queue.read().clone()
+    }
+
+    /// Install the admin-path [`TopicCRWriter`]. Called once from
+    /// `bins/skafka/main.rs` cluster bring-up; tests can install a
+    /// fake writer directly.
+    ///
+    /// [`TopicCRWriter`]: crate::topic_cr_writer::TopicCRWriter
+    pub fn install_cr_writer(&self, w: Arc<dyn crate::topic_cr_writer::TopicCRWriter>) {
+        *self.cr_writer.write() = Some(w);
+    }
+
+    /// Read the installed CR writer. `None` ⇒ the admin handlers
+    /// (CreatePartitions, IncrementalAlterConfigs) surface
+    /// `CLUSTER_AUTHORIZATION_FAILED` (31) without attempting any
+    /// patch — clean wire response in dev mode.
+    pub fn cr_writer(&self) -> Option<Arc<dyn crate::topic_cr_writer::TopicCRWriter>> {
+        self.cr_writer.read().clone()
+    }
+
+    /// Install the concrete-typed [`QuotaEnforcer`] used by the
+    /// Phase 7 admin quota handlers. Called once from
+    /// `bins/skafka/main.rs` when `auth.enabled` is true.
+    pub fn install_quota_enforcer(&self, e: Arc<QuotaEnforcer>) {
+        *self.quota_enforcer.write() = Some(e);
+    }
+
+    /// Read the installed quota enforcer. `None` ⇒ Describe/AlterClientQuotas
+    /// surface `UNSUPPORTED_VERSION` (35) without attempting any
+    /// mutation.
+    pub fn quota_enforcer(&self) -> Option<Arc<QuotaEnforcer>> {
+        self.quota_enforcer.read().clone()
     }
 }
 

@@ -158,10 +158,7 @@ impl FetchHandler {
                     return error_partition(p.partition_index, ERR_OFFSET_OUT_OF_RANGE);
                 }
                 Err(StorageError::UnknownTopicOrPartition) => {
-                    return error_partition(
-                        p.partition_index,
-                        ERR_UNKNOWN_TOPIC_OR_PARTITION,
-                    );
+                    return error_partition(p.partition_index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
                 }
                 Err(StorageError::EpochMismatch) => {
                     return error_partition(p.partition_index, ERR_NOT_LEADER_FOR_PARTITION);
