@@ -60,7 +60,19 @@ const RELOAD_INTERVAL_SECS: u64 = 10;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::from_env().context("parsing SKAFKA_* env")?;
-    init_tracing(&cli.log_level);
+
+    // Bring up OTel BEFORE the first tracing event so the OTel layer
+    // sees every subsequent span. Bootstrap installs the global
+    // MeterProvider + TracerProvider and populates the Metrics
+    // registry; install_tracing then routes tracing macros through
+    // the freshly-built tracer.
+    let obs_cancel = CancellationToken::new();
+    let providers = sk_observability::bootstrap("skafka", obs_cancel.clone())
+        .await
+        .context("initialising observability")?;
+    let log_format = std::env::var("SKAFKA_LOG_FORMAT").unwrap_or_else(|_| "json".into());
+    sk_observability::install_tracing(&cli.log_level, &log_format, providers.tracer.clone());
+
     info!(
         broker_id = cli.broker_id,
         cluster_id = cli.cluster_id.as_str(),
@@ -118,6 +130,11 @@ async fn main() -> Result<()> {
     let serve_cancel = cancel.clone();
     let serve = tokio::spawn(async move { server.serve(serve_cancel).await });
 
+    // Flip /readyz once the accept loop is up. The chart's
+    // readinessProbe gates on this. If a listener fails to bind, we
+    // never call this and the pod stays unready until SIGTERM.
+    sk_observability::set_ready(true);
+
     wait_for_shutdown_signal().await?;
     info!("shutdown signal received; cancelling listeners");
     cancel.cancel();
@@ -137,6 +154,14 @@ async fn main() -> Result<()> {
     if let Err(err) = engine.drain().await {
         warn!(%err, "engine drain reported error");
     }
+
+    // Flush pending OTLP pushes + span exports before the process
+    // dies. Best-effort — errors go to stderr but don't fail exit.
+    if let Err(err) = providers.shutdown() {
+        warn!(%err, "observability shutdown reported error");
+    }
+    obs_cancel.cancel();
+
     info!("skafka exited cleanly");
     Ok(())
 }
@@ -269,12 +294,6 @@ fn spawn_reloader(
             }
         }
     }))
-}
-
-fn init_tracing(log_level: &str) {
-    use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt().with_env_filter(filter).try_init();
 }
 
 fn build_engine(

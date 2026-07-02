@@ -19,6 +19,7 @@ axum                    = { workspace = true }
 futures                 = { workspace = true }
 kube                    = { workspace = true }
 sk-controller           = { path = "../../crates/sk-controller" }
+sk-observability        = { workspace = true }
 sk-operator-api         = { workspace = true }
 sk-operator-controllers = { workspace = true }
 tokio                   = { workspace = true }

@@ -15,8 +15,8 @@
 //! - `SKAFKA_LOG_FORMAT`          — `json` or `text`
 //! - `METRICS_BIND_ADDRESS`       — `:8080` (axum metrics endpoint)
 //! - `HEALTH_PROBE_BIND_ADDRESS`  — `:8081` (healthz / readyz)
-//! - `OTEL_EXPORTER_OTLP_*`       — picked up by the OTel SDK
-//!   when Phase 8 wires `sk_observability::bootstrap`.
+//! - `OTEL_EXPORTER_OTLP_*`       — picked up by the OTel SDK via
+//!   `sk_observability::bootstrap` (Phase 8).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,7 +56,12 @@ const RETRY_PERIOD: Duration = Duration::from_secs(2);
 async fn main() -> Result<()> {
     let log_level = env_or("SKAFKA_LOG_LEVEL", DEFAULT_LOG_LEVEL);
     let log_format = env_or("SKAFKA_LOG_FORMAT", DEFAULT_LOG_FORMAT);
-    install_tracing(&log_level, &log_format);
+
+    let obs_cancel = CancellationToken::new();
+    let providers = sk_observability::bootstrap("skafka-operator", obs_cancel.clone())
+        .await
+        .context("initialising observability")?;
+    sk_observability::install_tracing(&log_level, &log_format, providers.tracer.clone());
 
     let data_dir = PathBuf::from(env_or("SKAFKA_DATA_DIR", DEFAULT_DATA_DIR));
     let namespace = env_or("SKAFKA_NAMESPACE", DEFAULT_NAMESPACE);
@@ -197,6 +202,12 @@ async fn main() -> Result<()> {
     let _ = tokio::join!(topic_task, user_task, cluster_task);
     let _ = tokio::join!(probe_task, metrics_task);
 
+    // Flush pending OTLP pushes before the process dies.
+    if let Err(err) = providers.shutdown() {
+        warn!(%err, "observability shutdown reported error");
+    }
+    obs_cancel.cancel();
+
     // Pre-discover topic count for a final log line — useful when
     // chasing "did everything drain?" in pod logs.
     if let Ok(count) = topic_count(&client, &namespace).await {
@@ -209,20 +220,6 @@ async fn main() -> Result<()> {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.into())
-}
-
-fn install_tracing(level: &str, format: &str) {
-    use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!(
-            "skafka_operator={level},sk_operator_controllers={level},info"
-        ))
-    });
-    if format.eq_ignore_ascii_case("text") {
-        let _ = fmt().with_env_filter(filter).try_init();
-    } else {
-        let _ = fmt().json().with_env_filter(filter).try_init();
-    }
 }
 
 fn install_signal_handlers(cancel: CancellationToken) {
