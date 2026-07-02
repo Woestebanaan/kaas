@@ -92,11 +92,13 @@ impl ScramExchange {
 
 impl SaslExchange for ScramExchange {
     fn step(&mut self, client_msg: &[u8]) -> Result<(Vec<u8>, bool), AuthError> {
-        match self.state {
+        let outcome = match self.state {
             ScramState::Start => self.handle_client_first(client_msg),
             ScramState::AwaitFinal => self.handle_client_final(client_msg),
             ScramState::Done => Err(AuthError::MalformedSaslMessage),
-        }
+        };
+        crate::engine::record_sasl_outcome("SCRAM-SHA-512", &outcome);
+        outcome
     }
 
     fn principal(&self) -> Option<&Principal> {

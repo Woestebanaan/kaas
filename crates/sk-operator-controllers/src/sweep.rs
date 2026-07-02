@@ -34,7 +34,9 @@ pub async fn sweep_topics(
     data_dir: &Path,
 ) -> Result<Vec<String>, ControllerError> {
     let api: Api<KafkaTopic> = Api::namespaced(client.clone(), namespace);
-    let topics = api.list(&ListParams::default()).await?;
+    let topics =
+        sk_observability::record_k8s_call("List", "KafkaTopic", api.list(&ListParams::default()))
+            .await?;
 
     // Build the keep-set from `effective_topic_name()` so synthetic-
     // metadata.name topics (gh #86) are matched against their on-wire
@@ -84,7 +86,9 @@ pub async fn sweep_credentials(
     data_dir: &Path,
 ) -> Result<Vec<String>, ControllerError> {
     let api: Api<KafkaUser> = Api::namespaced(client.clone(), namespace);
-    let users = api.list(&ListParams::default()).await?;
+    let users =
+        sk_observability::record_k8s_call("List", "KafkaUser", api.list(&ListParams::default()))
+            .await?;
     let keep: HashSet<String> = users
         .items
         .iter()

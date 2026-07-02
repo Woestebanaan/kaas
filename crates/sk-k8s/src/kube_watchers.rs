@@ -111,7 +111,7 @@ pub async fn run_lease_watch(
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = tick.tick() => {
-                match api.get_opt(&lease_name).await {
+                match sk_observability::record_k8s_call("Get", "Lease", api.get_opt(&lease_name)).await {
                     Ok(Some(lease)) => {
                         let transitions = lease
                             .spec
@@ -254,10 +254,14 @@ pub async fn patch_readiness(
             ]
         }
     });
-    api.patch_status(
-        &pod_name,
-        &PatchParams::apply("skafka").force(),
-        &Patch::Apply(&patch),
+    sk_observability::record_k8s_call(
+        "Patch",
+        "Pod",
+        api.patch_status(
+            &pod_name,
+            &PatchParams::apply("skafka").force(),
+            &Patch::Apply(&patch),
+        ),
     )
     .await?;
     Ok(())

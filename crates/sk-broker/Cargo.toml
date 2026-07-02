@@ -20,12 +20,13 @@ prost          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 kube           = { workspace = true, optional = true }
-sk-auth        = { path = "../sk-auth" }
-sk-codec       = { path = "../sk-codec" }
-sk-coordinator = { path = "../sk-coordinator" }
-sk-operator-api = { path = "../sk-operator-api", optional = true }
-sk-protocol    = { path = "../sk-protocol" }
-sk-storage     = { path = "../sk-storage" }
+sk-auth          = { path = "../sk-auth" }
+sk-codec         = { path = "../sk-codec" }
+sk-coordinator   = { path = "../sk-coordinator" }
+sk-observability = { workspace = true }
+sk-operator-api  = { path = "../sk-operator-api", optional = true }
+sk-protocol      = { path = "../sk-protocol" }
+sk-storage       = { path = "../sk-storage" }
 thiserror      = { workspace = true }
 tokio          = { workspace = true }
 tokio-stream   = "0.1"

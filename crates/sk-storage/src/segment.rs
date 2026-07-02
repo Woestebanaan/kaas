@@ -554,11 +554,16 @@ impl ActiveSegment {
     /// Synchronous fsync of the log file. Called from the partition
     /// committer task on its flush cycle.
     pub fn sync_log(&mut self) -> io::Result<()> {
+        let started = std::time::Instant::now();
         let log = self
             .log
             .as_deref_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "log handle closed"))?;
-        log.sync_all()
+        let out = log.sync_all();
+        sk_observability::metrics::global()
+            .fsync_latency
+            .record(started.elapsed().as_secs_f64(), &[]);
+        out
     }
 }
 

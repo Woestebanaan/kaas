@@ -485,6 +485,13 @@ impl Group {
                 }
                 r.delivered = true;
                 s.state = GroupState::Stable;
+                // Consumer-group rebalance completed — every trip
+                // through PreparingRebalance → CompletingRebalance →
+                // Stable is one datapoint. Alert fires on
+                // rate(rebalances[5m]) > threshold.
+                sk_observability::metrics::global()
+                    .group_rebalances
+                    .add(1, &[]);
                 // Wake all parked followers.
                 let waiters = std::mem::take(&mut r.waiters);
                 for w in waiters {

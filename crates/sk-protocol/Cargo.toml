@@ -13,9 +13,10 @@ async-trait = { workspace = true }
 bytes        = { workspace = true }
 futures      = { workspace = true }
 parking_lot  = { workspace = true }
-sk-auth      = { path = "../sk-auth" }
-sk-codec     = { path = "../sk-codec" }
-sk-storage   = { path = "../sk-storage" }
+sk-auth          = { path = "../sk-auth" }
+sk-codec         = { path = "../sk-codec" }
+sk-observability = { workspace = true }
+sk-storage       = { path = "../sk-storage" }
 thiserror    = { workspace = true }
 tokio        = { workspace = true }
 tokio-rustls = { workspace = true }

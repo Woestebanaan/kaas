@@ -95,6 +95,22 @@ impl RetentionCleaner {
     /// of partitions where retention actually triggered a
     /// `delete_records` call (useful for tests + OTel meter wire-up).
     pub async fn run_once(&self) -> Result<u32, StorageError> {
+        let started = std::time::Instant::now();
+        let out = self.run_once_inner().await;
+        let m = sk_observability::metrics::global();
+        m.cleaner_duration
+            .record(started.elapsed().as_secs_f64(), &[]);
+        m.cleaner_runs.add(
+            1,
+            &[sk_observability::KeyValue::new(
+                "result",
+                if out.is_ok() { "ok" } else { "error" },
+            )],
+        );
+        out
+    }
+
+    async fn run_once_inner(&self) -> Result<u32, StorageError> {
         let mut cleaned = 0u32;
         for (topic, partition) in self.engine.iter_partition_keys() {
             let Some(p) = self.engine.partition(&topic, partition) else {
@@ -114,6 +130,9 @@ impl RetentionCleaner {
             }
             p.delete_records(target).await?;
             cleaned += 1;
+            sk_observability::metrics::global()
+                .cleaner_segments_deleted
+                .add(1, &[sk_observability::KeyValue::new("reason", "size")]);
         }
         Ok(cleaned)
     }

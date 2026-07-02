@@ -35,16 +35,14 @@ use std::collections::HashMap;
 use sk_coordinator::TxnEntry;
 
 fn roundtrip_slot(name: &str, bytes: &[u8]) {
-    let state: HashMap<String, TxnEntry> = serde_json::from_slice(bytes)
-        .unwrap_or_else(|e| panic!("{name}: deserialize: {e}"));
-    let reencoded = serde_json::to_vec(&state)
-        .unwrap_or_else(|e| panic!("{name}: re-serialize: {e}"));
+    let state: HashMap<String, TxnEntry> =
+        serde_json::from_slice(bytes).unwrap_or_else(|e| panic!("{name}: deserialize: {e}"));
+    let reencoded =
+        serde_json::to_vec(&state).unwrap_or_else(|e| panic!("{name}: re-serialize: {e}"));
     if bytes != reencoded.as_slice() {
         let got = std::str::from_utf8(&reencoded).unwrap_or("<non-utf8>");
         let want = std::str::from_utf8(bytes).unwrap_or("<non-utf8>");
-        panic!(
-            "{name}: serde round-trip drift\n  go-side: {want}\n  rust-side: {got}"
-        );
+        panic!("{name}: serde round-trip drift\n  go-side: {want}\n  rust-side: {got}");
     }
 }
 

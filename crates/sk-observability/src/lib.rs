@@ -20,6 +20,10 @@ pub mod otlp_push_observer;
 pub mod topic_traffic;
 pub mod tracing;
 
+// Re-export the OTel types call sites need so downstream crates don't
+// have to depend on `opentelemetry` themselves.
+pub use opentelemetry::{self, KeyValue};
+
 pub use bootstrap::{bootstrap, Providers};
 pub use byteopacity::{bump_codec_batch_reencode, bump_codec_record_decode};
 pub use gauges::{set_gauge_source, GaugeSource, PartitionGauge};

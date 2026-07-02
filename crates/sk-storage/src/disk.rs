@@ -133,8 +133,21 @@ impl StorageEngine for DiskStorageEngine {
         acks: i16,
         batch: Bytes,
     ) -> Result<i64, StorageError> {
+        let started = std::time::Instant::now();
+        let batch_len = batch.len();
         let p = self.ensure_open(topic, partition).await?;
-        p.append(epoch, acks, batch).await
+        let out = p.append(epoch, acks, batch).await;
+        let m = sk_observability::metrics::global();
+        m.write_latency.record(started.elapsed().as_secs_f64(), &[]);
+        // Bytes-per-Append is the Produce-side hot-path signal. Records
+        // count is not known here (the batch is opaque bytes), so
+        // approximate as 1 batch per Append — the topic-traffic
+        // gauge is bytes-first for that reason.
+        if out.is_ok() {
+            m.topic_traffic
+                .record_produce(topic, 1, i64::try_from(batch_len).unwrap_or(0));
+        }
+        out
     }
 
     async fn read(
@@ -144,14 +157,22 @@ impl StorageEngine for DiskStorageEngine {
         start_offset: i64,
         max_bytes: usize,
     ) -> Result<Bytes, StorageError> {
+        let started = std::time::Instant::now();
         // Read on an unknown partition returns empty (matches
         // MemoryStorage and the Go side's "no data" semantics —
         // clients receive an empty Fetch response, not an error).
-        if let Some(entry) = self.partitions.get(&(topic.to_owned(), partition)) {
+        let out = if let Some(entry) = self.partitions.get(&(topic.to_owned(), partition)) {
             entry.value().read(start_offset, max_bytes).await
         } else {
             Ok(Bytes::new())
+        };
+        let m = sk_observability::metrics::global();
+        m.read_latency.record(started.elapsed().as_secs_f64(), &[]);
+        if let Ok(bytes) = &out {
+            m.topic_traffic
+                .record_fetch(topic, 1, i64::try_from(bytes.len()).unwrap_or(0));
         }
+        out
     }
 
     fn high_watermark(&self, topic: &str, partition: i32) -> Result<i64, StorageError> {

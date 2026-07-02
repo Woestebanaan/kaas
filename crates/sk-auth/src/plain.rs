@@ -15,7 +15,7 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 use crate::credentials::CredentialStore;
-use crate::engine::SaslExchange;
+use crate::engine::{record_sasl_outcome, SaslExchange};
 use crate::errors::AuthError;
 use crate::types::{Principal, PrincipalKind};
 
@@ -36,6 +36,18 @@ impl PlainExchange {
 
 impl SaslExchange for PlainExchange {
     fn step(&mut self, client_msg: &[u8]) -> Result<(Vec<u8>, bool), AuthError> {
+        let outcome = self.step_inner(client_msg);
+        record_sasl_outcome("PLAIN", &outcome);
+        outcome
+    }
+
+    fn principal(&self) -> Option<&Principal> {
+        self.principal.as_ref()
+    }
+}
+
+impl PlainExchange {
+    fn step_inner(&mut self, client_msg: &[u8]) -> Result<(Vec<u8>, bool), AuthError> {
         let mut parts = client_msg.splitn(3, |b| *b == 0);
         let _authzid = parts.next().ok_or(AuthError::MalformedSaslMessage)?;
         let authcid = parts.next().ok_or(AuthError::MalformedSaslMessage)?;
@@ -60,10 +72,6 @@ impl SaslExchange for PlainExchange {
         // SASL PLAIN has no server-side challenge — `done = true` on
         // the first round trip.
         Ok((Vec::new(), true))
-    }
-
-    fn principal(&self) -> Option<&Principal> {
-        self.principal.as_ref()
     }
 }
 

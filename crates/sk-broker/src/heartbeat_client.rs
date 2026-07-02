@@ -251,6 +251,13 @@ impl HeartbeatClient {
                 h(&msg);
             }
         }
+        // Stream closed by the peer — either the controller went
+        // away or the network dropped. Alerting reads this via
+        // `heartbeat.misses`; a healthy client only bumps it on
+        // failover cycles.
+        sk_observability::metrics::global()
+            .heartbeat_misses
+            .add(1, &[]);
         Err(anyhow::anyhow!("heartbeat: server closed stream"))
     }
 }

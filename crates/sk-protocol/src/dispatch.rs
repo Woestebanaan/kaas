@@ -160,9 +160,31 @@ impl Dispatcher {
         header: RequestHeader,
         body: Bytes,
     ) -> (BytesMut, HeaderVersion) {
+        let started = std::time::Instant::now();
         let api_key = header.api_key;
         let spec = registry::lookup(api_key);
+        let out = self.dispatch_inner(conn, header, body, spec, api_key).await;
+        // Label by numeric api_key to cap cardinality — the API name
+        // is one lookup away in dashboards. Cross-hairs with Go's
+        // `request.latency` histogram (workspace metric name).
+        sk_observability::metrics::global().request_latency.record(
+            started.elapsed().as_secs_f64(),
+            &[sk_observability::KeyValue::new(
+                "api_key",
+                i64::from(api_key),
+            )],
+        );
+        out
+    }
 
+    async fn dispatch_inner(
+        &self,
+        conn: &Mutex<ConnState>,
+        header: RequestHeader,
+        body: Bytes,
+        spec: Option<&'static registry::ApiSpec>,
+        api_key: i16,
+    ) -> (BytesMut, HeaderVersion) {
         // Pre-auth gate (gh #124). When `engines` is wired and the
         // listener's engine requires pre-auth, every non-pre-auth API
         // is rejected until SASL completes. mTLS sets sasl_done=true

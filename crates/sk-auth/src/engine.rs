@@ -119,16 +119,46 @@ impl AuthEngine for RealAuthEngine {
     }
 
     fn authenticate_tls(&self, cn: &str) -> Result<Principal, AuthError> {
-        match self.creds.lookup_tls(cn) {
+        let out = match self.creds.lookup_tls(cn) {
             Some(username) => Ok(Principal {
                 name: username,
                 kind: PrincipalKind::User,
             }),
             None => Err(AuthError::BadCertificate),
-        }
+        };
+        record_auth_outcome("mtls", out.is_ok());
+        out
     }
 
     fn requires_pre_auth(&self) -> bool {
         true
+    }
+}
+
+/// Bump `skafka.auth.success` / `skafka.auth.failure` on any
+/// authentication attempt. Used by the SASL exchanges and mTLS
+/// path — one call site per completed authentication decision.
+pub(crate) fn record_auth_outcome(mechanism: &str, ok: bool) {
+    let m = sk_observability::metrics::global();
+    let labels = [sk_observability::KeyValue::new(
+        "mechanism",
+        mechanism.to_string(),
+    )];
+    if ok {
+        m.auth_success.add(1, &labels);
+    } else {
+        m.auth_failure.add(1, &labels);
+    }
+}
+
+/// Instrument a SASL `step()` outcome. Only bumps a counter when the
+/// exchange terminates — the SCRAM two-round-trip path calls this
+/// twice (server_first → server_final); the first is `Ok((_, false))`
+/// and skipped, the second is `Ok((_, true))` and counted as success.
+pub(crate) fn record_sasl_outcome(mechanism: &str, outcome: &Result<(Vec<u8>, bool), AuthError>) {
+    match outcome {
+        Ok((_, true)) => record_auth_outcome(mechanism, true),
+        Ok(_) => {}
+        Err(_) => record_auth_outcome(mechanism, false),
     }
 }

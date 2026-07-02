@@ -434,9 +434,7 @@ impl Partition {
                 if txn_info.is_transactional {
                     if txn_info.is_control {
                         // COMMIT or ABORT marker — close the open txn.
-                        if let Some(first_offset) =
-                            guard.open_txns.close(txn_info.producer_id)
-                        {
+                        if let Some(first_offset) = guard.open_txns.close(txn_info.producer_id) {
                             if matches!(txn_info.control_commit, Some(false)) {
                                 guard.aborted_txns.record(AbortedTxn {
                                     producer_id: txn_info.producer_id,
@@ -1002,7 +1000,9 @@ mod tests {
             .await
             .unwrap();
             p.append(0, -1, build_txn_data_batch(42, 3)).await.unwrap();
-            p.append(0, -1, build_marker_batch(42, false)).await.unwrap();
+            p.append(0, -1, build_marker_batch(42, false))
+                .await
+                .unwrap();
             let aborted = p.aborted_in_range(0, i64::MAX);
             assert_eq!(aborted.len(), 1);
             assert_eq!(aborted[0].producer_id, 42);

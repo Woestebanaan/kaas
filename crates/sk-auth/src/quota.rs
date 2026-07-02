@@ -211,11 +211,24 @@ fn i32_max_as_f64() -> f64 {
 
 impl QuotaChecker for QuotaEnforcer {
     fn check_produce_quota(&self, principal: &Principal, bytes: usize) -> i32 {
-        self.check(principal, bytes, true)
+        let throttle_ms = self.check(principal, bytes, true);
+        if throttle_ms > 0 {
+            sk_observability::metrics::global().quota_throttle.add(
+                1,
+                &[sk_observability::KeyValue::new("direction", "produce")],
+            );
+        }
+        throttle_ms
     }
 
     fn check_fetch_quota(&self, principal: &Principal, bytes: usize) -> i32 {
-        self.check(principal, bytes, false)
+        let throttle_ms = self.check(principal, bytes, false);
+        if throttle_ms > 0 {
+            sk_observability::metrics::global()
+                .quota_throttle
+                .add(1, &[sk_observability::KeyValue::new("direction", "fetch")]);
+        }
+        throttle_ms
     }
 }
 

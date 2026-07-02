@@ -268,8 +268,16 @@ async fn accept_loop(
                         let name = listener_name.clone();
                         let tls = tls.clone();
                         let mtls = mtls.clone();
+                        let m = sk_observability::metrics::global();
+                        let label = [sk_observability::KeyValue::new("listener", name.clone())];
+                        m.connections.add(1, &label);
+                        m.connections_open.add(1, &label);
                         tokio::spawn(async move {
-                            if let Err(err) = serve_conn(name, stream, peer, max_frame_bytes, tls, mtls, d, c).await {
+                            let res = serve_conn(name.clone(), stream, peer, max_frame_bytes, tls, mtls, d, c).await;
+                            sk_observability::metrics::global()
+                                .connections_open
+                                .add(-1, &[sk_observability::KeyValue::new("listener", name)]);
+                            if let Err(err) = res {
                                 tracing::debug!(%peer, %err, "connection closed with error");
                             }
                         });
@@ -300,6 +308,13 @@ async fn serve_conn(
     let state = Arc::new(parking_lot::Mutex::new(cs));
     if let Some(acceptor) = tls {
         let tls_stream = acceptor.accept(stream).await.map_err(ProtoError::Io)?;
+        sk_observability::metrics::global().tls_handshakes.add(
+            1,
+            &[sk_observability::KeyValue::new(
+                "listener",
+                listener_name.clone(),
+            )],
+        );
         // Run mTLS principal extraction if configured. Failure
         // doesn't drop the connection — the dispatcher's pre-auth
         // gate will reject non-pre-SASL APIs until the client

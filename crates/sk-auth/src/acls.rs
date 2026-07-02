@@ -231,6 +231,16 @@ impl Authorizer for AclEngine {
                 operation = op.as_str(),
                 "acl: denied",
             );
+            sk_observability::metrics::global().acl_deny.add(
+                1,
+                &[
+                    sk_observability::KeyValue::new(
+                        "resource_type",
+                        resource.kind.as_str().to_owned(),
+                    ),
+                    sk_observability::KeyValue::new("operation", op.as_str().to_owned()),
+                ],
+            );
         }
         self.cache.insert(
             key,

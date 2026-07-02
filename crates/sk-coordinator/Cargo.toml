@@ -16,12 +16,13 @@ arc-swap     = { workspace = true }
 async-trait  = { workspace = true }
 bytes        = { workspace = true }
 dashmap      = { workspace = true }
-parking_lot  = { workspace = true }
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-thiserror    = { workspace = true }
-tokio        = { workspace = true }
-tracing      = { workspace = true }
+parking_lot      = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+sk-observability = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true }
+tracing          = { workspace = true }
 
 [dev-dependencies]
 tempfile     = { workspace = true }

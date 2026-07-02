@@ -271,8 +271,29 @@ where
             "controller recompute"
         );
 
-        atomic_write(&self.data_dir, &assignment)?;
+        let m = sk_observability::metrics::global();
+        m.assignment_changes.add(1, &[]);
+
+        let started = std::time::Instant::now();
+        let write_res = atomic_write(&self.data_dir, &assignment);
+        m.assignment_file_write_latency
+            .record(started.elapsed().as_secs_f64(), &[]);
+        m.assignment_file_writes.add(
+            1,
+            &[sk_observability::KeyValue::new(
+                "result",
+                if write_res.is_ok() { "ok" } else { "error" },
+            )],
+        );
+        write_res?;
+
         self.mirror.mirror(&assignment).await;
+        // Mirror errors are swallowed by the trait's `async fn`
+        // signature (returns `()`); count the attempt regardless so
+        // the operator alert can gate on staleness rather than a
+        // rate-of-errors ratio.
+        m.cr_mirror_writes
+            .add(1, &[sk_observability::KeyValue::new("result", "ok")]);
         Ok(version)
     }
 }

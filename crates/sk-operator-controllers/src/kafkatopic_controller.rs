@@ -47,6 +47,14 @@ impl KafkaTopicReconciler {
     /// Reconcile entry point. The top-level [`reconcile_topic`]
     /// wrapper adapts this to kube-rs's `Controller::run` signature.
     pub async fn reconcile(&self, topic: Arc<KafkaTopic>) -> Result<Action, ControllerError> {
+        let started = std::time::Instant::now();
+        let out = self.reconcile_inner(topic).await;
+        self.observer
+            .record_duration(started.elapsed().as_secs_f64());
+        out
+    }
+
+    async fn reconcile_inner(&self, topic: Arc<KafkaTopic>) -> Result<Action, ControllerError> {
         // gh #76 / NFS silly-rename guard: when the CR is mid-delete
         // (deletionTimestamp non-nil) the broker's TopicWatcher fires
         // its own Deleted event so the broker closes its open file

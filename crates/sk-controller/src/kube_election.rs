@@ -209,9 +209,16 @@ impl KubeLeaseElection {
 #[async_trait]
 impl LeaseElection for KubeLeaseElection {
     async fn acquire(&self) -> i64 {
+        let started = std::time::Instant::now();
         loop {
             match self.try_acquire().await {
-                Ok(Some(epoch)) => return epoch,
+                Ok(Some(epoch)) => {
+                    let m = sk_observability::metrics::global();
+                    m.controller_failovers.add(1, &[]);
+                    m.controller_failover_duration
+                        .record(started.elapsed().as_secs_f64(), &[]);
+                    return epoch;
+                }
                 Ok(None) => {}
                 Err(err) => {
                     warn!(%err, "lease election: try_acquire failed; retrying");

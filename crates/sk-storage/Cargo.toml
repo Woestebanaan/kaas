@@ -15,9 +15,10 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 tokio        = { workspace = true }
-dashmap      = { workspace = true }
-parking_lot  = { workspace = true }
-arc-swap     = { workspace = true }
+dashmap          = { workspace = true }
+parking_lot      = { workspace = true }
+arc-swap         = { workspace = true }
+sk-observability = { workspace = true }
 
 [dev-dependencies]
 proptest     = { workspace = true }

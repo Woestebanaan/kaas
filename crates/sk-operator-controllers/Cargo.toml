@@ -15,6 +15,9 @@ sk-operator-api = { workspace = true }
 # Filesystem helpers (TopicConfigFile / atomic_write_json) live in sk-storage.
 sk-storage      = { workspace = true }
 
+# Central OTel meter registry.
+sk-observability = { workspace = true }
+
 # kube-rs surface (read CRs, atomic write JSON to PVC, etc.)
 kube            = { workspace = true }
 k8s-openapi     = { workspace = true }

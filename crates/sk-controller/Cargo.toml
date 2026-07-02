@@ -19,8 +19,9 @@ parking_lot  = { workspace = true }
 prost        = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
-sk-broker    = { path = "../sk-broker" }
-sk-coordinator = { path = "../sk-coordinator" }
+sk-broker        = { path = "../sk-broker" }
+sk-coordinator   = { path = "../sk-coordinator" }
+sk-observability = { workspace = true }
 thiserror    = { workspace = true }
 tokio        = { workspace = true }
 tokio-stream = "0.1"

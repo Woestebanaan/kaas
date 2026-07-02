@@ -32,17 +32,29 @@ impl ReconcileObserver {
 
     pub fn bump_success(&self) {
         self.success.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(kind = self.kind, "reconcile success");
+        emit(self.kind, "ok");
     }
 
     pub fn bump_error(&self) {
         self.error.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(kind = self.kind, "reconcile error");
+        emit(self.kind, "error");
     }
 
     pub fn bump_requeue(&self) {
         self.requeue.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(kind = self.kind, "reconcile requeue");
+        emit(self.kind, "requeue");
+    }
+
+    /// Record a reconcile duration alongside the outcome bump. Used
+    /// by the reconciler wrapper to feed
+    /// `skafka.operator.reconcile.duration`.
+    pub fn record_duration(&self, elapsed_s: f64) {
+        sk_observability::metrics::global()
+            .operator_reconcile_duration
+            .record(
+                elapsed_s,
+                &[sk_observability::KeyValue::new("kind", self.kind)],
+            );
     }
 
     pub fn success_count(&self) -> u64 {
@@ -54,6 +66,17 @@ impl ReconcileObserver {
     pub fn requeue_count(&self) -> u64 {
         self.requeue.load(Ordering::Relaxed)
     }
+}
+
+fn emit(kind: &'static str, result: &'static str) {
+    tracing::debug!(kind, result, "reconcile outcome");
+    sk_observability::metrics::global().operator_reconciles.add(
+        1,
+        &[
+            sk_observability::KeyValue::new("kind", kind),
+            sk_observability::KeyValue::new("result", result),
+        ],
+    );
 }
 
 #[cfg(test)]
