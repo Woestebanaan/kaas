@@ -23,8 +23,11 @@ test under `archive/tests/byte-opacity/` ported to
 after a full produce/fetch/admin smoke; the franz-go EOS suite from
 `archive/tests/kafka-compat/eos_v2_test.go` (already partly ported in
 Phase 6 single-broker) extends to multi-broker against the Rust pair;
-and the `bench-compare` skill (skafka vs Strimzi) lands within ±5 % of
-the Go reference numbers captured before the rewrite started. The
+and the `bench-compare` skill (skafka vs Strimzi) shows the Rust
+broker's Strimzi-relative ratios within ±5 % of the Go broker's
+Strimzi-relative ratios captured before the rewrite started
+(Strimzi is the fixed external yardstick the Go version has been
+benchmarked against from day one). The
 PrometheusRule template (`deploy/helm/skafka/templates/prometheusrule.yaml`)
 keeps firing on the same metric names the Go side exposed, so the
 9 existing alerts (SkafkaByteOpacityViolated, SkafkaSelfFencing,
@@ -39,7 +42,8 @@ which needs `bytes_in_total` and friends to read on the dashboards);
 B blocks the byte-opacity test in D; C (scripts smoke) lands in
 parallel with A against the existing wire surface; D (kafka-compat
 port) lands in parallel with B; E (image + chart) closes with the
-docker-publish workflow flip; F (bench-compare ±5 %) is the final gate.
+docker-publish workflow flip; F (bench-compare Strimzi-ratio gate)
+is the final gate.
 
 **Out of scope for Phase 8.**
 
@@ -74,7 +78,8 @@ docker-publish workflow flip; F (bench-compare ±5 %) is the final gate.
   are noted as a Phase 9 follow-up — they're an alert-free quality
   improvement, not a parity gate.
 - `cargo bench` lane wiring in CI. The `bench-compare` skill is
-  invoked manually for the ±5 % gate; an automated lane that runs on
+  invoked manually for the Strimzi-ratio gate; an automated lane
+  that runs on
   every PR is post-cutover work (gh #?, future).
 
 **Prerequisite codec work.** **None.** Phase 7 closed the codec
@@ -97,10 +102,11 @@ running `kafka-dump-log.sh` against a live segment) flips
 `scripts/kafka-*.sh` integration suite runs end-to-end via
 `bench-skafka` against the Rust broker and exits clean (`0` or `77`
 per the per-script skip contract). The franz-go EOS suite passes
-multi-broker; the bench-compare report places skafka's
-producer-perf median latency within ±5 % of the Go reference and
-its consumer-perf throughput within ±5 % — the parity gate the
-rewrite plan committed to in §Phase 8 of `rewrite.md`.
+multi-broker; the bench-compare report shows the Rust broker's
+Strimzi-relative ratios on producer-perf p50/p95/p99 and
+consumer-perf throughput within ±5 % of the Go broker's
+Strimzi-relative ratios captured before the rewrite — the parity
+gate the rewrite plan committed to in §Phase 8 of `rewrite.md`.
 
 ---
 
@@ -809,43 +815,64 @@ bench-skafka skill uses).
 
 ---
 
-## F — `bench-compare` ±5 % gate
+## F — `bench-compare` Strimzi-relative gate
 
 The `bench-compare` skill runs skafka-bench-producer +
-strimzi-bench-producer back-to-back with a 120s cooldown and emits
-a Markdown comparison table. Phase 8 closes by running it against
-the Rust pair and verifying the table sits within ±5 % of the
-Go reference numbers captured before the rewrite started.
+strimzi-bench-producer back-to-back with a 120 s cooldown and emits
+a Markdown comparison table. **Strimzi is the fixed reference the
+Go version has been benchmarked against from day one** — the
+"skafka vs Strimzi" delta is skafka's canonical position statement,
+not the absolute number. Phase 8 closes by running the same head-
+to-head against the Rust broker and verifying that the Rust
+skafka's Strimzi-relative delta is **no worse than** the Go
+skafka's Strimzi-relative delta, within a per-axis tolerance
+(±5 % on the ratio).
+
+Framing this as a Strimzi ratio, not a Go-absolute number, is
+deliberate. Strimzi is external, well-understood, and doesn't
+drift with cluster-state noise the way skafka's absolute latency
+does under NFS pressure. It's also how the Go release notes have
+described skafka's performance since the project shipped
+(see `memory/project_skafka_perf.md`).
 
 ### F.1 — Reference capture
 
 Before workstream A merges, run `bench-compare` against the
-Go-broker baseline (last `v0.1.N-preview` tag) and snapshot the
-report into `docs/perf/go-reference-<commit-sha>.md`. This is the
-yardstick.
+Go-broker baseline (last `v0.1.N-preview` tag). The skill emits
+one Markdown table row per axis with three columns:
+`skafka` / `strimzi` / `ratio (skafka / strimzi)`. Snapshot the
+report into `docs/perf/go-reference-<commit-sha>.md`. The
+**third column** is the yardstick — the ratios, not the absolute
+skafka column.
 
 Per `memory/feedback_bench_methodology.md`: single-run perf benches
 are unreliable on home k3s. Run **5 times**, exclude outliers
 (drop the slowest 1 + the fastest 1), average the remaining 3 for
-the canonical Go numbers. Same procedure for the Rust runs — don't
+the canonical Go ratios. Same procedure for the Rust runs — don't
 gate on a single run.
 
 ### F.2 — Per-axis tolerance
 
 The skill's table covers ~6 axes (producer latency p50/p95/p99,
 consumer throughput, end-to-end latency, broker CPU/RSS). The
-rewrite plan's ±5 % gate applies to the throughput + latency
-percentiles. For CPU/RSS, the Rust binary is expected to be
-lower (no GC pauses, smaller working set); track the delta in the
-report but don't gate on it.
+gate applies **to the ratio column** for the throughput + latency
+percentiles: if Go skafka's producer-p50 ratio to Strimzi is
+`3.8×`, Rust skafka's producer-p50 ratio must sit in
+`[3.61×, 3.99×]` (±5 % of the ratio, not the absolute value).
 
-Per `memory/project_skafka_perf.md`, the current Go skafka sits at
-~75 % of Strimzi single-consumer throughput and ~3.8× producer
-p50; the Rust port targets parity with **Go skafka, not Strimzi**.
-The ±5 % gate is "Rust skafka within ±5 % of Go skafka," not
-"closing the Strimzi gap." The Strimzi gap is architectural
-(group-commit fsync vs page-cache ack); the rewrite alone doesn't
-move it.
+For CPU/RSS, the Rust binary is expected to be lower (no GC
+pauses, smaller working set); track the delta in the report but
+don't gate on it.
+
+**Why not close the Strimzi gap here?** Per
+`memory/project_skafka_perf.md`, the ~75 % single-consumer
+throughput gap and the ~3.8× producer-p50 gap are **architectural**
+(group-commit fsync vs page-cache ack, single-writer-per-partition
+vs ISR replication) — not implementation choices in the Go
+port. Rewriting in Rust doesn't move those levers. Phase 8's gate
+is "don't regress the Strimzi ratio"; closing the gap is a
+separate design conversation (post-cutover, would touch the
+storage engine substantially).
 
 ### F.3 — Liveness probe
 
@@ -856,21 +883,22 @@ the storage substrate is the same shared NFS PVC.
 
 ### F.4 — Failure mode
 
-If the gate misses by 5-15 %, profile (cargo-flamegraph against
-the broker pod via the user's existing ARC runner setup); common
-suspects: missing `MaybeUninit::array_assume_init`-style fast paths,
-default `tokio` runtime work-stealing thrash, or accidentally-
-synchronous async (a `block_on` inside a hot path).
+If the Strimzi ratio widens by 5-15 % vs the Go baseline, profile
+(cargo-flamegraph against the broker pod via the user's existing
+ARC runner setup); common suspects: missing
+`MaybeUninit::array_assume_init`-style fast paths, default `tokio`
+runtime work-stealing thrash, or accidentally-synchronous async (a
+`block_on` inside a hot path).
 
-If the gate misses by > 30 %, escalate per the rewrite-plan risk
+If the ratio widens by > 30 %, escalate per the rewrite-plan risk
 register: "pause and profile before continuing." Don't merge
-Phase 8 with a known parity miss > 5 %.
+Phase 8 with a known ratio regression > 5 %.
 
-**Exit:** `bench-compare` against the Rust pair lands within
-±5 % of the snapshot taken from the Go pair on the same hardware,
-under 5-run averaging. The Markdown report is committed under
-`docs/perf/rust-phase-8-<commit-sha>.md` and the delta column
-shows zero red cells.
+**Exit:** `bench-compare` against the Rust broker + Strimzi pair
+lands within ±5 % of the Go baseline's Strimzi ratios on the same
+hardware, under 5-run averaging. The Markdown report is committed
+under `docs/perf/rust-phase-8-<commit-sha>.md` and the ratio-delta
+column shows zero red cells.
 
 ---
 
@@ -916,9 +944,12 @@ shows zero red cells.
     every `v*` tag; the next tag push produces
     `ghcr.io/woestebanaan/skafka-rs:vX.Y.Z` and
     `skafka-operator-rs:vX.Y.Z`.
-11. `bench-compare` against the Rust pair lands within ±5 % of the
-    captured Go reference on producer-perf p50/p95/p99 and consumer-
-    perf throughput, under 5-run averaging on the bench k3s cluster.
+11. `bench-compare` against the Rust broker + Strimzi shows
+    Strimzi-relative ratios on producer-perf p50/p95/p99 and
+    consumer-perf throughput within ±5 % of the Go broker + Strimzi
+    baseline captured on the same hardware, under 5-run averaging
+    on the bench k3s cluster. The absolute skafka numbers are
+    reported alongside for context but not gated on.
 12. Go tree under `archive/` unchanged; chart unchanged save for the
     1-line README addendum in §E.3.
 
@@ -956,15 +987,18 @@ If any of these fail, do not merge — fix and re-run.
   for port-blocking bugfixes per CLAUDE.md), the baseline can drift.
   Mitigation: re-capture the baseline as the first step of
   workstream C; commit the baseline file with the same PR.
-- **bench-compare misses the ±5 % gate.** Performance bugs in the
+- **bench-compare's Strimzi ratio widens.** Performance bugs in the
   Rust port (missed inlining, async-runtime contention, suboptimal
-  storage hot path) could blow the budget. Mitigation: per
+  storage hot path) could push skafka's ratio to Strimzi further
+  from parity than the Go baseline. Mitigation: per
   `memory/feedback_perf_dead_ends.md`, don't re-try the PGO /
   FADV_SEQUENTIAL / FLUSH_INTERVAL_MESSAGES=0 dead-ends — those are
   known not to help. Profile first. If the gap is structural (e.g.
   Rust's `tokio::fs` defaults differ from Go's syscalls), gate the
   PR on the profiling write-up and a follow-up issue, not on
-  squeezing the last 2 %.
+  squeezing the last 2 %. Absolute skafka numbers can drift with
+  cluster state (NFS health, node pressure); only the Strimzi
+  ratio is stable enough to gate on.
 - **OTLP collector incompatibility.** The chart's
   `prometheusrule.yaml` evaluates against Prometheus's native OTLP
   receiver. Rust's `opentelemetry-otlp 0.27` defaults to gRPC + the

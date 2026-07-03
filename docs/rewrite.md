@@ -327,10 +327,10 @@ Detailed plan: [`phase-0.md`](./phase-0.md).
 
 - Port `scripts/kafka-*.sh` integration suite as-is (it's shell, hits the wire — no language coupling).
 - Port `tests/byte-opacity/` and `tests/kafka-compat/` test bodies; reuse the captured fixtures.
-- Run `bench-compare` (skafka vs Strimzi) — must land within 5% of Go's numbers before cutover.
+- Run `bench-compare` (skafka vs Strimzi) — the Rust broker's Strimzi-relative ratios must land within 5% of the Go broker's Strimzi-relative ratios captured on the same hardware. Strimzi is the fixed external yardstick the Go release notes have used since day one; the ratio, not the absolute skafka number, is what stays stable across cluster-state noise.
 - Run franz-go EOS suite via `rdkafka` C extension (or franz-rs) against the Rust broker.
 
-**Exit criteria**: every script in `scripts/kafka-*.sh` exits 0 or 77; bench-compare matches Go ±5%; EOS suite green.
+**Exit criteria**: every script in `scripts/kafka-*.sh` exits 0 or 77; bench-compare's Rust-vs-Strimzi ratios match the Go-vs-Strimzi baseline within ±5%; EOS suite green.
 
 ---
 
