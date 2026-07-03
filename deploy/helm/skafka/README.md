@@ -9,6 +9,21 @@ shared ReadWriteMany PersistentVolumeClaim.
 > `image.flavor` value (`go` | `rust`) so a single chart version can deploy
 > either; until then the chart only points at the Go images shipped from
 > `archive/`.
+>
+> **Opting into the Rust images (Phase 8).** As of Phase 8 the release
+> workflow publishes `skafka-rs` and `skafka-operator-rs` (or their
+> `-preview` variants) alongside the Go images under the same tag. To
+> deploy the Rust pair, override the image repositories at install time:
+>
+> ```bash
+> helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
+>   --set image.repository=ghcr.io/woestebanaan/skafka-rs-preview \
+>   --set operator.image.repository=ghcr.io/woestebanaan/skafka-operator-rs-preview \
+>   ...
+> ```
+>
+> No other chart changes are required — env vars, listener config,
+> CRD shape, and `/data/__cluster/` layout are identical across flavors.
 
 ## Prerequisites
 

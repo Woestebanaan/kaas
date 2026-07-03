@@ -117,6 +117,12 @@ impl HeartbeatServer {
             // try_send so a full buffer doesn't block the broadcast.
             let _ = send.try_send(cmd);
         }
+        // One counter per broadcast, not per recipient. Alerting cares
+        // about "did we tell peers" — the per-recipient drop rate is
+        // observable via the client-side heartbeat.rtt.
+        sk_observability::metrics::global()
+            .assignment_pushes
+            .add(1, &[]);
     }
 
     /// Notify every broker that the controller is shutting down

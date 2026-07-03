@@ -96,14 +96,22 @@ impl FetchHandler {
         read_committed: bool,
     ) -> fetch::PartitionResponse {
         if self.broker.topics.get(topic).is_none() {
-            return error_partition(p.partition_index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
+            return error_partition_bumped(
+                topic,
+                p.partition_index,
+                ERR_UNKNOWN_TOPIC_OR_PARTITION,
+            );
         }
 
         // Phase 5 cluster check (mirrors Produce). Dev mode (no
         // coordinator wired) falls through to the always-lead path.
         if let Some(c) = self.broker.coordinator() {
             if !c.owns(topic, p.partition_index) {
-                return error_partition(p.partition_index, ERR_NOT_LEADER_FOR_PARTITION);
+                return error_partition_bumped(
+                    topic,
+                    p.partition_index,
+                    ERR_NOT_LEADER_FOR_PARTITION,
+                );
             }
         }
 
@@ -113,7 +121,11 @@ impl FetchHandler {
             .authorizer
             .authorize(principal, &resource, Operation::Read)
         {
-            return error_partition(p.partition_index, ERR_TOPIC_AUTHORIZATION_FAILED);
+            return error_partition_bumped(
+                topic,
+                p.partition_index,
+                ERR_TOPIC_AUTHORIZATION_FAILED,
+            );
         }
 
         // Best-effort metadata; HWM = 0 if the partition has never
@@ -155,17 +167,29 @@ impl FetchHandler {
             {
                 Ok(b) => b,
                 Err(StorageError::OffsetOutOfRange) => {
-                    return error_partition(p.partition_index, ERR_OFFSET_OUT_OF_RANGE);
+                    return error_partition_bumped(
+                        topic,
+                        p.partition_index,
+                        ERR_OFFSET_OUT_OF_RANGE,
+                    );
                 }
                 Err(StorageError::UnknownTopicOrPartition) => {
-                    return error_partition(p.partition_index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
+                    return error_partition_bumped(
+                        topic,
+                        p.partition_index,
+                        ERR_UNKNOWN_TOPIC_OR_PARTITION,
+                    );
                 }
                 Err(StorageError::EpochMismatch) => {
-                    return error_partition(p.partition_index, ERR_NOT_LEADER_FOR_PARTITION);
+                    return error_partition_bumped(
+                        topic,
+                        p.partition_index,
+                        ERR_NOT_LEADER_FOR_PARTITION,
+                    );
                 }
                 Err(err) => {
                     tracing::warn!(%err, topic, partition = p.partition_index, "fetch read failed");
-                    return error_partition(p.partition_index, -1);
+                    return error_partition_bumped(topic, p.partition_index, -1);
                 }
             }
         };
@@ -257,6 +281,25 @@ fn error_partition(partition_index: i32, error_code: i16) -> fetch::PartitionRes
         preferred_read_replica: -1,
         records: None,
     }
+}
+
+/// `error_partition` + a `skafka.fetch.errors` bump labelled by
+/// topic + error_code. Every partition-level Fetch failure routes
+/// through here so on-call sees the failure rate even when the
+/// success counter has gone flat.
+fn error_partition_bumped(
+    topic: &str,
+    partition_index: i32,
+    error_code: i16,
+) -> fetch::PartitionResponse {
+    sk_observability::metrics::global().fetch_errors.add(
+        1,
+        &[
+            sk_observability::KeyValue::new("topic", topic.to_string()),
+            sk_observability::KeyValue::new("error_code", i64::from(error_code)),
+        ],
+    );
+    error_partition(partition_index, error_code)
 }
 
 #[cfg(test)]

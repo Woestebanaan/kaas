@@ -16,18 +16,17 @@ use opentelemetry::KeyValue;
 
 /// Record a byte-opacity tripwire (record decode). `site` names the
 /// offending code path so the alert payload is actionable.
-pub fn bump_codec_record_decode(site: &str) {
+pub fn bump_codec_record_decode(site: &'static str) {
     let m = crate::metrics::global();
-    m.codec_record_decode
-        .add(1, &[KeyValue::new("site", site.to_string())]);
+    m.codec_record_decode.add(1, &[KeyValue::new("site", site)]);
     tracing::warn!(site, "byte-opacity tripwire fired (record decode)");
 }
 
 /// Record a byte-opacity tripwire (batch re-encode). `site` names the
 /// offending code path so the alert payload is actionable.
-pub fn bump_codec_batch_reencode(site: &str) {
+pub fn bump_codec_batch_reencode(site: &'static str) {
     let m = crate::metrics::global();
     m.codec_batch_reencode
-        .add(1, &[KeyValue::new("site", site.to_string())]);
+        .add(1, &[KeyValue::new("site", site)]);
     tracing::warn!(site, "byte-opacity tripwire fired (batch reencode)");
 }

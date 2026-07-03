@@ -124,6 +124,16 @@ pub async fn bootstrap(
     // gauges::set_gauge_source is wired by the runtime owner.
     install_runtime_gauges(&meter);
 
+    // Forward sk-codec's tripwire bumps to the OTel counters. If a
+    // future code path fires the tripwire in production, the
+    // SkafkaByteOpacityViolated alert reads the OTel side and pages;
+    // pre-bootstrap and tests keep the in-process counter as the
+    // fast in-test signal.
+    sk_codec::tripwires::install_tripwire_hooks(
+        crate::byteopacity::bump_codec_record_decode,
+        crate::byteopacity::bump_codec_batch_reencode,
+    );
+
     // --- Tracer provider ---
     let mut tp_builder = TracerProvider::builder()
         .with_resource(resource)

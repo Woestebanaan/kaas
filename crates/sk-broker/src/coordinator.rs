@@ -192,12 +192,14 @@ impl Coordinator {
         let this = self.clone();
         tokio::spawn(async move {
             // Best-effort initial load.
-            this.apply_if_new();
+            let changed = this.apply_if_new();
+            record_poll(changed);
             let mut tick = tokio::time::interval(POLL_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                this.apply_if_new();
+                let changed = this.apply_if_new();
+                record_poll(changed);
             }
         })
     }
@@ -233,6 +235,9 @@ impl Coordinator {
                 file_epoch = parsed.controller_epoch,
                 lease_epoch, "assignment.json rejected — stale controller epoch"
             );
+            sk_observability::metrics::global()
+                .stale_assignments_rejected
+                .add(1, &[]);
             return false;
         }
 
@@ -333,6 +338,20 @@ impl TxnAssignmentSource for Coordinator {
         let (brokers, alive) = a.broker_sets();
         pick_txn_coordinator(transactional_id, &brokers, &alive)
     }
+}
+
+/// Bump `skafka.assignment.polls` after every mtime tick. The
+/// `change_detected` label matches the Go side's split so dashboards
+/// can distinguish "watcher is running but nothing changed" from
+/// "watcher is running and just applied a fresh assignment".
+fn record_poll(change_detected: bool) {
+    sk_observability::metrics::global().assignment_polls.add(
+        1,
+        &[sk_observability::KeyValue::new(
+            "change_detected",
+            if change_detected { "true" } else { "false" },
+        )],
+    );
 }
 
 /// Canonical `"topic/partition"` cache key used by both ownership

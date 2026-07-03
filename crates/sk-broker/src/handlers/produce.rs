@@ -102,7 +102,7 @@ impl ProduceHandler {
         // Quick "topic exists" check before going to the engine —
         // matches Apache's UNKNOWN_TOPIC_OR_PARTITION granularity.
         if self.broker.topics.get(topic).is_none() {
-            return error_partition(p.index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
+            return error_partition_bumped(topic, p.index, ERR_UNKNOWN_TOPIC_OR_PARTITION);
         }
 
         // Phase 5 cluster check: a real `Coordinator` answers "do I
@@ -111,7 +111,7 @@ impl ProduceHandler {
         // `LocalLeaseManager` "always lead" path.
         if let Some(c) = self.broker.coordinator() {
             if !c.owns(topic, p.index) {
-                return error_partition(p.index, ERR_NOT_LEADER_FOR_PARTITION);
+                return error_partition_bumped(topic, p.index, ERR_NOT_LEADER_FOR_PARTITION);
             }
         }
 
@@ -123,7 +123,7 @@ impl ProduceHandler {
             .authorizer
             .authorize(principal, &resource, Operation::Write)
         {
-            return error_partition(p.index, ERR_TOPIC_AUTHORIZATION_FAILED);
+            return error_partition_bumped(topic, p.index, ERR_TOPIC_AUTHORIZATION_FAILED);
         }
 
         let Some(records) = p.records.clone() else {
@@ -142,7 +142,7 @@ impl ProduceHandler {
         // on the engine side).
         if let Err(err) = self.broker.engine.create_partition(topic, p.index).await {
             tracing::warn!(%err, topic, partition = p.index, "create_partition failed");
-            return map_error(p.index, &err);
+            return map_error(topic, p.index, &err);
         }
 
         // Real cluster epoch from `Coordinator::current_epoch` when
@@ -168,7 +168,7 @@ impl ProduceHandler {
             }
             Err(err) => {
                 tracing::warn!(%err, topic, partition = p.index, "append failed");
-                map_error(p.index, &err)
+                map_error(topic, p.index, &err)
             }
         }
     }
@@ -198,7 +198,22 @@ fn error_partition(index: i32, error_code: i16) -> produce::PartitionResponse {
     }
 }
 
-fn map_error(index: i32, err: &StorageError) -> produce::PartitionResponse {
+/// Same shape as `error_partition` but also bumps
+/// `skafka.produce.errors` labelled by topic + error_code. Callers
+/// that don't know the topic (unlikely) can still reach for
+/// `error_partition` directly.
+fn error_partition_bumped(topic: &str, index: i32, error_code: i16) -> produce::PartitionResponse {
+    sk_observability::metrics::global().produce_errors.add(
+        1,
+        &[
+            sk_observability::KeyValue::new("topic", topic.to_string()),
+            sk_observability::KeyValue::new("error_code", i64::from(error_code)),
+        ],
+    );
+    error_partition(index, error_code)
+}
+
+fn map_error(topic: &str, index: i32, err: &StorageError) -> produce::PartitionResponse {
     let code = match err {
         StorageError::EpochMismatch => ERR_NOT_LEADER_FOR_PARTITION,
         StorageError::OutOfOrderSequence => ERR_OUT_OF_ORDER_SEQUENCE_NUMBER,
@@ -208,7 +223,7 @@ fn map_error(index: i32, err: &StorageError) -> produce::PartitionResponse {
         StorageError::Stalled => ERR_LEADER_NOT_AVAILABLE,
         _ => ERR_GENERIC,
     };
-    error_partition(index, code)
+    error_partition_bumped(topic, index, code)
 }
 
 #[cfg(test)]

@@ -22,22 +22,53 @@
 //! `skafka_codec_batch_reencode_total{site=...}`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 static RECORD_DECODE: AtomicU64 = AtomicU64::new(0);
 static BATCH_REENCODE: AtomicU64 = AtomicU64::new(0);
 
+/// Forwarder installed once at boot by `sk-observability::bootstrap`.
+/// When `Some`, every [`bump_codec_record_decode`] /
+/// [`bump_codec_batch_reencode`] call fires the OTel counters too
+/// (via `sk_observability::byteopacity::bump_codec_*`) so the
+/// `SkafkaByteOpacityViolated` alert can trip on tripwires firing
+/// in production — not just in the local process-atomic counter.
+///
+/// Kept as `Fn` pointers rather than a full trait object so the
+/// upstream dependency (sk-codec → sk-observability) doesn't invert
+/// the workspace dep graph. sk-observability owns the concrete
+/// implementation; sk-codec only knows the signature.
+pub type TripwireHook = fn(&'static str);
+
+static RECORD_DECODE_HOOK: OnceLock<TripwireHook> = OnceLock::new();
+static BATCH_REENCODE_HOOK: OnceLock<TripwireHook> = OnceLock::new();
+
+/// Install the forwarders. Called once at boot from
+/// `sk_observability::bootstrap`. Subsequent calls are silently
+/// ignored (the `OnceLock` semantics).
+pub fn install_tripwire_hooks(record_decode: TripwireHook, batch_reencode: TripwireHook) {
+    let _ = RECORD_DECODE_HOOK.set(record_decode);
+    let _ = BATCH_REENCODE_HOOK.set(batch_reencode);
+}
+
 /// Bump the record-decode tripwire. **No production code path should ever
-/// call this** — Phase 8 wires up a `tracing::warn!` and an OTLP increment
-/// behind this signature, but in Phase 1 the side effect is just the
-/// counter bump.
-pub fn bump_codec_record_decode(_site: &'static str) {
+/// call this** — every increment is a bug. Fires the process-atomic
+/// counter and, if `sk-observability::bootstrap` ran, the OTel counter
+/// via [`install_tripwire_hooks`].
+pub fn bump_codec_record_decode(site: &'static str) {
     RECORD_DECODE.fetch_add(1, Ordering::Relaxed);
+    if let Some(hook) = RECORD_DECODE_HOOK.get() {
+        hook(site);
+    }
 }
 
 /// Bump the batch-reencode tripwire. Same contract as
-/// [`bump_codec_record_decode`] — production code paths must not call this.
-pub fn bump_codec_batch_reencode(_site: &'static str) {
+/// [`bump_codec_record_decode`].
+pub fn bump_codec_batch_reencode(site: &'static str) {
     BATCH_REENCODE.fetch_add(1, Ordering::Relaxed);
+    if let Some(hook) = BATCH_REENCODE_HOOK.get() {
+        hook(site);
+    }
 }
 
 /// Test-only readout of the record-decode counter. Production code has no

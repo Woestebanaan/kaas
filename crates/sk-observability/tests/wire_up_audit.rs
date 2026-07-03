@@ -41,6 +41,9 @@ const EXPECTED_WIRED: &[&str] = &[
     "assignment_changes",
     "assignment_file_writes",
     "assignment_file_write_latency",
+    "assignment_pushes",
+    "assignment_polls",
+    "stale_assignments_rejected",
     "cr_mirror_writes",
     "heartbeat_misses",
     "group_rebalances",
@@ -54,6 +57,9 @@ const EXPECTED_WIRED: &[&str] = &[
     "cleaner_runs",
     "cleaner_duration",
     "cleaner_segments_deleted",
+    "cleaner_bytes_reclaimed",
+    "produce_errors",
+    "fetch_errors",
     "operator_reconciles",
     "operator_reconcile_duration",
     // k8s_api_* land via `record_k8s_call`; the string "k8s_api_calls"
@@ -63,7 +69,10 @@ const EXPECTED_WIRED: &[&str] = &[
 /// Metrics that are intentionally unwired today. Categories:
 ///
 /// * **Tripwires** (should never fire): `codec_record_decode`,
-///   `codec_batch_reencode`. Alertable-on-nonzero.
+///   `codec_batch_reencode`. Alertable-on-nonzero. The
+///   `sk_codec::tripwires::install_tripwire_hooks` seam forwards any
+///   future bump to the OTel counters, but no production emitter
+///   exists today.
 /// * **Forward-compat / not-yet-ported subsystems**: compactor
 ///   metrics (`compaction_*`) — no compactor exists yet;
 ///   `cert_reloads` — TLS certs are bound at startup; hot reload is
@@ -75,11 +84,6 @@ const EXPECTED_WIRED: &[&str] = &[
 /// * **Self-observed via `ObservedExporter`**: `otlp_push_success`,
 ///   `otlp_push_failure`, `otlp_push_duration` — see
 ///   `otlp_push_observer.rs`.
-/// * **Not yet wired at natural sites**: `assignment_pushes`,
-///   `assignment_polls`, `stale_assignments_rejected`,
-///   `produce_errors`, `fetch_errors`, `cleaner_bytes_reclaimed`.
-///   Non-blocking follow-ups; alerts on these are either not
-///   currently wired or don't gate on non-zero values.
 const EXPECTED_ZERO: &[&str] = &[
     "codec_record_decode",
     "codec_batch_reencode",
@@ -92,15 +96,9 @@ const EXPECTED_ZERO: &[&str] = &[
     "compaction_records_dropped",
     "compaction_bytes_in",
     "compaction_bytes_out",
-    "cleaner_bytes_reclaimed",
     "otlp_push_success",
     "otlp_push_failure",
     "otlp_push_duration",
-    "assignment_pushes",
-    "assignment_polls",
-    "stale_assignments_rejected",
-    "produce_errors",
-    "fetch_errors",
 ];
 
 fn workspace_root() -> PathBuf {

@@ -128,11 +128,20 @@ impl RetentionCleaner {
             if target <= p.log_start_offset() {
                 continue;
             }
+            let before = p.partition_size();
             p.delete_records(target).await?;
+            let after = p.partition_size();
+            let reclaimed = before.saturating_sub(after);
             cleaned += 1;
-            sk_observability::metrics::global()
-                .cleaner_segments_deleted
+            let m = sk_observability::metrics::global();
+            m.cleaner_segments_deleted
                 .add(1, &[sk_observability::KeyValue::new("reason", "size")]);
+            if reclaimed > 0 {
+                m.cleaner_bytes_reclaimed.add(
+                    u64::try_from(reclaimed).unwrap_or(0),
+                    &[sk_observability::KeyValue::new("reason", "size")],
+                );
+            }
         }
         Ok(cleaned)
     }
