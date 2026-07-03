@@ -1042,6 +1042,96 @@ If any of these fail, do not merge — fix and re-run.
 
 ---
 
+## Landed vs pending
+
+Phase 8's landed slice covers every workstream that fits inside the
+code repo. The three remaining workstreams each need a piece of
+external state (a running broker, a `kind` cluster, a Strimzi
+co-deploy) that isn't reproducible from a fresh checkout — they
+land as separate small PRs once the bench cluster is healthy.
+
+### Landed
+
+- **A — `sk-observability` crate.** Every module ported from
+  `archive/internal/observability/`: bootstrap + tracing + metrics
+  registry (45 fields, name-and-unit-parity with Go) + `/healthz`
+  axum router + byte-opacity tripwires + `record_k8s_call`
+  wrapper + `TopicTrafficMeter` + partition gauges + OTLP push
+  self-observer. 21 unit tests. See commit `475b752`.
+- **B.1 + B.2 — Call-site wire-up + audit.** Threaded
+  `sk_observability::metrics::global()` through eight downstream
+  crates (`sk-auth`, `sk-storage`, `sk-protocol`, `sk-broker`,
+  `sk-controller`, `sk-coordinator`, `sk-k8s`,
+  `sk-operator-controllers`). Every `Metrics` field on the
+  `EXPECTED_WIRED` list in `crates/sk-observability/tests/wire_up_audit.rs`
+  has ≥1 workspace call site, verified by the audit test. See
+  commits `f6903e8` + `244d58f`.
+- **B.3 — Bin integration.** `bins/skafka/main.rs` and
+  `bins/skafka-operator/main.rs` both call
+  `sk_observability::bootstrap(service, cancel)` at startup and
+  `providers.shutdown()` on SIGTERM. See commit `475b752`.
+- **Codec tripwire forwarder.** `sk-codec::tripwires` exposes a
+  `TripwireHook` static-hook seam that `sk-observability::bootstrap`
+  populates with `byteopacity::bump_codec_*`. Any future production
+  code path that fires the tripwire now bumps both the process-
+  atomic counter (fast in-test assertion) and the OTel counter
+  (`SkafkaByteOpacityViolated` alert). Workspace dep graph stays
+  clean — sk-codec doesn't depend on sk-observability. See
+  commit `244d58f`.
+- **D partial — byte-opacity test port.** `bins/skafka/tests/byte_opacity.rs`
+  ports `archive/tests/byte-opacity/tripwire_test.go` against
+  `MemoryStorage`. Storage round-trip is byte-identical across
+  5 batches with distinct compression codec bits; tripwire
+  counters read zero at the end. Meta-test proves the hooks fire
+  when explicitly called.
+- **E — docker-publish workflow flip.** `.github/workflows/docker-publish.yml`
+  builds `skafka-rs` + `skafka-operator-rs` (or their `-preview`
+  variants) alongside the Go images on every `v*` tag. Chart
+  README documents the override command; the user-facing
+  `image.flavor` toggle stays for Phase 9. See commit `244d58f`.
+
+### Pending
+
+Each of these needs a live cluster in a specific state — they
+can't be exercised from a fresh checkout. Land as separate PRs
+against the healthy bench cluster.
+
+- **C — `scripts/kafka-*.sh` baseline + parity diff.** The suite
+  is language-agnostic (already targets the wire), so it exercises
+  whichever broker is deployed. Needs (1) a healthy broker pod
+  serving on the `Service` DNS `scripts/_common.sh` bootstraps
+  against, and (2) `/opt/kafka/bin` on `$PATH` on the caller. The
+  `skafka-scripts` skill wraps the invocation. Deliverable: a
+  `scripts/.parity-baseline.txt` committed with one
+  `<script>: <exit-code>` row per script, plus a CI lane that
+  re-runs and diffs.
+- **D — full kafka-compat suite port.** 22 test bodies under
+  `archive/tests/kafka-compat/` mapped to
+  `bins/skafka/tests/kafka_compat/`. Needs the `rdkafka` /
+  `librdkafka-sys` cgo dependency in the dev environment and a
+  `kind` cluster for the multi-broker subset. Deliberately
+  deferred behind a `--features kafka-compat-rdkafka` gate — one
+  PR per test body once the dev-environment plumbing lands.
+- **F — bench-compare Strimzi-ratio gate.** Needs the bench k3s
+  cluster with Strimzi co-deployed and a healthy NFS
+  substrate. Deliverable: run `bench-compare` 5× against the Go
+  broker (baseline), snapshot into `docs/perf/go-reference-<sha>.md`;
+  then 5× against the Rust broker, snapshot into
+  `docs/perf/rust-phase-8-<sha>.md`; assert every Strimzi-ratio
+  row is within ±5 % of the Go baseline (see §F for the
+  methodology).
+
+**Environment snapshot at Phase 8 close.** The current k3s
+cluster's `skafka` pod is in `Unknown` state (44 days without
+successful reconcile; the node it ran on is gone) and the
+`strimzi` namespace was created 2 minutes before this doc was
+written and has no pods yet. Neither the C-parity run nor the
+F-bench run is reproducible against this state; they're gated on
+the bench cluster coming up, which is out of scope for this
+turn.
+
+---
+
 ## What this enables for Phase 9
 
 After Phase 8 merges, Phase 9 (cutover) lands by:
