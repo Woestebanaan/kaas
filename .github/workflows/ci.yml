@@ -102,19 +102,21 @@ jobs:
       - name: go test
         run: go test ./...
 
-      - name: Install controller-gen
-        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
-
-      - name: Check CRD manifests are up to date
-        # CRDs live at deploy/crds/ relative to the repo root; controller-gen
-        # output paths are relative to the workspace, which is archive/ for
-        # this job. Use ../deploy to climb out.
-        run: |
-          "$(go env GOPATH)/bin/controller-gen" \
-            crd paths="./operator/api/..." \
-            output:crd:artifacts:config=../deploy/crds
-          cp ../deploy/crds/skafka.io_*.yaml ../deploy/helm/skafka/crds/
-          cd .. && git diff --exit-code -- deploy/crds/ deploy/helm/skafka/crds/
+      # Phase 7 moved the source of truth for `deploy/crds/*.yaml` and
+      # `deploy/helm/skafka/crds/*.yaml` from Go's `controller-gen` to
+      # Rust's `cargo xtask gen-crds` (via `schemars` on the Rust CRD
+      # types). The two generators emit schemas that differ in field
+      # ordering, camelCase-vs-snake_case for the Kubernetes-native
+      # `Condition` embedded type, and description strings — all
+      # cosmetic, not schema-shape.
+      #
+      # The Rust-side drift gate (`cargo xtask check-crd-drift`) runs
+      # in the `rust` job. Running the Go-side check on top would
+      # fight the migration: every push through Phase 9 would trip
+      # because the two generators can't be made byte-equal without
+      # a canonicaliser pass we've explicitly deferred (per Phase 7
+      # §Risks). Skip the legacy Go drift gate until Phase 9 retires
+      # the Go tree entirely.
 
   docker-rust:
     runs-on: arc-runner-set
