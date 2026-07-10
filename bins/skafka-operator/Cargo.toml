@@ -18,6 +18,7 @@ async-trait             = { workspace = true }
 axum                    = { workspace = true }
 futures                 = { workspace = true }
 kube                    = { workspace = true }
+rustls                  = { workspace = true }
 sk-controller           = { path = "../../crates/sk-controller" }
 sk-observability        = { workspace = true }
 sk-operator-api         = { workspace = true }

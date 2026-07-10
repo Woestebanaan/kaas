@@ -54,6 +54,13 @@ const RETRY_PERIOD: Duration = Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23 requires a CryptoProvider to be picked before
+    // kube-rs's first TLS handshake (transitive hyper-rustls). We
+    // enable `ring` at workspace level; the provider isn't auto-
+    // installed. Without this call the operator panics on the first
+    // `Client::try_default()` invocation.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let log_level = env_or("SKAFKA_LOG_LEVEL", DEFAULT_LOG_LEVEL);
     let log_format = env_or("SKAFKA_LOG_FORMAT", DEFAULT_LOG_FORMAT);
 

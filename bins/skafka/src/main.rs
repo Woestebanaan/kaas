@@ -57,8 +57,102 @@ use tracing::{info, warn};
 /// follow-up to swap in `notify` inotify during Phase 8.
 const RELOAD_INTERVAL_SECS: u64 = 10;
 
+/// Init-container entry point. Mirrors
+/// `archive/cmd/skafka/main.go::runInit` — chown/chmod the data dir
+/// to the broker uid/gid so the broker container (uid=65532) can
+/// mkdir topic dirs at runtime even when the CSI provisioner
+/// silently skipped fsGroup-driven perms (skafka#110).
+///
+/// Skips the KafkaTopic CR walk the Go side did — the operator
+/// creates partition dirs on first reconcile, and the storage
+/// engine mkdirs lazily on Produce; the CR walk was an optimisation
+/// to have the dirs pre-warm, not a correctness requirement.
+fn run_init() -> Result<()> {
+    let data_dir = std::env::var("SKAFKA_DATA_DIR").context("init: SKAFKA_DATA_DIR not set")?;
+    let uid: u32 = std::env::var("SKAFKA_BROKER_UID")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(65532);
+    let gid: u32 = std::env::var("SKAFKA_BROKER_GID")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(65532);
+
+    let data_path = Path::new(&data_dir);
+    std::fs::create_dir_all(data_path)
+        .with_context(|| format!("init: mkdir {}", data_path.display()))?;
+
+    ensure_data_dir_perms(data_path, uid, gid)
+        .with_context(|| format!("init: chown/chmod {}", data_path.display()))?;
+    eprintln!(
+        "skafka init: data_dir={} uid={} gid={} ok",
+        data_dir, uid, gid
+    );
+    Ok(())
+}
+
+/// Layer B of the skafka#110 defence-in-depth stack: kubelet's
+/// fsGroup (layer A) can silently fail on non-cooperating CSI
+/// drivers; this init routine runs as root and makes the data dir
+/// writable by the broker process. Layer C (the storage engine's
+/// mkdir_all mode 0o775 at runtime) covers new subdirs.
+///
+/// Walk semantics: chown every entry to (uid, gid); chmod every
+/// directory to 0o775 (setgid + 0775 so children inherit the dir's
+/// group). Files keep their existing mode. Non-root dev-mode
+/// invocations skip the chown pass — chmod EPERM is tolerated.
+fn ensure_data_dir_perms(root: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    // Root-level chmod first — always run so a warm restart on a
+    // CSI-cooperating substrate still fixes a mis-configured dir.
+    // Tolerate EPERM so dev-mode invocations don't fail.
+    if let Err(e) = std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o775)) {
+        if e.kind() != std::io::ErrorKind::PermissionDenied {
+            return Err(e);
+        }
+    }
+    // Probe: try to chown the root. If we're non-root we get EPERM;
+    // skip the recursive fix (dev mode already owns the dir).
+    match chown(root, Some(uid), Some(gid)) {
+        Ok(()) => walk_and_fix(root, uid, gid),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn walk_and_fix(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    // Root already chowned by ensure_data_dir_perms; just chmod +
+    // descend.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775))?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        chown(&path, Some(uid), Some(gid))?;
+        if file_type.is_dir() {
+            walk_and_fix(&path, uid, gid)?;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `--init` mode short-circuits everything else. Called by the
+    // Helm chart's `partition-init` init container.
+    if std::env::args().nth(1).as_deref() == Some("--init") {
+        return run_init();
+    }
+
+    // rustls 0.23 requires a CryptoProvider to be picked before the
+    // first TLS build. We enabled `ring` at workspace level; the
+    // provider isn't auto-installed. Any second-hand rustls user
+    // (kube-rs → hyper-rustls) would panic without this. Ignore the
+    // Err — it only fires if a provider was already installed by
+    // another crate.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::from_env().context("parsing SKAFKA_* env")?;
 
     // Bring up OTel BEFORE the first tracing event so the OTel layer

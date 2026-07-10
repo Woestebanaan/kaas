@@ -2659,6 +2659,7 @@ dependencies = [
  "axum",
  "futures",
  "kube",
+ "rustls",
  "sk-controller",
  "sk-observability",
  "sk-operator-api",

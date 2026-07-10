@@ -1121,14 +1121,19 @@ against the healthy bench cluster.
   row is within ±5 % of the Go baseline (see §F for the
   methodology).
 
-**Environment snapshot at Phase 8 close.** The current k3s
-cluster's `skafka` pod is in `Unknown` state (44 days without
-successful reconcile; the node it ran on is gone) and the
-`strimzi` namespace was created 2 minutes before this doc was
-written and has no pods yet. Neither the C-parity run nor the
-F-bench run is reproducible against this state; they're gated on
-the bench cluster coming up, which is out of scope for this
-turn.
+**Environment snapshot when C + F run.** Bench cluster brought up
+with:
+* `strimzi` namespace: 3-broker Strimzi `kafka-cluster-dual-role-{0,1,2}`
+  on the KRaft dual-role mode (this cluster's control plane and
+  data plane collapsed onto the same pods).
+* `skafka` namespace: 3-broker Rust skafka + operator at tag
+  `v0.1.170-preview` (the first tag published from Phase 8's
+  docker-publish flip; the Go images were also built under the
+  same tag but the chart's `image.repository` overrides in
+  `k3s-cluster/apps/skafka/values.yaml` point at `skafka-rs-preview`
+  / `skafka-operator-rs-preview`).
+* Both pairs share the `nfs` StorageClass (csi-driver-nfs). Strimzi
+  and skafka each get their own PVCs — no substrate cross-talk.
 
 ---
 
