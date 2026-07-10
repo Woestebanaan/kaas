@@ -23,24 +23,126 @@ pub enum ConfigError {
 }
 
 /// JSON entry in `SKAFKA_LISTENERS`. Mirrors the Helm chart's
-/// listener array shape (gh #126).
-#[derive(Debug, Clone, Deserialize)]
+/// listener array shape (gh #126). Two shapes are accepted:
+///
+/// * **Chart shape** (Strimzi-style; what `skafka.listenersJSON`
+///   in `deploy/helm/skafka/templates/_helpers.tpl` emits):
+///   `{"name":"plain","port":9092,"type":"internal","tls":false,
+///     "authentication":{"type":"none"}}`. The `port` is expanded
+///   into `0.0.0.0:<port>`; `tls: true` is upgraded to a
+///   [`TlsConfig`] populated from `SKAFKA_TLS_CERT_FILE` /
+///   `SKAFKA_TLS_KEY_FILE` (falls back to `/tls/tls.crt` +
+///   `/tls/tls.key`, matching the chart's Secret mount path).
+///   `authentication.type` maps into `authentication_type`.
+/// * **Internal shape** (test fixtures + backward-compat):
+///   `{"name":"plain","addr":"0.0.0.0:9092","tls":{...},
+///     "authenticationType":"scram-sha-512"}`.
+///
+/// Both shapes fold into the same struct via the custom
+/// [`Deserialize`] impl below.
+#[derive(Debug, Clone)]
 pub struct ListenerEntry {
     pub name: String,
     /// `host:port`. Use `0.0.0.0:9092` to bind all interfaces.
     pub addr: String,
     /// Optional advertised host (defaults to listener `addr`'s host).
     /// Phase 5 wires the per-broker external hostname template here.
-    #[serde(default)]
     pub advertised_host: Option<String>,
     /// Optional TLS config. `None` ↔ plaintext listener.
-    #[serde(default)]
     pub tls: Option<TlsConfig>,
     /// Optional SASL mechanism / mTLS mode. `None` ↔ "none"
     /// (anonymous listener). Recognised values:
     /// `"scram-sha-512"`, `"plain"`, `"mtls"`.
-    #[serde(default, rename = "authenticationType")]
     pub authentication_type: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ListenerEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        #[derive(Deserialize)]
+        struct Raw {
+            name: String,
+            #[serde(default)]
+            addr: Option<String>,
+            #[serde(default)]
+            port: Option<u16>,
+            #[serde(default)]
+            #[serde(rename = "advertisedHost", alias = "advertised_host")]
+            advertised_host: Option<String>,
+            #[serde(default)]
+            tls: Option<TlsField>,
+            #[serde(default)]
+            authentication: Option<AuthField>,
+            #[serde(default, rename = "authenticationType", alias = "authentication_type")]
+            authentication_type: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum TlsField {
+            Bool(bool),
+            Config(TlsConfig),
+        }
+
+        #[derive(Deserialize)]
+        struct AuthField {
+            #[serde(rename = "type")]
+            ty: String,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let addr = match (raw.addr, raw.port) {
+            (Some(a), _) => a,
+            (None, Some(p)) => format!("0.0.0.0:{p}"),
+            (None, None) => {
+                return Err(D::Error::custom(
+                    "listener needs either `addr` (host:port) or `port` (int)",
+                ));
+            }
+        };
+
+        let tls = match raw.tls {
+            None => None,
+            Some(TlsField::Bool(false)) => None,
+            Some(TlsField::Bool(true)) => {
+                // Chart-shape boolean: resolve cert paths from the
+                // Secret-mount env vars the chart populates. Same
+                // paths for every TLS listener — the Go side did the
+                // same (cmd/skafka/listeners.go).
+                let cert = std::env::var("SKAFKA_TLS_CERT_FILE")
+                    .unwrap_or_else(|_| "/tls/tls.crt".to_owned());
+                let key = std::env::var("SKAFKA_TLS_KEY_FILE")
+                    .unwrap_or_else(|_| "/tls/tls.key".to_owned());
+                let client_ca = std::env::var("SKAFKA_TLS_CLIENT_CA_FILE")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from);
+                Some(TlsConfig {
+                    cert_path: PathBuf::from(cert),
+                    key_path: PathBuf::from(key),
+                    client_ca_path: client_ca,
+                })
+            }
+            Some(TlsField::Config(cfg)) => Some(cfg),
+        };
+
+        let authentication_type = raw
+            .authentication_type
+            .or_else(|| raw.authentication.map(|a| a.ty))
+            .filter(|s| s != "none");
+
+        Ok(Self {
+            name: raw.name,
+            addr,
+            advertised_host: raw.advertised_host,
+            tls,
+            authentication_type,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +284,44 @@ mod tests {
             v[0].advertised_host.as_deref(),
             Some("broker-0.cluster.local")
         );
+    }
+
+    #[test]
+    fn chart_shape_parses() {
+        // Exact JSON the Helm chart's skafka.listenersJSON helper
+        // emits (deploy/helm/skafka/templates/_helpers.tpl).
+        let v: Vec<ListenerEntry> = serde_json::from_str(
+            r#"[
+                {"name":"plain","port":9092,"type":"internal","tls":false,"authentication":{"type":"none"}},
+                {"name":"authed","port":9095,"type":"internal","tls":false,"authentication":{"type":"scram-sha-512"}}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].name, "plain");
+        assert_eq!(v[0].addr, "0.0.0.0:9092");
+        assert!(v[0].tls.is_none());
+        assert!(v[0].authentication_type.is_none()); // "none" folds to None
+        assert_eq!(v[1].addr, "0.0.0.0:9095");
+        assert_eq!(v[1].authentication_type.as_deref(), Some("scram-sha-512"));
+    }
+
+    #[test]
+    fn chart_shape_tls_true_resolves_from_env() {
+        // Chart emits `tls: true` for the TLS listener; the
+        // deserializer resolves cert paths from env-var overrides.
+        std::env::set_var("SKAFKA_TLS_CERT_FILE", "/tls/tls.crt");
+        std::env::set_var("SKAFKA_TLS_KEY_FILE", "/tls/tls.key");
+        std::env::remove_var("SKAFKA_TLS_CLIENT_CA_FILE");
+
+        let v: Vec<ListenerEntry> = serde_json::from_str(
+            r#"[{"name":"tls","port":9093,"type":"internal","tls":true,"authentication":{"type":"none"}}]"#,
+        )
+        .unwrap();
+        let tls = v[0].tls.as_ref().unwrap();
+        assert_eq!(tls.cert_path, PathBuf::from("/tls/tls.crt"));
+        assert_eq!(tls.key_path, PathBuf::from("/tls/tls.key"));
+        assert!(tls.client_ca_path.is_none());
     }
 
     #[test]
