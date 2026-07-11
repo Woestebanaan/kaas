@@ -207,9 +207,42 @@ async fn main() -> Result<()> {
         let ns = std::env::var("SKAFKA_NAMESPACE").unwrap_or_else(|_| "default".into());
         match kube::Client::try_default().await {
             Ok(client) => {
-                let writer = sk_broker::topic_cr_writer::KubeTopicCRWriter::new(client, ns);
+                let writer =
+                    sk_broker::topic_cr_writer::KubeTopicCRWriter::new(client.clone(), ns.clone());
                 broker.install_cr_writer(Arc::new(writer));
                 info!("installed KubeTopicCRWriter for admin handlers");
+
+                // Spawn the KafkaTopic CR watcher: feeds every
+                // Apply/InitApply into `topics` so newly-created
+                // topics become visible on the wire (Metadata),
+                // and every Delete removes them so unregistered
+                // topics stop being advertised.
+                let topics_apply = topics.clone();
+                let topics_delete = topics.clone();
+                let watch_cancel = CancellationToken::new();
+                let watch_ns = ns;
+                tokio::spawn(async move {
+                    if let Err(err) = sk_k8s::kube_watchers::run_topic_watch(
+                        client,
+                        watch_ns,
+                        move |name, partitions| {
+                            topics_apply.insert(sk_broker::TopicMeta {
+                                name: name.to_string(),
+                                partition_count: partitions,
+                                topic_id: [0u8; 16],
+                            });
+                        },
+                        move |name| {
+                            topics_delete.remove(name);
+                        },
+                        watch_cancel,
+                    )
+                    .await
+                    {
+                        warn!(%err, "topic watcher exited");
+                    }
+                });
+                info!("spawned KafkaTopic CR watcher");
             }
             Err(err) => {
                 warn!(%err, "kube client init failed; CreateTopics + admin handlers will refuse");

@@ -32,7 +32,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::endpoints::{BrokerRegistry, EndpointSliceData, EndpointSliceEntry};
-use crate::topic_watcher::TopicWatcher;
 use sk_broker::coordinator::LeaseEpochSource;
 
 #[derive(Debug, Error)]
@@ -267,20 +266,68 @@ pub async fn patch_readiness(
     Ok(())
 }
 
-/// Phase 7 placeholder. The `KafkaTopic` CR type lands in
-/// `sk-operator-api` then; today the broker reads topics from
-/// `SKAFKA_TOPICS` env JSON so this watcher is unused. Kept as
-/// a typed signature so wiring it later doesn't need an API
-/// change at the call site.
-pub async fn run_topic_watch(
-    _client: Client,
-    _namespace: String,
-    _watcher: Arc<TopicWatcher>,
-    _cancel: CancellationToken,
-) -> Result<(), KubeWatchError> {
-    Err(KubeWatchError::Other(
-        "topic watcher: KafkaTopic CR type lands with sk-operator-api in Phase 7".to_owned(),
-    ))
+/// Stream `KafkaTopic` CR events into the broker's topic-registry
+/// callback. Called with a `on_apply` closure that receives `(name,
+/// partition_count)` on Apply/InitApply and an `on_delete` closure
+/// that receives `name` on Delete.
+///
+/// Runs until `cancel` fires or the stream terminates permanently.
+/// Individual watcher errors are logged and swallowed — the stream
+/// restarts on the next tick.
+pub async fn run_topic_watch<A, D>(
+    client: Client,
+    namespace: String,
+    on_apply: A,
+    on_delete: D,
+    cancel: CancellationToken,
+) -> Result<(), KubeWatchError>
+where
+    A: Fn(&str, i32) + Send + Sync + 'static,
+    D: Fn(&str) + Send + Sync + 'static,
+{
+    let api: Api<sk_operator_api::KafkaTopic> = Api::namespaced(client, &namespace);
+    let mut stream = watcher(api, WatcherConfig::default()).boxed();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            evt = stream.next() => {
+                let evt = match evt {
+                    None => {
+                        debug!("topic watch: stream ended; caller may restart");
+                        return Ok(());
+                    }
+                    Some(Ok(e)) => e,
+                    Some(Err(err)) => {
+                        warn!(%err, "topic watch: error from stream");
+                        continue;
+                    }
+                };
+                handle_topic_event(&on_apply, &on_delete, evt);
+            }
+        }
+    }
+}
+
+fn handle_topic_event<A, D>(on_apply: &A, on_delete: &D, event: Event<sk_operator_api::KafkaTopic>)
+where
+    A: Fn(&str, i32),
+    D: Fn(&str),
+{
+    match event {
+        Event::Apply(t) | Event::InitApply(t) => {
+            let Some(name) = t.metadata.name.as_deref() else {
+                return;
+            };
+            on_apply(name, t.spec.partitions);
+        }
+        Event::Delete(t) => {
+            let Some(name) = t.metadata.name.as_deref() else {
+                return;
+            };
+            on_delete(name);
+        }
+        Event::Init | Event::InitDone => {}
+    }
 }
 
 #[cfg(test)]

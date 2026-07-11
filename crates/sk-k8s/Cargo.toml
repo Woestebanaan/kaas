@@ -29,15 +29,16 @@ tracing        = { workspace = true }
 # still links. The trait surfaces ([`ReadinessGate`], etc.) ship
 # unconditionally.
 futures        = { workspace = true, optional = true }
-k8s-openapi    = { workspace = true, optional = true }
-kube           = { workspace = true, optional = true }
+k8s-openapi     = { workspace = true, optional = true }
+kube            = { workspace = true, optional = true }
+sk-operator-api = { workspace = true, optional = true }
 
 [features]
 default = ["kube-watchers"]
 # Pull in the kube-rs runtime + typed API impls. The workspace
 # pins `home@0.5.11` (compatible with rustc 1.85; later versions
 # require 1.88) so the feature can land in the default set.
-kube-watchers = ["dep:futures", "dep:k8s-openapi", "dep:kube"]
+kube-watchers = ["dep:futures", "dep:k8s-openapi", "dep:kube", "dep:sk-operator-api"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

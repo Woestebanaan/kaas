@@ -103,6 +103,10 @@ impl TopicRegistry {
         self.inner.write().insert(m.name.clone(), m);
     }
 
+    pub fn remove(&self, name: &str) {
+        self.inner.write().remove(name);
+    }
+
     pub fn len(&self) -> usize {
         self.inner.read().len()
     }

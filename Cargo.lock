@@ -2505,6 +2505,7 @@ dependencies = [
  "sk-broker",
  "sk-coordinator",
  "sk-observability",
+ "sk-operator-api",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
