@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 /// One status condition. Field shapes mirror apimachinery's
 /// `metav1.Condition` exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Condition {
     /// CamelCase or `foo.example.com/CamelCase`. Required.
     #[serde(rename = "type")]
