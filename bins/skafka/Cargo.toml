@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow             = { workspace = true }
 async-trait        = { workspace = true }
+axum               = { workspace = true }
 bytes              = { workspace = true }
 rustls             = { workspace = true }
 rustls-pemfile     = { workspace = true }

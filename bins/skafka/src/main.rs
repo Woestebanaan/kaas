@@ -224,6 +224,36 @@ async fn main() -> Result<()> {
     let serve_cancel = cancel.clone();
     let serve = tokio::spawn(async move { server.serve(serve_cancel).await });
 
+    // Spawn the axum /healthz + /readyz server on SKAFKA_HEALTH_ADDR
+    // (chart default `:8080`). The chart's readinessProbe hits
+    // http://<pod>:8080/readyz — without this, pods stay 0/1
+    // Ready forever.
+    let health_addr = std::env::var("SKAFKA_HEALTH_ADDR").unwrap_or_else(|_| ":8080".into());
+    let health_addr = if let Some(stripped) = health_addr.strip_prefix(':') {
+        format!("0.0.0.0:{stripped}")
+    } else {
+        health_addr
+    };
+    let health_cfg = sk_observability::health::HealthConfig {
+        broker_id: format!("skafka-{}", cli.broker_id),
+        listeners: cli.listeners.iter().map(|l| l.name.clone()).collect(),
+        tls: None,
+        source: None,
+    };
+    let health_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let router = sk_observability::health::health_router(health_cfg);
+        match tokio::net::TcpListener::bind(&health_addr).await {
+            Ok(listener) => {
+                info!(addr = %health_addr, "health server listening");
+                let _ = axum::serve(listener, router)
+                    .with_graceful_shutdown(async move { health_cancel.cancelled().await })
+                    .await;
+            }
+            Err(err) => warn!(%err, %health_addr, "health server bind failed"),
+        }
+    });
+
     // Flip /readyz once the accept loop is up. The chart's
     // readinessProbe gates on this. If a listener fails to bind, we
     // never call this and the pod stays unready until SIGTERM.
