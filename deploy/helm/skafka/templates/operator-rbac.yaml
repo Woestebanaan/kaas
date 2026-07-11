@@ -30,7 +30,13 @@ rules:
     verbs: [get, update, patch]
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, list, watch, patch]
+    # `create` + `update` needed by the Rust operator's
+    # `KubeLeaseElection::acquire` — it creates a Lease when none
+    # exists and updates it on every renew tick. The Go operator
+    # used controller-runtime's leader-election on top of a
+    # pre-created ConfigMap, which is why the pre-Phase 8 grant
+    # was read-only-plus-patch.
+    verbs: [get, list, watch, create, update, patch]
   # KafkaCluster controller reconciles Services and Gateway API / cert-manager resources.
   - apiGroups: [""]
     resources: [services]
