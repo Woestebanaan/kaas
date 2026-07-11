@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
-    /// CamelCase or `foo.example.com/CamelCase`. Required.
-    #[serde(rename = "type")]
+    /// CamelCase or `foo.example.com/CamelCase`. Required in the
+    /// CRD schema; tolerant on deserialise.
+    #[serde(rename = "type", default)]
     #[schemars(
         length(max = 316),
         regex(
@@ -29,7 +30,9 @@ pub struct Condition {
     )]
     pub type_: String,
 
-    /// `True`, `False`, or `Unknown`. Required.
+    /// `True`, `False`, or `Unknown`. Required in the CRD schema;
+    /// tolerant on deserialise.
+    #[serde(default)]
     #[schemars(regex(pattern = r"^(True|False|Unknown)$"))]
     pub status: String,
 
@@ -39,10 +42,15 @@ pub struct Condition {
     #[schemars(range(min = 0))]
     pub observed_generation: Option<i64>,
 
-    /// RFC 3339 timestamp. Required.
+    /// RFC 3339 timestamp. Required in the CRD schema but tolerant
+    /// on deserialise so an operator writing partial conditions (or
+    /// a pre-existing CR from a prior operator version) doesn't
+    /// break the broker's watcher.
+    #[serde(default)]
     pub last_transition_time: String,
 
     /// Programmatic identifier. Required, CamelCase, 1..=1024 chars.
+    #[serde(default)]
     #[schemars(
         length(min = 1, max = 1024),
         regex(pattern = r"^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$")
@@ -50,6 +58,7 @@ pub struct Condition {
     pub reason: String,
 
     /// Human-readable. Required, up to 32768 chars.
+    #[serde(default)]
     #[schemars(length(max = 32768))]
     pub message: String,
 }
