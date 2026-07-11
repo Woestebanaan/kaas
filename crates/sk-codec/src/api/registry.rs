@@ -102,15 +102,17 @@ mod tests {
     fn registry_size_phase7() {
         // Phase 7 workstream D added keys 32, 37, 44, 48, 49 — the
         // admin surface (Describe/AlterConfigs, CreatePartitions,
-        // Describe/AlterClientQuotas).
-        assert_eq!(ALL.len(), 29);
+        // Describe/AlterClientQuotas). Phase 8 workstream C added
+        // key 19 (CreateTopics) once the scripts smoke started
+        // needing it.
+        assert_eq!(ALL.len(), 30);
         let mut keys: Vec<i16> = ALL.iter().map(|s| s.key).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
             vec![
-                0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22, 24, 25, 26, 27, 28, 32,
-                36, 37, 42, 44, 47, 48, 49,
+                0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 27, 28,
+                32, 36, 37, 42, 44, 47, 48, 49,
             ]
         );
     }
