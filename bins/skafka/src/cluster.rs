@@ -391,18 +391,25 @@ fn spawn_single_broker_assignment_loop(
     topics: Arc<TopicRegistry>,
     cancel: CancellationToken,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
-    let sources = Arc::new(StaticSources {
-        topics: topic_specs_from_registry(&topics),
+    // Live topic source: reads TopicRegistry on every AssignmentLoop
+    // cycle so newly-created topics (via CreateTopics + the KafkaTopic
+    // CR watcher) get partitions distributed on the next 5s tick.
+    // A snapshot at boot would leave every fresh topic unassigned.
+    let live_topics = Arc::new(LiveTopicSource {
+        registry: topics.clone(),
+    });
+    let broker_source = Arc::new(StaticSources {
+        topics: Vec::new(),
         brokers: vec![self_id.clone()],
         groups: Vec::new(),
     });
     let loop_handle = AssignmentLoop::new(
         data_dir.clone(),
         self_id.clone(),
-        sources.clone(),
-        sources.clone(),
+        live_topics,
+        broker_source.clone(),
     )
-    .with_group_source(sources.clone());
+    .with_group_source(broker_source.clone());
     let election = LocalElection::new(self_id.clone());
 
     let task = tokio::spawn(async move {
@@ -442,6 +449,21 @@ fn topic_specs_from_registry(topics: &TopicRegistry) -> Vec<sk_controller::Topic
             partition_count: m.partition_count,
         })
         .collect()
+}
+
+/// Wire the `TopicRegistry` behind `TopicSource` so the assignment
+/// loop always sees the current-catalog snapshot, not a boot-time
+/// one. Fresh `KafkaTopic` CRs propagate: `TopicWatcher::Apply` →
+/// `TopicRegistry::insert` → `AssignmentLoop` picks it up on the
+/// next tick.
+struct LiveTopicSource {
+    registry: Arc<TopicRegistry>,
+}
+
+impl sk_controller::TopicSource for LiveTopicSource {
+    fn topics(&self) -> Vec<sk_controller::TopicSpec> {
+        topic_specs_from_registry(&self.registry)
+    }
 }
 
 fn self_endpoint_lookup(self_id: &str, port: i32) -> Arc<dyn BrokerLookup> {
