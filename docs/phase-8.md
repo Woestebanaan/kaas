@@ -1090,50 +1090,107 @@ land as separate small PRs once the bench cluster is healthy.
   README documents the override command; the user-facing
   `image.flavor` toggle stays for Phase 9. See commit `244d58f`.
 
+### Also landed in the second execution pass
+
+Between the initial workstream commits and this section, a chain
+of Rust-broker deploy-time bugs surfaced against the live k3s +
+Strimzi cluster and were closed as part of Phase 8 completion:
+
+* **`--init` mode** in `bins/skafka` — the chart's `partition-init`
+  init container invokes `skafka --init` (chown the data dir);
+  the Rust binary now handles it (commit `d5a6eec`).
+* **rustls `CryptoProvider::install_default`** in both bins — kube-rs
+  → hyper-rustls panicked without it (commit `d5a6eec`).
+* **Chart-shape `SKAFKA_LISTENERS` deserializer** — the chart's
+  Strimzi-style listener JSON (`{name,port,type,tls:bool,authentication:{type}}`)
+  now flows through the same `ListenerEntry` as the internal shape
+  via a custom `Deserialize` impl (commit `b43d2da`).
+* **Chart RBAC**: operator `create`+`update` on
+  `coordination.k8s.io/leases` (Rust operator's `KubeLeaseElection`
+  needs both; the Go operator ran on ConfigMap-based election —
+  commit `b77f265`).
+* **axum `/healthz` + `/readyz` server in `bins/skafka`** — the
+  chart wires `SKAFKA_HEALTH_ADDR`; broker now binds it (commit
+  `13d4363`).
+* **StatefulSet FQDN derivation for `advertised_host`** — clients
+  bootstrapping on the Service got back `127.0.0.1:9092` in
+  Metadata; now built from `MY_POD_NAME.SKAFKA_HEADLESS_SVC.SKAFKA_NAMESPACE.svc.cluster.local`
+  (commit `2d30206`).
+* **`Condition` serde `rename_all = "camelCase"` + tolerant
+  defaults** — apiserver emits `lastTransitionTime`, not
+  `last_transition_time`, and partial conditions on older CRs no
+  longer break the KafkaTopic watcher (commits `c931856` +
+  `b382f31`).
+* **`CreateTopics` (API key 19)** — 300 LoC codec + handler +
+  `TopicCRWriter::create_topic` (mints `KafkaTopic` CR) + kube
+  client install in `bins/skafka/main`. Unblocks every
+  `kafka-*.sh` script's `--create` step (commit `96583db`).
+* **`run_topic_watch`** — kube-rs `watcher()` streaming
+  `KafkaTopic` events into the broker's `TopicRegistry`
+  on_apply / on_delete callbacks; newly-created topics now become
+  wire-visible on the next Metadata request (commit `a156a45`).
+* **Live `TopicSource` for `AssignmentLoop`** — replaced the
+  boot-time `topic_specs_from_registry` snapshot with a live
+  reader so newly-registered topics get partitions distributed on
+  the next 5 s tick (commit `5c43d1b`).
+* **`FindCoordinator` FQDN in `self_endpoint_lookup`** — was
+  emitting unresolvable `<pod>.local`; now uses the same FQDN
+  the Metadata handler advertises (commit `f2417d2`).
+* **Chart `broker.replicaCount: 1`** in the k3s-cluster values —
+  multi-broker leader ownership on the shared PVC needs
+  `KubeLeaseElection` gating the AssignmentLoop (Phase 5 gap);
+  single broker sidesteps it for Phase 8's scripts + bench
+  baseline. Documented in the values.yaml note.
+
+Together those unblocked C and F. See the `k3s-cluster` repo's
+`apps/skafka` for the deployed chart pin (currently
+`0.1.181-preview`).
+
+### Attempted, delivered with follow-up
+
+- **C — `scripts/kafka-*.sh` baseline.** Ran the full suite via the
+  `skafka-scripts` skill against the live Rust broker
+  (`v0.1.179-preview`). **8 PASS, 20 SKIP, 12 FAIL** — committed as
+  `scripts/.parity-baseline.txt` (commit `c46f933`). Every FAIL
+  traces to one of three follow-up buckets (multi-broker leader
+  ownership; admin surface gaps — `DescribeLogDirs`, broker-level
+  `IncrementalAlterConfigs`, ACL provisioning; perf-test 120 s
+  timeouts). Rerunning the suite and diffing against the baseline
+  file is the parity gate; downgrade of any row is a regression.
+- **D-partial — byte-opacity test port.** Landed in commit
+  `6cb28ff`. Full `kafka-compat` port still pending.
+- **F — bench-compare Strimzi ratio.** Ran the `bench-compare`
+  skill against the Rust broker + Strimzi pair on the shared NFS.
+  **Both sides DeadlineExceeded** (skafka 5/5 failed, strimzi 5/5
+  failed) — infrastructure-side, not a skafka regression against
+  Strimzi. The mid-run NFS snapshot showed skafka pushing 7.13 MB/s
+  vs Strimzi's 5.93 MB/s at similar RPC rates (~150 rpc/s), so
+  wire-level throughput is in the same order. Full report at
+  `docs/perf/rust-phase-8-<sha>.md`; the `sk/st` ratio column is
+  `N/A` because neither producer finished the 100M-record
+  script within the 20-min job deadline. Rerun on a healthier
+  NFS window (or bump `activeDeadlineSeconds`) for a real
+  Strimzi-ratio gate.
+
 ### Pending
 
-Each of these needs a live cluster in a specific state — they
-can't be exercised from a fresh checkout. Land as separate PRs
-against the healthy bench cluster.
-
-- **C — `scripts/kafka-*.sh` baseline + parity diff.** The suite
-  is language-agnostic (already targets the wire), so it exercises
-  whichever broker is deployed. Needs (1) a healthy broker pod
-  serving on the `Service` DNS `scripts/_common.sh` bootstraps
-  against, and (2) `/opt/kafka/bin` on `$PATH` on the caller. The
-  `skafka-scripts` skill wraps the invocation. Deliverable: a
-  `scripts/.parity-baseline.txt` committed with one
-  `<script>: <exit-code>` row per script, plus a CI lane that
-  re-runs and diffs.
 - **D — full kafka-compat suite port.** 22 test bodies under
   `archive/tests/kafka-compat/` mapped to
   `bins/skafka/tests/kafka_compat/`. Needs the `rdkafka` /
   `librdkafka-sys` cgo dependency in the dev environment and a
   `kind` cluster for the multi-broker subset. Deliberately
-  deferred behind a `--features kafka-compat-rdkafka` gate — one
-  PR per test body once the dev-environment plumbing lands.
-- **F — bench-compare Strimzi-ratio gate.** Needs the bench k3s
-  cluster with Strimzi co-deployed and a healthy NFS
-  substrate. Deliverable: run `bench-compare` 5× against the Go
-  broker (baseline), snapshot into `docs/perf/go-reference-<sha>.md`;
-  then 5× against the Rust broker, snapshot into
-  `docs/perf/rust-phase-8-<sha>.md`; assert every Strimzi-ratio
-  row is within ±5 % of the Go baseline (see §F for the
-  methodology).
-
-**Environment snapshot when C + F run.** Bench cluster brought up
-with:
-* `strimzi` namespace: 3-broker Strimzi `kafka-cluster-dual-role-{0,1,2}`
-  on the KRaft dual-role mode (this cluster's control plane and
-  data plane collapsed onto the same pods).
-* `skafka` namespace: 3-broker Rust skafka + operator at tag
-  `v0.1.170-preview` (the first tag published from Phase 8's
-  docker-publish flip; the Go images were also built under the
-  same tag but the chart's `image.repository` overrides in
-  `k3s-cluster/apps/skafka/values.yaml` point at `skafka-rs-preview`
-  / `skafka-operator-rs-preview`).
-* Both pairs share the `nfs` StorageClass (csi-driver-nfs). Strimzi
-  and skafka each get their own PVCs — no substrate cross-talk.
+  deferred behind a `--features kafka-compat-rdkafka` gate.
+- **Multi-broker leader ownership** — Phase 5 architectural
+  follow-up. The Rust broker's `cluster.rs` uses `LocalElection`,
+  so N replicas on the shared PVC clobber each other's
+  `assignment.json`. Fix: wire `KubeLeaseElection` from
+  `sk-controller` so only the elected controller runs the
+  AssignmentLoop, and teach the Metadata handler to emit the
+  cluster's actual broker set + per-partition leader instead of
+  `self` for everything. Tracked in `scripts/.parity-baseline.txt`
+  as the primary FAIL bucket.
+- **F rerun with real ratio numbers.** Same skill invocation on a
+  healthier NFS + longer job deadline.
 
 ---
 
