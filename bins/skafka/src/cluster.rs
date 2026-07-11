@@ -468,11 +468,31 @@ impl sk_controller::TopicSource for LiveTopicSource {
 
 fn self_endpoint_lookup(self_id: &str, port: i32) -> Arc<dyn BrokerLookup> {
     let id = self_id.to_owned();
+    // Prefer the StatefulSet FQDN — same shape the Metadata handler's
+    // `advertised_host` derives via `derive_advertised_host` in
+    // sk-broker/cli.rs. Client tools (FindCoordinator response) chase
+    // this host to reach the group coordinator; without it they hit
+    // `<pod>.local` and NXDOMAIN. Local-dev has none of these env
+    // vars set — fall through to the `.local` shape so a
+    // MemoryStorage-backed dev binary still resolves.
+    let advertised = {
+        let pod = std::env::var("MY_POD_NAME").ok().filter(|s| !s.is_empty());
+        let svc = std::env::var("SKAFKA_HEADLESS_SVC")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let ns = std::env::var("SKAFKA_NAMESPACE")
+            .ok()
+            .filter(|s| !s.is_empty());
+        match (pod, svc, ns) {
+            (Some(p), Some(s), Some(n)) => format!("{p}.{s}.{n}.svc.cluster.local"),
+            _ => format!("{id}.local"),
+        }
+    };
     Arc::new(FnLookup::new(move |req: &str| {
         if req == id {
             Some(BrokerEndpoint {
                 node_id: 0,
-                host: format!("{id}.local"),
+                host: advertised.clone(),
                 port,
             })
         } else {
