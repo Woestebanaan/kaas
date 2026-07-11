@@ -2630,6 +2630,7 @@ dependencies = [
  "base64",
  "bytes",
  "hmac",
+ "kube",
  "rcgen",
  "rustls",
  "rustls-pemfile",

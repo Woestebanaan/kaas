@@ -43,9 +43,9 @@ pub use group_hash::{
 pub use group_takeover::GroupTakeoverDriver;
 pub use handlers::{
     AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
-    ApiVersionsHandler, CreatePartitionsHandler, DeleteGroupsHandler, DescribeClientQuotasHandler,
-    DescribeConfigsHandler, DescribeGroupsHandler, EndTxnHandler, FetchHandler,
-    FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
+    ApiVersionsHandler, CreatePartitionsHandler, CreateTopicsHandler, DeleteGroupsHandler,
+    DescribeClientQuotasHandler, DescribeConfigsHandler, DescribeGroupsHandler, EndTxnHandler,
+    FetchHandler, FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
     InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
     ListOffsetsHandler, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
     OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
@@ -58,6 +58,8 @@ pub use marker_watcher::{
 };
 pub use self_fence::{is_heartbeat_fresh, DEFAULT_HEARTBEAT_TIMEOUT};
 pub use takeover::TakeoverDriver;
+#[cfg(feature = "cr-writer")]
+pub use topic_cr_writer::KubeTopicCRWriter;
 pub use topic_cr_writer::{
     config_key_to_json_field, config_value_to_json, ConfigOp, ConfigOpKind, ConfigOpWithValue,
     NoopTopicCRWriter, TopicCRWriter, TopicWriteError,

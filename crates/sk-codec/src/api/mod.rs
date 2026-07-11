@@ -21,6 +21,7 @@ pub mod alter_client_quotas;
 pub mod api_versions;
 pub mod common;
 pub mod create_partitions;
+pub mod create_topics;
 pub mod delete_groups;
 pub mod describe_client_quotas;
 pub mod describe_configs;

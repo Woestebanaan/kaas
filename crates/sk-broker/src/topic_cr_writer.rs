@@ -102,6 +102,11 @@ pub enum TopicWriteError {
     #[error("invalid partitions: {0}")]
     InvalidPartitions(String),
 
+    /// CreateTopics: a CR with the requested name already exists.
+    /// Wire: `TOPIC_ALREADY_EXISTS` (36).
+    #[error("topic already exists: {0}")]
+    AlreadyExists(String),
+
     /// Anything else; bubble up for logging. Wire:
     /// `UNKNOWN_SERVER_ERROR` (-1).
     #[error("other: {0}")]
@@ -111,6 +116,13 @@ pub enum TopicWriteError {
 /// Patch operations the handler issues against the CR.
 #[async_trait]
 pub trait TopicCRWriter: Send + Sync + 'static {
+    /// Create a fresh `KafkaTopic` CR. Called by
+    /// `CreateTopicsHandler` (API key 19). `Ok(())` on success or
+    /// when the CR already exists (idempotent creates map to
+    /// `TOPIC_ALREADY_EXISTS` upstream — the caller decides which
+    /// error code to surface).
+    async fn create_topic(&self, name: &str, num_partitions: i32) -> Result<(), TopicWriteError>;
+
     /// Patch `KafkaTopic.spec.partitions` to `new_count`. The
     /// operator's reconciler validates the decrease guard; this
     /// helper also catches it client-side so the wire response is
@@ -193,6 +205,11 @@ pub struct NoopTopicCRWriter;
 
 #[async_trait]
 impl TopicCRWriter for NoopTopicCRWriter {
+    async fn create_topic(&self, _name: &str, _num_partitions: i32) -> Result<(), TopicWriteError> {
+        Err(TopicWriteError::Forbidden(
+            "broker is not running in cluster mode".into(),
+        ))
+    }
     async fn expand_topic(&self, _name: &str, _new_count: i32) -> Result<(), TopicWriteError> {
         Err(TopicWriteError::Forbidden(
             "broker is not running in cluster mode".into(),
@@ -252,6 +269,36 @@ mod kube_impl {
 
     #[async_trait::async_trait]
     impl TopicCRWriter for KubeTopicCRWriter {
+        async fn create_topic(
+            &self,
+            name: &str,
+            num_partitions: i32,
+        ) -> Result<(), TopicWriteError> {
+            use kube::api::PostParams;
+            use sk_operator_api::{KafkaTopicConfig, KafkaTopicSpec};
+
+            let cr = KafkaTopic {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(name.to_string()),
+                    namespace: Some(self.namespace.clone()),
+                    ..Default::default()
+                },
+                spec: KafkaTopicSpec {
+                    topic_name: String::new(),
+                    partitions: num_partitions,
+                    config: KafkaTopicConfig::default(),
+                },
+                status: None,
+            };
+            match self.api().create(&PostParams::default(), &cr).await {
+                Ok(_) => Ok(()),
+                Err(kube::Error::Api(e)) if e.code == 409 => {
+                    Err(TopicWriteError::AlreadyExists(name.into()))
+                }
+                Err(e) => Err(map_kube_err(e)),
+            }
+        }
+
         async fn expand_topic(&self, name: &str, new_count: i32) -> Result<(), TopicWriteError> {
             // Client-side decrease guard: read current, refuse if
             // shrinking. The operator-side reconciler enforces the

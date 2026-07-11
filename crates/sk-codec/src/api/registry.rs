@@ -57,6 +57,7 @@ pub const ALL: &[ApiSpec] = &[
     // Phase 7 admin surface (workstream D)
     crate::api::describe_configs::SPEC,
     crate::api::create_partitions::SPEC,
+    crate::api::create_topics::SPEC,
     crate::api::incremental_alter_configs::SPEC,
     crate::api::describe_client_quotas::SPEC,
     crate::api::alter_client_quotas::SPEC,

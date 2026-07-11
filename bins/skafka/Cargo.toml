@@ -20,7 +20,8 @@ bytes              = { workspace = true }
 rustls             = { workspace = true }
 rustls-pemfile     = { workspace = true }
 sk-auth            = { path = "../../crates/sk-auth" }
-sk-broker          = { path = "../../crates/sk-broker" }
+sk-broker          = { path = "../../crates/sk-broker", features = ["cr-writer"] }
+kube               = { workspace = true }
 sk-codec           = { path = "../../crates/sk-codec" }
 sk-controller      = { path = "../../crates/sk-controller" }
 sk-coordinator     = { path = "../../crates/sk-coordinator" }

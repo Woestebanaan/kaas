@@ -39,13 +39,14 @@ use sk_auth::{
 };
 use sk_broker::{
     AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
-    ApiVersionsHandler, Broker, Cli, CliTlsConfig, CreatePartitionsHandler, DeleteGroupsHandler,
-    DescribeClientQuotasHandler, DescribeConfigsHandler, DescribeGroupsHandler, EndTxnHandler,
-    FetchHandler, FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
-    InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
-    ListOffsetsHandler, ListenerEntry, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
-    OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
-    SyncGroupHandler, TopicRegistry, TxnOffsetCommitHandler, WriteTxnMarkersHandler,
+    ApiVersionsHandler, Broker, Cli, CliTlsConfig, CreatePartitionsHandler, CreateTopicsHandler,
+    DeleteGroupsHandler, DescribeClientQuotasHandler, DescribeConfigsHandler,
+    DescribeGroupsHandler, EndTxnHandler, FetchHandler, FindCoordinatorHandler, HeartbeatHandler,
+    IncrementalAlterConfigsHandler, InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler,
+    ListGroupsHandler, ListOffsetsHandler, ListenerEntry, MetadataHandler, OffsetCommitHandler,
+    OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler,
+    SaslHandshakeHandler, SyncGroupHandler, TopicRegistry, TxnOffsetCommitHandler,
+    WriteTxnMarkersHandler,
 };
 use sk_protocol::{Dispatcher, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
 use sk_storage::{DiskStorageEngine, MemoryStorage, PartitionConfig, RealFs, StorageEngine};
@@ -196,6 +197,25 @@ async fn main() -> Result<()> {
         auth.authorizer.clone(),
         auth.quotas.clone(),
     ));
+
+    // In cluster mode (MY_POD_NAME + SKAFKA_NAMESPACE set), wire the
+    // kube-backed TopicCRWriter so admin handlers (CreateTopics,
+    // CreatePartitions, IncrementalAlterConfigs) can patch KafkaTopic
+    // CRs. Dev-mode leaves cr_writer as None and those handlers
+    // return CLUSTER_AUTHORIZATION_FAILED.
+    if std::env::var("MY_POD_NAME").is_ok() {
+        let ns = std::env::var("SKAFKA_NAMESPACE").unwrap_or_else(|_| "default".into());
+        match kube::Client::try_default().await {
+            Ok(client) => {
+                let writer = sk_broker::topic_cr_writer::KubeTopicCRWriter::new(client, ns);
+                broker.install_cr_writer(Arc::new(writer));
+                info!("installed KubeTopicCRWriter for admin handlers");
+            }
+            Err(err) => {
+                warn!(%err, "kube client init failed; CreateTopics + admin handlers will refuse");
+            }
+        }
+    }
 
     let cancel = CancellationToken::new();
 
@@ -521,6 +541,7 @@ fn build_dispatcher(
         4,
         Arc::new(DescribeConfigsHandler::new(broker.clone())),
     );
+    d.register(19, 0, 7, Arc::new(CreateTopicsHandler::new(broker.clone())));
     d.register(
         37,
         0,
