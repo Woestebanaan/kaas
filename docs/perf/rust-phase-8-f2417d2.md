@@ -11,11 +11,20 @@ The bench-compare skill's producer pods can't complete against
 **either** broker on this NFS substrate, so no Strimzi ratio is
 computable — every row in the table renders `N/A`.
 
-Since Strimzi is the fixed external yardstick and it also failed in
-this run, this isn't a skafka regression against Strimzi — both are
-blocked on the same infrastructure state (NFS pool saturation +
-short 20-min job deadline). Rerun on a healthier NFS window or
-extend the Job `activeDeadlineSeconds`.
+**The NAS itself was healthy.** The failure was the Job's
+`activeDeadlineSeconds=1200` (20-min ceiling). RPC rates during the
+run were modest — 153 rpc/s + 7.13 MB/s TX for skafka, 158 rpc/s +
+5.93 MB/s TX for Strimzi. The NFS server at `192.168.1.50` served
+both PVCs throughout; both stayed `Bound`. What actually happened:
+the workload (100M × 1KB records × 5 pods) is far larger than what
+either broker + this NFS pair can push in 20 minutes at ~7 MB/s
+sustained — that's ~8 GB pushed vs ~500 GB target, so of course
+both timed out.
+
+Since Strimzi (the fixed external yardstick) also timed out under
+the same substrate + deadline, this isn't a skafka regression
+against Strimzi. Rerun with **either** a smaller record count or a
+longer `activeDeadlineSeconds` to get real ratio numbers.
 
 ## Raw NFS snapshots
 
@@ -50,9 +59,10 @@ Neither side completed its 100M-record producer script within the
 
 ## Follow-up
 
-* Rerun on a healthier NFS window (or bump the bench job's
-  `activeDeadlineSeconds` past the 20-min ceiling — 100M records at
-  ~150 rpc/s is not going to finish in 20 minutes on this substrate).
+* Rerun with either a smaller record count in the producer manifest
+  (100M → 10M would finish in under 20 min at 7 MB/s) or a longer
+  `activeDeadlineSeconds`. The NAS is healthy at these RPC rates;
+  it's the workload-vs-deadline arithmetic that fails.
 * Skafka broker-side blockers to running a MEANINGFUL bench were
   landed in Phase 8: single-broker deploy (chart replicaCount=1),
   live TopicSource for AssignmentLoop, FindCoordinator FQDN, and

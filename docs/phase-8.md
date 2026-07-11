@@ -1161,16 +1161,18 @@ Together those unblocked C and F. See the `k3s-cluster` repo's
   `6cb28ff`. Full `kafka-compat` port still pending.
 - **F — bench-compare Strimzi ratio.** Ran the `bench-compare`
   skill against the Rust broker + Strimzi pair on the shared NFS.
-  **Both sides DeadlineExceeded** (skafka 5/5 failed, strimzi 5/5
-  failed) — infrastructure-side, not a skafka regression against
-  Strimzi. The mid-run NFS snapshot showed skafka pushing 7.13 MB/s
-  vs Strimzi's 5.93 MB/s at similar RPC rates (~150 rpc/s), so
-  wire-level throughput is in the same order. Full report at
+  **Both sides hit the Job's `activeDeadlineSeconds=1200`** (20-min
+  ceiling; skafka 5/5 pods DeadlineExceeded, strimzi 5/5 too). The
+  NAS itself was healthy — mid-run snapshots showed modest RPC
+  rates (skafka 153 rpc/s + 7.13 MB/s TX; strimzi 158 rpc/s +
+  5.93 MB/s), and both PVCs stayed `Bound` throughout. The real
+  problem is workload arithmetic: 100M × 1KB × 5 pods at ~7 MB/s
+  sustained can't finish in 20 min. Full report at
   `docs/perf/rust-phase-8-<sha>.md`; the `sk/st` ratio column is
-  `N/A` because neither producer finished the 100M-record
-  script within the 20-min job deadline. Rerun on a healthier
-  NFS window (or bump `activeDeadlineSeconds`) for a real
-  Strimzi-ratio gate.
+  `N/A` for every row because neither producer finished. Rerun
+  with a smaller record count in the producer manifest or a
+  longer `activeDeadlineSeconds` for real Strimzi-ratio gate
+  numbers.
 
 ### Pending
 
@@ -1189,8 +1191,11 @@ Together those unblocked C and F. See the `k3s-cluster` repo's
   cluster's actual broker set + per-partition leader instead of
   `self` for everything. Tracked in `scripts/.parity-baseline.txt`
   as the primary FAIL bucket.
-- **F rerun with real ratio numbers.** Same skill invocation on a
-  healthier NFS + longer job deadline.
+- **F rerun with real ratio numbers.** Same skill invocation with
+  either a smaller record count in the producer manifest or a
+  longer `activeDeadlineSeconds`. The NAS is healthy at these
+  RPC rates — it's the workload-vs-deadline arithmetic that
+  fails on the current preset.
 
 ---
 
