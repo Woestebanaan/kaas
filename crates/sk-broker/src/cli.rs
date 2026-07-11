@@ -186,10 +186,21 @@ impl Cli {
     pub fn from_env() -> Result<Self, ConfigError> {
         let listeners_json =
             env::var("SKAFKA_LISTENERS").unwrap_or_else(|_| default_listeners().to_owned());
-        let listeners: Vec<ListenerEntry> =
+        let mut listeners: Vec<ListenerEntry> =
             serde_json::from_str(&listeners_json).map_err(ConfigError::Listeners)?;
         if listeners.is_empty() {
             return Err(ConfigError::NoListeners);
+        }
+        // Derive per-listener advertised_host from the StatefulSet
+        // env vars when the chart-shape JSON didn't include one.
+        // Without this Metadata responses fall back to 127.0.0.1
+        // and clients bootstrap onto the wrong endpoint.
+        if let Some(host) = derive_advertised_host() {
+            for l in listeners.iter_mut() {
+                if l.advertised_host.is_none() {
+                    l.advertised_host = Some(host.clone());
+                }
+            }
         }
 
         let data_dir = env::var("SKAFKA_DATA_DIR").ok().and_then(|s| {
@@ -258,6 +269,21 @@ fn parse_bool_env(name: &str) -> Option<bool> {
 
 fn default_listeners() -> &'static str {
     r#"[{"name":"internal","addr":"0.0.0.0:9092"}]"#
+}
+
+/// Build a StatefulSet-shaped FQDN
+/// `<MY_POD_NAME>.<SKAFKA_HEADLESS_SVC>.<SKAFKA_NAMESPACE>.svc.cluster.local`
+/// when all three env vars are set. Returns `None` in local-dev
+/// mode so listeners fall back to their bind IP.
+fn derive_advertised_host() -> Option<String> {
+    let pod = env::var("MY_POD_NAME").ok().filter(|s| !s.is_empty())?;
+    let svc = env::var("SKAFKA_HEADLESS_SVC")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let ns = env::var("SKAFKA_NAMESPACE")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    Some(format!("{pod}.{svc}.{ns}.svc.cluster.local"))
 }
 
 #[cfg(test)]
