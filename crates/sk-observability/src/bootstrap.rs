@@ -3,7 +3,10 @@
 //! Port of `archive/internal/observability/bootstrap.go`. Reads:
 //!
 //! * `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — if set, push metrics via
-//!   OTLP/gRPC (workspace defaults the tonic transport).
+//!   OTLP/HTTP (http/protobuf). Prometheus's native OTLP receiver
+//!   (`/api/v1/otlp/v1/metrics`) speaks only http/protobuf — the Go
+//!   side used `otlpmetrichttp` for the same reason; exporting gRPC
+//!   here just gets an h2 GoAway from Prometheus.
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT` — if set, push traces via OTLP/gRPC.
 //! * `SKAFKA_METRIC_EXPORT_INTERVAL` — Go-duration string (`30s` etc.).
 //!   Default `30s` per gh #133 (SDK default is 60s → `rate([1m])`
@@ -96,8 +99,8 @@ pub async fn bootstrap(
     if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") {
         if !endpoint.is_empty() {
             let raw = MetricExporter::builder()
-                .with_tonic()
-                .with_endpoint(strip_scheme(&endpoint))
+                .with_http()
+                .with_endpoint(ensure_scheme(&endpoint))
                 .with_timeout(Duration::from_secs(10))
                 .build()
                 .map_err(|e| ObservabilityError::MetricExporter(e.to_string()))?;
@@ -143,7 +146,7 @@ pub async fn bootstrap(
         if !endpoint.is_empty() {
             let exporter = SpanExporter::builder()
                 .with_tonic()
-                .with_endpoint(strip_scheme(&endpoint))
+                .with_endpoint(ensure_scheme(&endpoint))
                 .build()
                 .map_err(|e| ObservabilityError::TraceExporter(e.to_string()))?;
             let processor = BatchSpanProcessor::builder(exporter, runtime::Tokio).build();
@@ -253,15 +256,19 @@ fn split_num_unit(s: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Strip `http://` / `https://` / `grpc://` prefixes. Tonic wants
-/// `host:port`, not a URL.
-fn strip_scheme(s: &str) -> String {
-    for prefix in ["http://", "https://", "grpc://"] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            return rest.to_string();
-        }
+/// Ensure the endpoint carries a URI scheme. Unlike Go's
+/// `otlptracegrpc.WithEndpoint` (which wants bare `host:port`), the
+/// Rust exporters parse the endpoint as a full URI — a scheme-less
+/// `host:port` makes hyper read `host` as the scheme and the export
+/// dies with `InvalidUri`. Chart values written for the Go broker
+/// omit the scheme, so default them to `http://` (in-cluster,
+/// plaintext; `OTEL_EXPORTER_OTLP_INSECURE=true` deployments).
+fn ensure_scheme(s: &str) -> String {
+    if s.contains("://") {
+        s.replacen("grpc://", "http://", 1)
+    } else {
+        format!("http://{s}")
     }
-    s.to_string()
 }
 
 #[cfg(test)]
@@ -270,11 +277,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_scheme_variants() {
-        assert_eq!(strip_scheme("http://foo:4318"), "foo:4318");
-        assert_eq!(strip_scheme("https://foo:4318"), "foo:4318");
-        assert_eq!(strip_scheme("grpc://foo:4317"), "foo:4317");
-        assert_eq!(strip_scheme("foo:4317"), "foo:4317");
+    fn ensure_scheme_variants() {
+        assert_eq!(ensure_scheme("foo:4317"), "http://foo:4317");
+        assert_eq!(ensure_scheme("http://foo:4318"), "http://foo:4318");
+        assert_eq!(ensure_scheme("https://foo:4318"), "https://foo:4318");
+        assert_eq!(ensure_scheme("grpc://foo:4317"), "http://foo:4317");
+        assert_eq!(
+            ensure_scheme("http://prom:9090/api/v1/otlp/v1/metrics"),
+            "http://prom:9090/api/v1/otlp/v1/metrics"
+        );
     }
 
     #[test]
