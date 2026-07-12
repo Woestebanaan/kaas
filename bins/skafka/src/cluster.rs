@@ -238,6 +238,17 @@ pub fn install(
                 tasks.push(handle);
             }
 
+            // Feed the Phase-10 observable gauges (is_controller,
+            // assignment_version, broker counts, per-partition
+            // leader/epoch/HWM) from the live runtime. Without this
+            // the gauges registered at bootstrap report zero forever
+            // and the Grafana headline panels flatline.
+            sk_observability::set_gauge_source(Some(Box::new(RuntimeGaugeSource {
+                coordinator: coordinator.clone(),
+                engine: engine.clone(),
+                is_controller: true,
+            })));
+
             Some(coordinator)
         }
     };
@@ -449,6 +460,85 @@ fn topic_specs_from_registry(topics: &TopicRegistry) -> Vec<sk_controller::Topic
             partition_count: m.partition_count,
         })
         .collect()
+}
+
+/// Adapts the live cluster runtime to [`sk_observability::GaugeSource`]
+/// so the Phase-10 observable gauges sample real values on every
+/// export. Port of `archive/cmd/skafka/cluster_runtime.go`'s
+/// `runtimeGaugeSource`.
+struct RuntimeGaugeSource {
+    coordinator: Arc<Coordinator>,
+    engine: Arc<dyn StorageEngine>,
+    /// Static `true` today: single-broker mode runs `LocalElection`,
+    /// which always wins. The kube-Lease election (follow-up #10 /
+    /// workstream E) turns this into a live Lease-holder lookup.
+    is_controller: bool,
+}
+
+impl sk_observability::GaugeSource for RuntimeGaugeSource {
+    fn is_controller(&self) -> i64 {
+        i64::from(self.is_controller)
+    }
+
+    fn assignment_version(&self) -> i64 {
+        self.coordinator
+            .snapshot()
+            .map_or(0, |a| a.assignment_version)
+    }
+
+    fn broker_count_alive(&self) -> i64 {
+        self.coordinator.snapshot().map_or(0, |a| {
+            let alive = a
+                .brokers
+                .iter()
+                .filter(|b| matches!(b.health, sk_broker::BrokerHealth::Alive))
+                .count();
+            i64::try_from(alive).unwrap_or(i64::MAX)
+        })
+    }
+
+    fn broker_count_assigned(&self) -> i64 {
+        self.coordinator.snapshot().map_or(0, |a| {
+            let seen: std::collections::HashSet<&str> =
+                a.partitions.iter().map(|p| p.broker.as_str()).collect();
+            i64::try_from(seen.len()).unwrap_or(i64::MAX)
+        })
+    }
+
+    fn assignment_file_size_bytes(&self) -> i64 {
+        let path = sk_broker::Assignment::path_in(self.coordinator.data_dir());
+        std::fs::metadata(path).map_or(0, |m| i64::try_from(m.len()).unwrap_or(i64::MAX))
+    }
+
+    fn partitions(&self) -> Vec<sk_observability::PartitionGauge> {
+        let Some(snap) = self.coordinator.snapshot() else {
+            return Vec::new();
+        };
+        let self_id = self.coordinator.self_id();
+        snap.partitions
+            .iter()
+            .map(|p| {
+                // HWM is only meaningful on the leader; a non-leader
+                // read would fail or return a stale value.
+                let high_watermark = if p.broker == self_id {
+                    self.engine
+                        .high_watermark(&p.topic, p.partition)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                sk_observability::PartitionGauge {
+                    topic: p.topic.clone(),
+                    partition: p.partition,
+                    // -1 on a malformed id so the gauge flags the bug
+                    // instead of silently mapping to broker 0.
+                    leader_id: sk_k8s::parse_ordinal(&p.broker).map_or(-1, i64::from),
+                    epoch: i64::from(p.epoch),
+                    high_watermark,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Wire the `TopicRegistry` behind `TopicSource` so the assignment
