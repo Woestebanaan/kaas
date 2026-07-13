@@ -700,6 +700,11 @@ impl sk_broker::ClusterBrokerView for RegistryBrokerView {
 struct ClusterBrokerSource {
     registry: Arc<BrokerRegistry>,
     heart: Arc<HeartbeatServer>,
+    /// The elected controller itself — always alive by definition
+    /// (it holds the Lease). Guarantees the source can never yield
+    /// an empty (or self-less) set, so no assignment ever unassigns
+    /// the whole cluster because of a probe blip or slice hiccup.
+    self_id: String,
 }
 
 impl sk_controller::BrokerSource for ClusterBrokerSource {
@@ -713,19 +718,24 @@ impl sk_controller::BrokerSource for ClusterBrokerSource {
             .collect();
         let connected: std::collections::HashSet<String> =
             self.heart.connected_brokers().into_iter().collect();
-        if connected.is_empty() {
-            return registered;
-        }
-        let both: Vec<String> = registered
-            .iter()
-            .filter(|id| connected.contains(*id))
-            .cloned()
-            .collect();
-        if both.is_empty() {
+        let mut alive = if connected.is_empty() {
             registered
         } else {
-            both
+            let both: Vec<String> = registered
+                .iter()
+                .filter(|id| connected.contains(*id))
+                .cloned()
+                .collect();
+            if both.is_empty() {
+                registered
+            } else {
+                both
+            }
+        };
+        if !alive.iter().any(|id| *id == self.self_id) {
+            alive.push(self.self_id.clone());
         }
+        alive
     }
 }
 
@@ -1052,6 +1062,7 @@ pub(crate) async fn run_controller(
     let broker_src = Arc::new(ClusterBrokerSource {
         registry: registry.clone(),
         heart: heart_srv.clone(),
+        self_id: self_id.clone(),
     });
     let loop_handle = AssignmentLoop::new(dir, self_id, live_topics, broker_src.clone())
         .with_group_source(heart_srv.clone());

@@ -297,6 +297,14 @@ spec:
               port: health
             periodSeconds: 5
             initialDelaySeconds: 5
+            # The health server shares the main runtime with NFS
+            # group-commit I/O; the default 1 s / 3-strike probe
+            # marked busy-but-healthy brokers unready under produce
+            # load, and unready EndpointSlice entries feed the
+            # controller's alive set. Tolerate ~30 s of sluggishness
+            # before pulling a broker out of rotation.
+            timeoutSeconds: 4
+            failureThreshold: 6
           {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
           volumeMounts:
             - name: data

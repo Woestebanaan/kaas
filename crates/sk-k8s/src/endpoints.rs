@@ -137,7 +137,12 @@ impl BrokerRegistry {
 
     /// Apply an `Added` / `Modified` `EndpointSlice` event. Ready
     /// entries land in the map keyed on their ordinal (extracted
-    /// from `hostname`); not-ready entries are removed.
+    /// from `hostname`); not-ready entries are removed — except
+    /// SELF, which is pinned: a readiness-probe blip on this pod
+    /// must not make it forget its own existence. (Observed live:
+    /// self-eviction → controller balanced over an empty set →
+    /// unassigned all partitions → the takeover storm failed the
+    /// next probe too — a self-sustaining death spiral.)
     pub fn apply_slice(&self, slice: &EndpointSliceData) {
         let port = slice.kafka_port.unwrap_or(self.self_endpoint.port);
         {
@@ -147,7 +152,9 @@ impl BrokerRegistry {
                     continue;
                 };
                 if !ep.ready {
-                    inner.brokers.remove(&ordinal);
+                    if ordinal != self.self_endpoint.node_id {
+                        inner.brokers.remove(&ordinal);
+                    }
                     continue;
                 }
                 // gh #128: advertise the headless-DNS FQDN when
@@ -181,7 +188,10 @@ impl BrokerRegistry {
             let mut inner = self.inner.write();
             for ep in &slice.entries {
                 if let Some(ordinal) = parse_ordinal(&ep.hostname) {
-                    inner.brokers.remove(&ordinal);
+                    // Same self-pin as apply_slice.
+                    if ordinal != self.self_endpoint.node_id {
+                        inner.brokers.remove(&ordinal);
+                    }
                 }
             }
         }
