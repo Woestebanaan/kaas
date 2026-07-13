@@ -172,6 +172,16 @@ impl HeartbeatServer {
     }
 }
 
+/// The heartbeat server IS the controller's live group catalog —
+/// every broker reports its `active_groups` upstream, so the union
+/// feeds `BalanceGroups` directly (mirrors Go's
+/// `WithGroupSource(heartSrv)`).
+impl crate::assignment_writer::GroupSource for HeartbeatServer {
+    fn active_groups(&self) -> Vec<String> {
+        Self::active_groups(self)
+    }
+}
+
 /// tonic-facing wrapper around an `Arc<HeartbeatServer>`. The
 /// orphan rule blocks `impl ControllerHeartbeat for Arc<T>` since
 /// both sides live outside this crate; this newtype keeps the

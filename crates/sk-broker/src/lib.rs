@@ -29,7 +29,7 @@ pub use assignment::{
     Assignment, AssignmentChangeHandler, BrokerAssignment, BrokerHealth, ConsumerGroupAssignment,
     PartitionAssignment, PartitionRole,
 };
-pub use broker::Broker;
+pub use broker::{Broker, BrokerNode, ClusterBrokerView};
 pub use cli::{Cli, ListenerEntry, TlsConfig as CliTlsConfig};
 pub use control_batch::build_control_batch;
 pub use coordinator::{

@@ -24,6 +24,23 @@ use crate::coordinator::Coordinator;
 use crate::local_lease::LocalLeaseManager;
 use crate::topic_registry::TopicRegistry;
 
+/// One row of the live cluster broker catalog served by Metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerNode {
+    pub node_id: i32,
+    /// Stable per-broker DNS name (StatefulSet FQDN in cluster mode).
+    pub host: String,
+    pub port: i32,
+}
+
+/// Live cluster broker catalog for the Metadata response — backed
+/// by the EndpointSlice registry in cluster mode. Defined here (not
+/// sk-k8s) because the dependency arrow points sk-k8s → sk-broker;
+/// the broker binary supplies the registry-backed impl.
+pub trait ClusterBrokerView: Send + Sync {
+    fn brokers(&self) -> Vec<BrokerNode>;
+}
+
 pub struct Broker {
     pub engine: Arc<dyn StorageEngine>,
     pub topics: Arc<TopicRegistry>,
@@ -89,6 +106,9 @@ pub struct Broker {
     /// real quota enforcer (`auth.enabled=false`); the admin
     /// handlers then surface `UNSUPPORTED_VERSION` (35).
     quota_enforcer: RwLock<Option<Arc<QuotaEnforcer>>>,
+    /// Live broker catalog for Metadata (cluster mode only). `None`
+    /// keeps the single-broker "self is the whole cluster" shape.
+    broker_view: RwLock<Option<Arc<dyn ClusterBrokerView>>>,
     producer_id_counter: AtomicI64,
 }
 
@@ -152,10 +172,23 @@ impl Broker {
             marker_queue: RwLock::new(None),
             cr_writer: RwLock::new(None),
             quota_enforcer: RwLock::new(None),
+            broker_view: RwLock::new(None),
             // Start at 1 so 0 stays available as an "unset" sentinel
             // for clients that read uninitialised pid.
             producer_id_counter: AtomicI64::new(1),
         }
+    }
+
+    /// Install the live broker catalog (cluster mode). Metadata then
+    /// advertises the whole broker set instead of self-only.
+    pub fn install_broker_view(&self, v: Arc<dyn ClusterBrokerView>) {
+        *self.broker_view.write() = Some(v);
+    }
+
+    /// Read the installed broker catalog. `None` in dev/single-broker
+    /// mode — Metadata falls back to advertising self only.
+    pub fn broker_view(&self) -> Option<Arc<dyn ClusterBrokerView>> {
+        self.broker_view.read().clone()
     }
 
     /// Hand out the next non-transactional producer id. Monotonic,

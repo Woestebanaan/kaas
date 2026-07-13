@@ -113,6 +113,17 @@ impl ProduceHandler {
             if !c.owns(topic, p.index) {
                 return error_partition_bumped(topic, p.index, ERR_NOT_LEADER_FOR_PARTITION);
             }
+            // gh #62 self-fence: a broker cut off from the controller
+            // stops acking within 3 s even when its assignment.json
+            // view is stale — the bound on how long a partitioned
+            // ex-leader keeps accepting writes. No-op unless the
+            // cluster runtime armed it (enable_self_fence).
+            if !c.heartbeat_fresh_for_writes() {
+                let m = sk_observability::metrics::global();
+                m.heartbeat_misses.add(1, &[]);
+                m.self_fence_events.add(1, &[]);
+                return error_partition_bumped(topic, p.index, ERR_NOT_LEADER_FOR_PARTITION);
+            }
         }
 
         // Cluster-wide ACL check (gh #126). Topic-level Write is the

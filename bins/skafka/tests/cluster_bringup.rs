@@ -56,6 +56,9 @@ async fn single_broker_disk_mode_wires_coordinator_end_to_end() {
         0,
         "test-cluster",
         cancel.clone(),
+        None,
+        9092,
+        std::sync::Arc::new(cluster::TopicChangeNotifier::default()),
     )
     .expect("install ok");
 
@@ -120,6 +123,9 @@ async fn in_memory_mode_installs_manager_but_no_coordinator() {
         0,
         "dev",
         cancel.clone(),
+        None,
+        9092,
+        std::sync::Arc::new(cluster::TopicChangeNotifier::default()),
     )
     .expect("install ok");
 

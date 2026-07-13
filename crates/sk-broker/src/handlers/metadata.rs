@@ -63,6 +63,22 @@ impl MetadataHandler {
     }
 }
 
+fn self_broker_row(node_id: i32, advert: &ListenerAdvert) -> metadata::Broker {
+    metadata::Broker {
+        node_id,
+        host: advert.host.clone(),
+        port: advert.port,
+        rack: None,
+    }
+}
+
+/// `"skafka-2"` → `2`. Broker identity strings carry the ordinal as
+/// the trailing hyphen segment (StatefulSet pod-name shape); a
+/// malformed id yields `None` and the caller falls back to self.
+fn trailing_ordinal(id: &str) -> Option<i32> {
+    id.rsplit('-').next()?.parse().ok()
+}
+
 fn advert_from(entry: &ListenerEntry) -> ListenerAdvert {
     // Best-effort parse: bad addrs (which shouldn't occur — `Cli`
     // validates earlier) degrade to localhost:9092 so the Metadata
@@ -100,12 +116,47 @@ impl Handler for MetadataHandler {
         let listener_name = conn.lock().listener_name.clone();
         let advert = self.advert_for(&listener_name);
 
-        let brokers = vec![metadata::Broker {
-            node_id: self.broker.broker_id,
-            host: advert.host,
-            port: advert.port,
-            rack: None,
-        }];
+        // Cluster mode: advertise the live broker set. Peers run the
+        // same chart, so each peer is advertised at its stable FQDN
+        // with the port of the listener this client connected on
+        // (gh #125 symmetry). Self keeps the listener's own
+        // advertised host so external hostname templates still win.
+        // (External per-broker hostname templates for peers are a
+        // follow-up — the external listener ships disabled.)
+        let brokers = match self.broker.broker_view() {
+            Some(view) => {
+                let mut v: Vec<metadata::Broker> = view
+                    .brokers()
+                    .into_iter()
+                    .map(|b| metadata::Broker {
+                        node_id: b.node_id,
+                        host: if b.node_id == self.broker.broker_id {
+                            advert.host.clone()
+                        } else {
+                            b.host
+                        },
+                        port: advert.port,
+                        rack: None,
+                    })
+                    .collect();
+                if v.is_empty() {
+                    v.push(self_broker_row(self.broker.broker_id, &advert));
+                }
+                v
+            }
+            None => vec![self_broker_row(self.broker.broker_id, &advert)],
+        };
+
+        // Per-partition leader from the applied assignment; self
+        // when no coordinator is wired (dev) or the partition is
+        // missing from the assignment (fresh topic, next recompute
+        // pending).
+        let coord = self.broker.coordinator();
+        let controller_id = coord
+            .as_ref()
+            .and_then(|c| c.snapshot())
+            .and_then(|a| trailing_ordinal(&a.controller))
+            .unwrap_or(self.broker.broker_id);
 
         // If the request topic list is empty, return every known topic
         // (Apache: an empty list means "all topics"). If non-empty,
@@ -129,13 +180,18 @@ impl Handler for MetadataHandler {
                     let mut partitions =
                         Vec::with_capacity(usize::try_from(meta.partition_count).unwrap_or(0));
                     for i in 0..meta.partition_count {
+                        let leader_id = coord
+                            .as_ref()
+                            .and_then(|c| c.leader_for(&name, i))
+                            .and_then(|owner| trailing_ordinal(&owner))
+                            .unwrap_or(self.broker.broker_id);
                         partitions.push(metadata::Partition {
                             error_code: 0,
                             partition_index: i,
-                            leader_id: self.broker.broker_id,
+                            leader_id,
                             leader_epoch: 0,
-                            replica_nodes: vec![self.broker.broker_id],
-                            isr_nodes: vec![self.broker.broker_id],
+                            replica_nodes: vec![leader_id],
+                            isr_nodes: vec![leader_id],
                             offline_replicas: Vec::new(),
                         });
                     }
@@ -163,7 +219,7 @@ impl Handler for MetadataHandler {
             throttle_time_ms: 0,
             brokers,
             cluster_id: Some(self.broker.cluster_id.clone()),
-            controller_id: self.broker.broker_id,
+            controller_id,
             topics,
             cluster_authorized_operations: 0,
         };

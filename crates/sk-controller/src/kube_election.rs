@@ -38,7 +38,8 @@ use k8s_openapi::api::coordination::v1::Lease;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::Client;
-use tracing::{debug, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use crate::election::LeaseElection;
 
@@ -147,8 +148,12 @@ impl KubeLeaseElection {
             .as_ref()
             .map(|MicroTime(t)| now.signed_duration_since(*t).to_std().unwrap_or_default());
         let lease_is_stale = last_renew_age.map(|age| age > lease_window).unwrap_or(true);
+        // An empty holder means the previous controller released on
+        // shutdown (client-go ReleaseOnCancel semantics) — free to
+        // take without waiting out the lease window.
+        let released = current_holder.as_deref().is_none_or(str::is_empty);
 
-        if !we_already_hold && !lease_is_stale {
+        if !we_already_hold && !lease_is_stale && !released {
             debug!(
                 holder = current_holder.as_deref().unwrap_or("<none>"),
                 "lease still held by another controller; retrying"
@@ -203,6 +208,123 @@ impl KubeLeaseElection {
             api.create(&PostParams::default(), &lease).await?;
         }
         Ok(Some(i64::from(new_transitions)))
+    }
+
+    /// Refresh `renewTime` if we still hold the Lease. `Ok(true)` =
+    /// renewed; `Ok(false)` = lost (holder changed or Lease gone);
+    /// `Err` = transient API failure (caller decides when to give
+    /// up via `renew_deadline`).
+    async fn try_renew(&self) -> kube::Result<bool> {
+        let api = self.api();
+        let Some(lease) = api.get_opt(&self.lease_name).await? else {
+            return Ok(false);
+        };
+        let spec = lease.spec.unwrap_or_default();
+        if spec.holder_identity.as_deref() != Some(self.identity.as_str()) {
+            return Ok(false);
+        }
+        let transitions = spec.lease_transitions.unwrap_or(0);
+        let duration_secs = i32::try_from(self.lease_duration.as_secs()).unwrap_or(i32::MAX);
+        let patch = serde_json::json!({
+            "apiVersion": "coordination.k8s.io/v1",
+            "kind": "Lease",
+            "metadata": { "name": self.lease_name, "namespace": self.namespace },
+            "spec": {
+                "holderIdentity": self.identity,
+                "leaseDurationSeconds": duration_secs,
+                "renewTime": Self::now_rfc3339(),
+                "leaseTransitions": transitions,
+            }
+        });
+        api.patch(
+            &self.lease_name,
+            &PatchParams::apply("skafka").force(),
+            &Patch::Apply(&patch),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    /// Best-effort release on shutdown: blank `holderIdentity` so
+    /// the next candidate doesn't wait out the full lease window
+    /// (client-go's ReleaseOnCancel). Errors are logged and
+    /// swallowed — the lease going stale is the fallback.
+    async fn release(&self) {
+        let patch = serde_json::json!({
+            "apiVersion": "coordination.k8s.io/v1",
+            "kind": "Lease",
+            "metadata": { "name": self.lease_name, "namespace": self.namespace },
+            "spec": {
+                "holderIdentity": "",
+                "renewTime": Self::now_rfc3339(),
+            }
+        });
+        if let Err(err) = self
+            .api()
+            .patch(
+                &self.lease_name,
+                &PatchParams::apply("skafka").force(),
+                &Patch::Apply(&patch),
+            )
+            .await
+        {
+            warn!(%err, "lease election: release failed (lease will expire naturally)");
+        }
+    }
+
+    /// Long-running election driver: acquire → `on_acquired(epoch,
+    /// leader_token)` → renew every `retry_period` → on loss cancel
+    /// `leader_token` and re-enter candidacy. Returns only when
+    /// `cancel` fires (best-effort releasing the Lease if held).
+    ///
+    /// This is the Rust stand-in for client-go's `leaderelection`
+    /// callbacks the Go side got for free: `on_acquired` ≙
+    /// `OnStartedLeading` (spawn controller tasks bound to the
+    /// token), token cancellation ≙ `OnStoppedLeading`.
+    pub async fn campaign<F>(self: Arc<Self>, cancel: CancellationToken, on_acquired: F)
+    where
+        F: Fn(i64, CancellationToken) + Send + Sync,
+    {
+        loop {
+            let epoch = tokio::select! {
+                () = cancel.cancelled() => return,
+                epoch = self.acquire() => epoch,
+            };
+            info!(epoch, identity = %self.identity, "controller lease acquired");
+            let leader_token = cancel.child_token();
+            on_acquired(epoch, leader_token.clone());
+
+            // Leadership: renew until loss or shutdown. Transient
+            // API errors are tolerated until `renew_deadline` of
+            // continuous failure — mirrors client-go semantics.
+            let mut first_err_at: Option<std::time::Instant> = None;
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        leader_token.cancel();
+                        self.release().await;
+                        return;
+                    }
+                    () = tokio::time::sleep(self.retry_period) => {}
+                }
+                match self.try_renew().await {
+                    Ok(true) => first_err_at = None,
+                    Ok(false) => {
+                        warn!(identity = %self.identity, "controller lease lost to another holder");
+                        break;
+                    }
+                    Err(err) => {
+                        let since = *first_err_at.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() > self.renew_deadline {
+                            warn!(%err, "controller lease renew failed past renew_deadline; abdicating");
+                            break;
+                        }
+                        warn!(%err, "controller lease renew failed; retrying");
+                    }
+                }
+            }
+            leader_token.cancel();
+        }
     }
 }
 

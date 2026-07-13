@@ -16,34 +16,48 @@
 //!   a self-only `assignment.json` every recompute; the Coordinator
 //!   watcher picks it up and stamps ownership. Manager
 //!   hot-swaps to the Coordinator-backed source via gh #92.
-//! - **Cluster** (`MY_POD_NAME` set) — same as single-broker disk
-//!   from a wiring perspective, but the kube-bound bits
-//!   (`ControllerWatch`, `LeaseElection`, peer `BrokerRegistry`,
-//!   `TopicWatcher`) come online with follow-up #10. Today the
-//!   binary boots successfully but degrades to LocalLeaseEpoch /
-//!   LocalHeartbeat / a single-broker assignment until those
-//!   wires land.
+//! - **Cluster** (`MY_POD_NAME` set + kube client + disk) — the
+//!   full multi-broker runtime: `KubeLeaseEpoch` (1 s Lease poll →
+//!   stale-epoch fence), `BrokerRegistry` (EndpointSlice watch),
+//!   `HeartbeatClient` (bidi stream to the Lease holder, feeds the
+//!   gh #62 produce self-fence), and a `KubeLeaseElection` campaign
+//!   that runs the controller stack (heartbeat gRPC server +
+//!   `AssignmentLoop` + broker-set watcher + topic-change trigger)
+//!   only while this broker holds the `skafka-controller` Lease.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
+use sk_broker::coordinator::{HeartbeatSource, LeaseEpochSource};
+use sk_broker::heartbeatpb::controller_heartbeat_server::ControllerHeartbeatServer;
+use sk_broker::heartbeatpb::BrokerStatus;
 use sk_broker::{
     build_control_batch, ApplyOutcome, Broker, Coordinator, FenceWatcher, GroupTakeoverDriver,
-    LocalHeartbeat, LocalLeaseEpoch, MarkerApplier, MarkerWatcher, ProducerEpochFencer,
-    TakeoverDriver,
+    HeartbeatClient, LocalHeartbeat, LocalLeaseEpoch, MarkerApplier, MarkerWatcher,
+    ProducerEpochFencer, TakeoverDriver, TargetResolver,
 };
-use sk_controller::{AssignmentLoop, AssignmentReason, LocalElection, StaticSources};
+use sk_controller::{
+    AssignmentLoop, AssignmentReason, BrokerSource, HeartbeatServer, HeartbeatService,
+    KubeLeaseElection, LocalElection, StaticSources,
+};
 use sk_coordinator::{
     fence_log_dir, BrokerEndpoint, BrokerLookup, FenceLog, FnLookup, LocalGroupSource,
     LocalTxnSource, Manager, MarkerEntry, MarkerQueue, OffsetStore, TxnOffsetHook, TxnStateStore,
 };
+use sk_k8s::kube_watchers::{run_endpoint_watch, run_lease_watch, KubeLeaseEpoch};
+use sk_k8s::{BrokerIdentity, BrokerRegistry};
 use sk_storage::StorageEngine;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use sk_broker::TopicRegistry;
+
+/// Name of the singleton controller Lease — same object the Go
+/// broker elects on, so a mixed-flavor rollout can't split-brain.
+const CONTROLLER_LEASE_NAME: &str = "skafka-controller";
 
 /// Cadence of the txn-timeout reaper. Matches Apache Kafka's
 /// `transaction.abort.timed.out.transaction.cleanup.interval.ms`
@@ -81,6 +95,7 @@ pub struct ClusterRuntime {
 /// Build the consumer-group + offsets Manager and (when a data dir
 /// is configured) the Coordinator + AssignmentLoop. Installs both
 /// on the [`Broker`] so handlers can read them.
+#[allow(clippy::too_many_arguments)]
 pub fn install(
     broker: Arc<Broker>,
     topics: Arc<TopicRegistry>,
@@ -89,14 +104,43 @@ pub fn install(
     broker_id: i32,
     cluster_id: &str,
     cancel: CancellationToken,
+    kube: Option<kube::Client>,
+    client_port: i32,
+    topic_notify: Arc<TopicChangeNotifier>,
 ) -> Result<ClusterRuntime> {
     let self_id = format!("skafka-{broker_id}");
+
+    // Kube-backed multi-broker wiring (election, endpoint registry,
+    // heartbeats) exists only when the pod identity, a kube client,
+    // AND disk storage are all present. Prepared before the Manager
+    // so FindCoordinator's BrokerLookup can resolve peer brokers.
+    let wiring = match (&kube, &data_dir) {
+        (Some(client), Some(_)) if in_cluster_pod() => Some(prepare_cluster_wiring(
+            client.clone(),
+            &self_id,
+            client_port,
+        )?),
+        _ => None,
+    };
+
     let offset_dir = data_dir
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/skafka-offsets-mem"));
 
     let offsets = Arc::new(OffsetStore::new(&offset_dir));
-    let lookup: Arc<dyn BrokerLookup> = self_endpoint_lookup(&self_id, /* port */ 9092);
+    let lookup: Arc<dyn BrokerLookup> = match &wiring {
+        Some(w) => registry_lookup(w.registry.clone()),
+        None => self_endpoint_lookup(&self_id, client_port),
+    };
+
+    // Cluster mode: Metadata advertises the live broker set instead
+    // of self-only, so clients route produce/fetch to actual
+    // partition leaders.
+    if let Some(w) = &wiring {
+        broker.install_broker_view(Arc::new(RegistryBrokerView {
+            registry: w.registry.clone(),
+        }));
+    }
     let manager = Manager::new(
         self_id.clone(),
         offsets,
@@ -190,15 +234,20 @@ pub fn install(
         }
         Some(dir) => {
             // Coordinator watches <data_dir>/__cluster/assignment.json
-            // via a 1 s poll. LocalLeaseEpoch / LocalHeartbeat keep
-            // the kube-bound seams stubbed; follow-up #10 swaps in
-            // ControllerWatch + HeartbeatClient.
-            let coordinator = Coordinator::new(
-                self_id.clone(),
-                dir.clone(),
-                Arc::new(LocalLeaseEpoch),
-                Arc::new(LocalHeartbeat),
-            );
+            // via a 1 s poll. Cluster mode wires the kube-backed
+            // seams (Lease-poll epoch fence + heartbeat freshness);
+            // dev disk mode keeps the Local stubs.
+            let (lease_src, heart_src): (Arc<dyn LeaseEpochSource>, Arc<dyn HeartbeatSource>) =
+                match &wiring {
+                    Some(w) => (w.lease_epoch.clone(), w.heart.clone()),
+                    None => (Arc::new(LocalLeaseEpoch), Arc::new(LocalHeartbeat)),
+                };
+            let coordinator = Coordinator::new(self_id.clone(), dir.clone(), lease_src, heart_src);
+            if wiring.is_some() {
+                // Real heartbeat stream wired → arm the gh #62
+                // produce-path self-fence (3 s staleness bound).
+                coordinator.enable_self_fence();
+            }
             broker.install_coordinator(coordinator.clone());
 
             // Hot-swap the Manager's group + txn sources to the
@@ -222,20 +271,36 @@ pub fn install(
                 "Coordinator + takeover drivers wired"
             );
 
-            // Single-broker AssignmentLoop drives the
-            // assignment.json the Coordinator watches. Multi-broker
-            // mode wires this to the elected controller broker only
-            // (follow-up #10); for Phase 5 every broker writes its
-            // own assignment.json under its data_dir, which is fine
-            // because each broker only reads its own (the chart's
-            // shared PVC layout is workstream H).
-            if let Some(handle) = spawn_single_broker_assignment_loop(
-                dir.clone(),
-                self_id.clone(),
-                topics.clone(),
-                cancel.clone(),
-            )? {
-                tasks.push(handle);
+            // Controller-side assignment writing. Cluster mode: the
+            // Lease election decides which broker runs the
+            // AssignmentLoop (spawn_cluster_tasks); every other
+            // broker just watches the shared assignment.json. Dev
+            // disk mode: this broker is trivially the controller of
+            // its private data_dir — run the single-broker loop.
+            let is_controller = Arc::new(AtomicBool::new(wiring.is_none()));
+            match wiring {
+                Some(w) => spawn_cluster_tasks(
+                    w,
+                    dir.clone(),
+                    self_id.clone(),
+                    topics.clone(),
+                    manager.clone(),
+                    coordinator.clone(),
+                    is_controller.clone(),
+                    topic_notify.clone(),
+                    cancel.clone(),
+                    &mut tasks,
+                ),
+                None => {
+                    if let Some(handle) = spawn_single_broker_assignment_loop(
+                        dir.clone(),
+                        self_id.clone(),
+                        topics.clone(),
+                        cancel.clone(),
+                    )? {
+                        tasks.push(handle);
+                    }
+                }
             }
 
             // Feed the Phase-10 observable gauges (is_controller,
@@ -246,7 +311,7 @@ pub fn install(
             sk_observability::set_gauge_source(Some(Box::new(RuntimeGaugeSource {
                 coordinator: coordinator.clone(),
                 engine: engine.clone(),
-                is_controller: true,
+                is_controller,
             })));
 
             Some(coordinator)
@@ -462,6 +527,498 @@ fn topic_specs_from_registry(topics: &TopicRegistry) -> Vec<sk_controller::Topic
         .collect()
 }
 
+/// `true` when this process runs as a StatefulSet pod (the chart
+/// always sets `MY_POD_NAME` via the downward API).
+fn in_cluster_pod() -> bool {
+    std::env::var("MY_POD_NAME").is_ok_and(|v| !v.is_empty())
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_owned())
+}
+
+fn env_secs(key: &str, default: u64) -> Duration {
+    Duration::from_secs(
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(default),
+    )
+}
+
+/// Everything the multi-broker runtime needs that only exists in a
+/// real cluster: pod identity, peer registry, Lease epoch source,
+/// and the heartbeat client. Built once at `install` time; consumed
+/// by [`spawn_cluster_tasks`].
+struct ClusterWiring {
+    client: kube::Client,
+    identity: BrokerIdentity,
+    registry: Arc<BrokerRegistry>,
+    lease_epoch: Arc<KubeLeaseEpoch>,
+    heart: Arc<HeartbeatClient>,
+    heartbeat_bind: String,
+    lease_timings: (Duration, Duration, Duration),
+}
+
+fn prepare_cluster_wiring(
+    client: kube::Client,
+    self_id: &str,
+    client_port: i32,
+) -> Result<ClusterWiring> {
+    let identity = BrokerIdentity::from_env("", "", client_port)
+        .map_err(|e| anyhow::anyhow!("cluster mode: broker identity: {e}"))?;
+    let self_ep = sk_k8s::BrokerEndpoint {
+        node_id: identity.ordinal,
+        host: identity.host.clone(),
+        port: client_port,
+        ready: true,
+    };
+    let registry = Arc::new(BrokerRegistry::new(self_ep, identity.dns.clone()));
+    let lease_epoch = Arc::new(KubeLeaseEpoch::new());
+
+    // Heartbeat client follows the Lease holder: resolver re-runs at
+    // the start of every reconnect cycle, so controller failover =
+    // one reconnect (Go: cluster_runtime.go's WithTargetFunc).
+    let hb_port = env_or("SKAFKA_PEER_HEARTBEAT_PORT", "9094")
+        .parse::<i32>()
+        .unwrap_or(9094);
+    let resolver: TargetResolver = Arc::new({
+        let lease_epoch = lease_epoch.clone();
+        let registry = registry.clone();
+        let dns = identity.dns.clone();
+        move || {
+            let holder = lease_epoch.current_holder().filter(|h| !h.is_empty())?;
+            let ord = sk_k8s::parse_ordinal(&holder)?;
+            let host = registry
+                .all()
+                .into_iter()
+                .find(|b| b.node_id == ord)
+                .map_or_else(|| dns.fqdn(ord), |b| b.host);
+            Some(format!("{host}:{hb_port}"))
+        }
+    });
+    let heart = HeartbeatClient::new(self_id).with_target_fn(resolver);
+
+    Ok(ClusterWiring {
+        client,
+        identity,
+        registry,
+        lease_epoch,
+        heart,
+        heartbeat_bind: env_or("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094"),
+        lease_timings: (
+            env_secs("SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS", 15),
+            env_secs("SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS", 10),
+            env_secs("SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS", 2),
+        ),
+    })
+}
+
+/// FindCoordinator's peer resolution: broker-id string → live
+/// endpoint from the EndpointSlice registry. Replaces the self-only
+/// lookup so a client asking any broker for coordinator-of-G gets
+/// routed to the actual owner.
+fn registry_lookup(registry: Arc<BrokerRegistry>) -> Arc<dyn BrokerLookup> {
+    Arc::new(FnLookup::new(move |broker_id: &str| {
+        let ord = sk_k8s::parse_ordinal(broker_id)?;
+        registry
+            .all()
+            .into_iter()
+            .find(|b| b.node_id == ord)
+            .map(|b| BrokerEndpoint {
+                node_id: b.node_id,
+                host: b.host,
+                port: b.port,
+            })
+    }))
+}
+
+/// Parking slot for the active controller's recompute trigger.
+/// While this broker holds the Lease, the controller loop installs
+/// an mpsc sender here; topic-watcher callbacks fire
+/// [`TopicChangeNotifier::notify`], which is a no-op on
+/// non-controller brokers (Go: `clusterRuntime.NotifyTopicChange`
+/// gating on `activeLoop != nil`, gh #74).
+#[derive(Default)]
+pub struct TopicChangeNotifier {
+    tx: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<AssignmentReason>>>,
+}
+
+impl TopicChangeNotifier {
+    // dead_code: called from main.rs, but integration tests include
+    // this module via #[path] and not all of them exercise notify.
+    #[allow(dead_code)]
+    pub fn notify(&self, reason: AssignmentReason) {
+        let guard = self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(tx) = guard.as_ref() {
+            // try_send: full channel means a recompute is already
+            // queued — coalescing is fine, the loop re-reads live
+            // sources on every pass.
+            let _ = tx.try_send(reason);
+        }
+    }
+
+    fn set(&self, tx: Option<tokio::sync::mpsc::Sender<AssignmentReason>>) {
+        *self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = tx;
+    }
+}
+
+/// Metadata's live broker catalog, backed by the EndpointSlice
+/// registry (host = StatefulSet FQDN, stable across restarts).
+struct RegistryBrokerView {
+    registry: Arc<BrokerRegistry>,
+}
+
+impl sk_broker::ClusterBrokerView for RegistryBrokerView {
+    fn brokers(&self) -> Vec<sk_broker::BrokerNode> {
+        self.registry
+            .all()
+            .into_iter()
+            .filter(|b| b.ready)
+            .map(|b| sk_broker::BrokerNode {
+                node_id: b.node_id,
+                host: b.host,
+                port: b.port,
+            })
+            .collect()
+    }
+}
+
+/// Controller's view of the alive broker set: EndpointSlice-ready ∩
+/// heartbeat-connected, falling back to registry-only while no
+/// heartbeat has arrived yet (fresh controller, brokers still
+/// dialing). Port of Go's `brokerSourceAdapter` (gh #77).
+struct ClusterBrokerSource {
+    registry: Arc<BrokerRegistry>,
+    heart: Arc<HeartbeatServer>,
+}
+
+impl sk_controller::BrokerSource for ClusterBrokerSource {
+    fn alive_brokers(&self) -> Vec<String> {
+        let registered: Vec<String> = self
+            .registry
+            .all()
+            .into_iter()
+            .filter(|b| b.ready)
+            .map(|b| format!("skafka-{}", b.node_id))
+            .collect();
+        let connected: std::collections::HashSet<String> =
+            self.heart.connected_brokers().into_iter().collect();
+        if connected.is_empty() {
+            return registered;
+        }
+        let both: Vec<String> = registered
+            .iter()
+            .filter(|id| connected.contains(*id))
+            .cloned()
+            .collect();
+        if both.is_empty() {
+            registered
+        } else {
+            both
+        }
+    }
+}
+
+/// Spawn the always-on cluster tasks (lease watch, endpoint watch,
+/// heartbeat client + status pump) and the election campaign that
+/// runs the controller stack while this broker holds the Lease.
+/// Port of Go's `startClusterRuntime` + `onAcquired`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_cluster_tasks(
+    w: ClusterWiring,
+    dir: std::path::PathBuf,
+    self_id: String,
+    topics: Arc<TopicRegistry>,
+    manager: Arc<Manager>,
+    coordinator: Arc<Coordinator>,
+    is_controller: Arc<AtomicBool>,
+    topic_notify: Arc<TopicChangeNotifier>,
+    cancel: CancellationToken,
+    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    let ns = w.identity.namespace.clone();
+
+    // 1 s Lease poll: feeds the Coordinator's stale-epoch fence AND
+    // the heartbeat client's controller discovery.
+    tasks.push(tokio::spawn(run_lease_watch(
+        w.client.clone(),
+        ns.clone(),
+        CONTROLLER_LEASE_NAME.to_owned(),
+        w.lease_epoch.clone(),
+        cancel.clone(),
+    )));
+
+    // EndpointSlice watch → BrokerRegistry. The watch returns when
+    // its stream ends; restart with a small delay.
+    {
+        let client = w.client.clone();
+        let watch_ns = ns.clone();
+        let svc = w.identity.dns.headless_service.clone();
+        let registry = w.registry.clone();
+        let c = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            loop {
+                run_endpoint_watch(
+                    client.clone(),
+                    watch_ns.clone(),
+                    svc.clone(),
+                    registry.clone(),
+                    c.clone(),
+                )
+                .await;
+                if c.is_cancelled() {
+                    return;
+                }
+                warn!("endpoint watch stream ended; restarting in 2s");
+                tokio::select! {
+                    () = c.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(2)) => {}
+                }
+            }
+        }));
+    }
+
+    // Long-lived heartbeat stream to whoever holds the Lease.
+    tasks.push(tokio::spawn(w.heart.clone().run(cancel.clone())));
+
+    // Readiness gate (skafka.io/PartitionsReady): flip once the
+    // first assignment.json applies, so the pod only joins the
+    // Service after it knows its partition ownership. Retries with
+    // backoff — needs `patch pods/status` RBAC.
+    {
+        let flipped = Arc::new(AtomicBool::new(false));
+        let client = w.client.clone();
+        let gate_ns = ns.clone();
+        let pod = w.identity.pod_name.clone();
+        coordinator.on_assignment_change(Arc::new(move |_prev, _next| {
+            if flipped.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            let client = client.clone();
+            let gate_ns = gate_ns.clone();
+            let pod = pod.clone();
+            tokio::spawn(async move {
+                let mut delay = Duration::from_secs(1);
+                loop {
+                    match sk_k8s::kube_watchers::patch_readiness(
+                        client.clone(),
+                        gate_ns.clone(),
+                        pod.clone(),
+                        true,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            info!("readiness gate: PartitionsReady=True");
+                            return;
+                        }
+                        Err(err) => {
+                            warn!(%err, "readiness gate patch failed; retrying");
+                            tokio::time::sleep(delay).await;
+                            delay = (delay * 2).min(Duration::from_secs(30));
+                        }
+                    }
+                }
+            });
+        }));
+    }
+
+    // 1 s status pump: liveness + last-seen assignment version +
+    // active consumer groups (feeds the controller's GroupSource).
+    {
+        let heart = w.heart.clone();
+        let coord = coordinator.clone();
+        let mgr = manager.clone();
+        let c = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = c.cancelled() => return,
+                    _ = tick.tick() => {
+                        let version = coord
+                            .snapshot()
+                            .map_or(0, |a| u64::try_from(a.assignment_version).unwrap_or(0));
+                        // Disconnected during controller failover is
+                        // normal — the run loop is already redialing.
+                        let _ = heart.send(BrokerStatus {
+                            broker_id: String::new(), // filled by the client
+                            timestamp_ms: unix_ms(),
+                            last_seen_assignment_version: version,
+                            partitions: Vec::new(),
+                            active_groups: mgr.local_groups(),
+                        });
+                    }
+                }
+            }
+        }));
+    }
+
+    // Election: while we hold the skafka-controller Lease, run the
+    // controller stack; on loss the leader token tears it down and
+    // we re-enter candidacy.
+    {
+        let election =
+            KubeLeaseElection::new(w.client.clone(), ns, CONTROLLER_LEASE_NAME, self_id.clone())
+                .with_timings(w.lease_timings.0, w.lease_timings.1, w.lease_timings.2);
+        let registry = w.registry.clone();
+        let heartbeat_bind = w.heartbeat_bind.clone();
+        let c = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            election
+                .campaign(c, move |epoch, leader_token| {
+                    is_controller.store(true, Ordering::Relaxed);
+                    let flag = is_controller.clone();
+                    let t = leader_token.clone();
+                    tokio::spawn(async move {
+                        t.cancelled().await;
+                        flag.store(false, Ordering::Relaxed);
+                    });
+                    tokio::spawn(run_controller(
+                        epoch,
+                        leader_token,
+                        dir.clone(),
+                        self_id.clone(),
+                        topics.clone(),
+                        registry.clone(),
+                        heartbeat_bind.clone(),
+                        topic_notify.clone(),
+                    ));
+                })
+                .await;
+        }));
+    }
+}
+
+/// The controller stack: heartbeat gRPC server + AssignmentLoop +
+/// broker-set watcher + topic-change trigger. Runs until
+/// `leader_token` fires (Lease lost or shutdown). Port of Go's
+/// `onAcquired` closure in `cluster_runtime.go`.
+/// `pub(crate)` so the cluster_smoke integration test (which
+/// includes this module via `#[path]`) can drive it without kube.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_controller(
+    epoch: i64,
+    leader_token: CancellationToken,
+    dir: std::path::PathBuf,
+    self_id: String,
+    topics: Arc<TopicRegistry>,
+    registry: Arc<BrokerRegistry>,
+    heartbeat_bind: String,
+    topic_notify: Arc<TopicChangeNotifier>,
+) {
+    let heart_srv = HeartbeatServer::new();
+
+    // Heartbeat gRPC listener (fixed :9094 in the chart). A bind
+    // failure is survivable — the broker source falls back to the
+    // EndpointSlice registry — but noisy on purpose.
+    match heartbeat_bind.parse::<std::net::SocketAddr>() {
+        Ok(addr) => {
+            let svc = ControllerHeartbeatServer::new(HeartbeatService::new(heart_srv.clone()));
+            let t = leader_token.clone();
+            tokio::spawn(async move {
+                if let Err(err) = tonic::transport::Server::builder()
+                    .add_service(svc)
+                    .serve_with_shutdown(addr, t.cancelled())
+                    .await
+                {
+                    warn!(%err, "controller heartbeat gRPC server exited");
+                }
+            });
+        }
+        Err(err) => {
+            warn!(%err, addr = %heartbeat_bind,
+                  "bad SKAFKA_CONTROLLER_HEARTBEAT_ADDR; heartbeat server disabled");
+        }
+    }
+
+    let live_topics = Arc::new(LiveTopicSource { registry: topics });
+    let broker_src = Arc::new(ClusterBrokerSource {
+        registry,
+        heart: heart_srv.clone(),
+    });
+    let loop_handle = AssignmentLoop::new(dir, self_id, live_topics, broker_src.clone())
+        .with_group_source(heart_srv.clone());
+
+    let version = match loop_handle.start(epoch).await {
+        Ok(v) => v,
+        Err(err) => {
+            warn!(%err, epoch, "controller: initial assignment write failed; abdicating");
+            leader_token.cancel();
+            return;
+        }
+    };
+    heart_srv.push_assignment_changed(u64::try_from(version).unwrap_or(0));
+    info!(epoch, version, "controller active: assignment published");
+
+    // Topic-change trigger (gh #74): watcher callbacks land here
+    // while we hold the Lease.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AssignmentReason>(32);
+    topic_notify.set(Some(tx));
+
+    // Broker-set watcher (gh #77): 2 s poll, recompute on any
+    // join/leave. Removals take precedence for the reason label.
+    let mut prev: std::collections::BTreeSet<String> =
+        broker_src.alive_brokers().into_iter().collect();
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let reason = tokio::select! {
+            () = leader_token.cancelled() => break,
+            r = rx.recv() => match r {
+                Some(r) => Some(r),
+                None => break,
+            },
+            _ = tick.tick() => {
+                let cur: std::collections::BTreeSet<String> =
+                    broker_src.alive_brokers().into_iter().collect();
+                if cur == prev {
+                    None
+                } else {
+                    let removed = prev.difference(&cur).next().is_some();
+                    info!(prev = ?prev, cur = ?cur, "controller: broker set changed");
+                    prev = cur;
+                    Some(if removed {
+                        AssignmentReason::BrokerDead
+                    } else {
+                        AssignmentReason::BrokerJoined
+                    })
+                }
+            }
+        };
+        let Some(reason) = reason else { continue };
+        match loop_handle.update_assignment(reason).await {
+            Ok(v) => heart_srv.push_assignment_changed(u64::try_from(v).unwrap_or(0)),
+            Err(err) => {
+                warn!(%err, reason = reason.as_str(), "controller: assignment update failed");
+            }
+        }
+    }
+
+    topic_notify.set(None);
+    heart_srv.push_leaving();
+    info!("controller stack shut down (lease lost or shutdown)");
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 /// Adapts the live cluster runtime to [`sk_observability::GaugeSource`]
 /// so the Phase-10 observable gauges sample real values on every
 /// export. Port of `archive/cmd/skafka/cluster_runtime.go`'s
@@ -469,15 +1026,15 @@ fn topic_specs_from_registry(topics: &TopicRegistry) -> Vec<sk_controller::Topic
 struct RuntimeGaugeSource {
     coordinator: Arc<Coordinator>,
     engine: Arc<dyn StorageEngine>,
-    /// Static `true` today: single-broker mode runs `LocalElection`,
-    /// which always wins. The kube-Lease election (follow-up #10 /
-    /// workstream E) turns this into a live Lease-holder lookup.
-    is_controller: bool,
+    /// Live in cluster mode (flipped by the Lease-election campaign
+    /// on acquire/loss); constant `true` in single-broker dev mode
+    /// where `LocalElection` always wins.
+    is_controller: Arc<AtomicBool>,
 }
 
 impl sk_observability::GaugeSource for RuntimeGaugeSource {
     fn is_controller(&self) -> i64 {
-        i64::from(self.is_controller)
+        i64::from(self.is_controller.load(Ordering::Relaxed))
     }
 
     fn assignment_version(&self) -> i64 {

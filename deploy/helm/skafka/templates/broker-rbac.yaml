@@ -12,10 +12,12 @@ metadata:
   name: {{ include "skafka.fullname" . }}-broker
   labels: {{- include "skafka.labels" . | nindent 4 }}
 rules:
-  # Partition leadership via Leases.
+  # Controller election + epoch watch via Leases. The Rust broker
+  # acquires/renews the skafka-controller Lease with server-side
+  # apply, which needs `patch` (the Go client-go path used `update`).
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, list, watch, create, update]
+    verbs: [get, list, watch, create, update, patch]
   # Cluster topology.
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]

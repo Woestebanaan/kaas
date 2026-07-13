@@ -75,6 +75,9 @@ async fn two_brokers_share_assignment_json_and_split_partitions() {
         0,
         "test-cluster",
         cancel.clone(),
+        None,
+        9092,
+        std::sync::Arc::new(cluster::TopicChangeNotifier::default()),
     )
     .expect("install ok for broker 0");
     let rt1 = cluster::install(
@@ -85,6 +88,9 @@ async fn two_brokers_share_assignment_json_and_split_partitions() {
         1,
         "test-cluster",
         cancel.clone(),
+        None,
+        9092,
+        std::sync::Arc::new(cluster::TopicChangeNotifier::default()),
     )
     .expect("install ok for broker 1");
 
@@ -140,13 +146,173 @@ async fn two_brokers_share_assignment_json_and_split_partitions() {
     }
 }
 
-/// Full rdkafka-driven multi-broker smoke. Ignored until rdkafka
-/// lands in the workspace dev-deps (Phase 8). Mirrors the phase
-/// plan §H bullet 3: 3 brokers, 1k records with `acks=all`,
-/// consumer-group consume, kill a non-controller broker mid-run,
-/// expect every record exactly once.
-#[ignore = "rdkafka not yet in workspace deps (Phase 8)"]
-#[tokio::test]
-async fn three_broker_rdkafka_smoke() {
-    unimplemented!("Phase 8: add rdkafka dev-dep + port franz-go EOS suite shape");
+use sk_broker::coordinator::{Coordinator, LeaseEpochSource, LocalHeartbeat};
+use sk_k8s::{BrokerRegistry, DnsConfig, EndpointSliceData, EndpointSliceEntry};
+use std::sync::atomic::{AtomicI64, Ordering};
+
+struct AtomicEpoch(AtomicI64);
+
+impl LeaseEpochSource for AtomicEpoch {
+    fn current_epoch(&self) -> i64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+fn test_dns() -> DnsConfig {
+    DnsConfig {
+        namespace: "skafka".to_owned(),
+        headless_service: "skafka-headless".to_owned(),
+        pod_name_pattern: "skafka-{ordinal}".to_owned(),
+        cluster_domain: "cluster.local".to_owned(),
+    }
+}
+
+fn slice_entry(ordinal: i32, ready: bool) -> EndpointSliceEntry {
+    EndpointSliceEntry {
+        hostname: format!("skafka-{ordinal}"),
+        address: format!("10.0.0.{}", ordinal + 10),
+        ready,
+    }
+}
+
+async fn wait_until<F: Fn() -> bool>(what: &str, deadline: Duration, cond: F) {
+    let end = std::time::Instant::now() + deadline;
+    loop {
+        if cond() {
+            return;
+        }
+        assert!(std::time::Instant::now() < end, "timed out waiting: {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The real multi-broker controller stack, kube-free: one elected
+/// controller runs `run_controller` over a shared data_dir while
+/// three Coordinators (one per "broker") watch assignment.json.
+/// Covers: balanced spread across the alive set, topic creation →
+/// recompute via the TopicChangeNotifier (gh #74), and broker loss
+/// → reassignment via the 2 s broker-set watcher (gh #77).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_broker_controller_balances_and_reassigns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+
+    let topics = Arc::new(TopicRegistry::new());
+    topics.insert(TopicMeta {
+        name: "t".to_owned(),
+        partition_count: 6,
+        topic_id: [0; 16],
+    });
+
+    // Three broker-side Coordinators watching the shared dir.
+    let lease = Arc::new(AtomicEpoch(AtomicI64::new(1)));
+    let coords: Vec<Arc<Coordinator>> = (0..3)
+        .map(|id| {
+            let lease_src: Arc<dyn LeaseEpochSource> = lease.clone();
+            let c = Coordinator::new(
+                format!("skafka-{id}"),
+                dir.clone(),
+                lease_src,
+                Arc::new(LocalHeartbeat),
+            );
+            c.spawn_watcher();
+            c
+        })
+        .collect();
+
+    // Registry seeded with three ready endpoints — the EndpointSlice
+    // view the elected controller balances over. No heartbeat
+    // connections exist, so ClusterBrokerSource falls back to the
+    // registry-only alive set.
+    let registry = Arc::new(BrokerRegistry::new(
+        sk_k8s::BrokerEndpoint {
+            node_id: 0,
+            host: test_dns().fqdn(0),
+            port: 9092,
+            ready: true,
+        },
+        test_dns(),
+    ));
+    registry.apply_slice(&EndpointSliceData {
+        entries: vec![
+            slice_entry(0, true),
+            slice_entry(1, true),
+            slice_entry(2, true),
+        ],
+        kafka_port: Some(9092),
+    });
+
+    let notifier = Arc::new(cluster::TopicChangeNotifier::default());
+    let leader_token = CancellationToken::new();
+    tokio::spawn(cluster::run_controller(
+        1,
+        leader_token.clone(),
+        dir.clone(),
+        "skafka-0".to_owned(),
+        topics.clone(),
+        registry.clone(),
+        "127.0.0.1:0".to_owned(),
+        notifier.clone(),
+    ));
+
+    // 1. All six partitions get exactly one owner, spread over all
+    //    three brokers (rendezvous + smoothing caps skew at 1 ⇒
+    //    every broker owns exactly 2 of 6).
+    wait_until(
+        "initial 3-broker assignment",
+        Duration::from_secs(5),
+        || {
+            coords[0].snapshot().is_some_and(|a| {
+                let owners: std::collections::HashSet<&str> =
+                    a.partitions.iter().map(|p| p.broker.as_str()).collect();
+                a.partitions.len() == 6 && owners.len() == 3
+            })
+        },
+    )
+    .await;
+    for c in &coords {
+        wait_until("every coordinator applies", Duration::from_secs(5), || {
+            c.snapshot().is_some()
+        })
+        .await;
+    }
+    let snap = coords[0].snapshot().unwrap();
+    for id in 0..3 {
+        let owned = snap
+            .partitions
+            .iter()
+            .filter(|p| p.broker == format!("skafka-{id}"))
+            .count();
+        assert_eq!(owned, 2, "skafka-{id} must own exactly 2 of 6 partitions");
+    }
+
+    // 2. Topic created → notifier pokes the loop → new partitions
+    //    assigned without waiting for a periodic tick.
+    topics.insert(TopicMeta {
+        name: "t2".to_owned(),
+        partition_count: 3,
+        topic_id: [0; 16],
+    });
+    notifier.notify(sk_controller::AssignmentReason::TopicCreated);
+    wait_until("t2 partitions assigned", Duration::from_secs(5), || {
+        coords[0]
+            .snapshot()
+            .is_some_and(|a| a.partitions.iter().filter(|p| p.topic == "t2").count() == 3)
+    })
+    .await;
+
+    // 3. Broker loss: skafka-2 goes NotReady → the 2 s broker-set
+    //    watcher recomputes → nothing stays assigned to skafka-2.
+    registry.apply_slice(&EndpointSliceData {
+        entries: vec![slice_entry(2, false)],
+        kafka_port: Some(9092),
+    });
+    wait_until("skafka-2 drained", Duration::from_secs(10), || {
+        coords[0].snapshot().is_some_and(|a| {
+            !a.partitions.is_empty() && a.partitions.iter().all(|p| p.broker != "skafka-2")
+        })
+    })
+    .await;
+
+    leader_token.cancel();
 }

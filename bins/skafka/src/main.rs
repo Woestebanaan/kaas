@@ -198,64 +198,106 @@ async fn main() -> Result<()> {
         auth.quotas.clone(),
     ));
 
-    // In cluster mode (MY_POD_NAME + SKAFKA_NAMESPACE set), wire the
-    // kube-backed TopicCRWriter so admin handlers (CreateTopics,
-    // CreatePartitions, IncrementalAlterConfigs) can patch KafkaTopic
-    // CRs. Dev-mode leaves cr_writer as None and those handlers
-    // return CLUSTER_AUTHORIZATION_FAILED.
-    if std::env::var("MY_POD_NAME").is_ok() {
-        let ns = std::env::var("SKAFKA_NAMESPACE").unwrap_or_else(|_| "default".into());
-        match kube::Client::try_default().await {
-            Ok(client) => {
-                let writer =
-                    sk_broker::topic_cr_writer::KubeTopicCRWriter::new(client.clone(), ns.clone());
-                broker.install_cr_writer(Arc::new(writer));
-                info!("installed KubeTopicCRWriter for admin handlers");
+    let cancel = CancellationToken::new();
 
-                // Spawn the KafkaTopic CR watcher: feeds every
-                // Apply/InitApply into `topics` so newly-created
-                // topics become visible on the wire (Metadata),
-                // and every Delete removes them so unregistered
-                // topics stop being advertised.
-                let topics_apply = topics.clone();
-                let topics_delete = topics.clone();
-                let watch_cancel = CancellationToken::new();
-                let watch_ns = ns;
-                tokio::spawn(async move {
-                    if let Err(err) = sk_k8s::kube_watchers::run_topic_watch(
-                        client,
-                        watch_ns,
-                        move |name, partitions| {
-                            topics_apply.insert(sk_broker::TopicMeta {
-                                name: name.to_string(),
-                                partition_count: partitions,
-                                topic_id: [0u8; 16],
-                            });
-                        },
-                        move |name| {
-                            topics_delete.remove(name);
-                        },
-                        watch_cancel,
-                    )
-                    .await
-                    {
-                        warn!(%err, "topic watcher exited");
-                    }
-                });
-                info!("spawned KafkaTopic CR watcher");
-            }
+    // Shared kube client — the CR writer, topic watcher, AND the
+    // multi-broker cluster runtime all reuse it. Built once; a
+    // failure degrades to single-broker behaviour rather than
+    // crashing the pod.
+    let kube_client = if std::env::var("MY_POD_NAME").is_ok() {
+        match kube::Client::try_default().await {
+            Ok(client) => Some(client),
             Err(err) => {
-                warn!(%err, "kube client init failed; CreateTopics + admin handlers will refuse");
+                warn!(
+                    %err,
+                    "kube client init failed; CreateTopics/admin handlers will refuse \
+                     and the multi-broker runtime stays disabled"
+                );
+                None
             }
         }
+    } else {
+        None
+    };
+
+    // Topic-change trigger: watcher callbacks poke the controller's
+    // AssignmentLoop (no-op unless this broker holds the Lease).
+    let topic_notify = Arc::new(cluster::TopicChangeNotifier::default());
+
+    // In cluster mode, wire the kube-backed TopicCRWriter so admin
+    // handlers (CreateTopics, CreatePartitions,
+    // IncrementalAlterConfigs) can patch KafkaTopic CRs. Dev-mode
+    // leaves cr_writer as None and those handlers return
+    // CLUSTER_AUTHORIZATION_FAILED.
+    if let Some(client) = kube_client.clone() {
+        let ns = std::env::var("SKAFKA_NAMESPACE").unwrap_or_else(|_| "default".into());
+        let writer = sk_broker::topic_cr_writer::KubeTopicCRWriter::new(client.clone(), ns.clone());
+        broker.install_cr_writer(Arc::new(writer));
+        info!("installed KubeTopicCRWriter for admin handlers");
+
+        // Spawn the KafkaTopic CR watcher: feeds every
+        // Apply/InitApply into `topics` so newly-created topics
+        // become visible on the wire (Metadata), every Delete
+        // removes them, and each mutation pokes the controller's
+        // AssignmentLoop so new topics get partitions assigned on
+        // the spot (gh #74) rather than on the next periodic tick.
+        let topics_apply = topics.clone();
+        let topics_delete = topics.clone();
+        let notify_apply = topic_notify.clone();
+        let notify_delete = topic_notify.clone();
+        let watch_cancel = cancel.clone();
+        let watch_ns = ns;
+        tokio::spawn(async move {
+            if let Err(err) = sk_k8s::kube_watchers::run_topic_watch(
+                client,
+                watch_ns,
+                move |name, partitions| {
+                    let prev = topics_apply
+                        .all()
+                        .into_iter()
+                        .find(|m| m.name == name)
+                        .map(|m| m.partition_count);
+                    topics_apply.insert(sk_broker::TopicMeta {
+                        name: name.to_string(),
+                        partition_count: partitions,
+                        topic_id: [0u8; 16],
+                    });
+                    match prev {
+                        None => notify_apply.notify(sk_controller::AssignmentReason::TopicCreated),
+                        Some(p) if p != partitions => {
+                            notify_apply.notify(sk_controller::AssignmentReason::TopicResized);
+                        }
+                        Some(_) => {} // re-list echo; nothing changed
+                    }
+                },
+                move |name| {
+                    topics_delete.remove(name);
+                    notify_delete.notify(sk_controller::AssignmentReason::TopicDeleted);
+                },
+                watch_cancel,
+            )
+            .await
+            {
+                warn!(%err, "topic watcher exited");
+            }
+        });
+        info!("spawned KafkaTopic CR watcher");
     }
 
-    let cancel = CancellationToken::new();
+    // Client-facing port advertised for peer brokers (FindCoordinator
+    // / Metadata) — the first listener's bind port.
+    let client_port = cli
+        .listeners
+        .first()
+        .and_then(|l| l.addr.rsplit(':').next())
+        .and_then(|p| p.parse::<i32>().ok())
+        .unwrap_or(9092);
 
     // Phase 5: bring up the consumer-group Manager + (in disk
     // mode) the Coordinator + AssignmentLoop + takeover drivers.
-    // install() is a no-op for the Phase-3/4 surface — it only
-    // adds capabilities, never replaces them.
+    // In cluster mode (MY_POD_NAME + kube client) this also wires
+    // the multi-broker runtime: Lease election, heartbeats, peer
+    // registry, and controller-only assignment writing.
     let cluster_rt = cluster::install(
         broker.clone(),
         topics.clone(),
@@ -264,6 +306,9 @@ async fn main() -> Result<()> {
         cli.broker_id,
         &cli.cluster_id,
         cancel.clone(),
+        kube_client,
+        client_port,
+        topic_notify,
     )?;
 
     // Spawn the credential / ACL reloader before the listeners go up

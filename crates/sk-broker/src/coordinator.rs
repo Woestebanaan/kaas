@@ -108,6 +108,12 @@ pub struct Coordinator {
     current: ArcSwapOption<Assignment>,
     inner: Mutex<Inner>,
     handlers: Mutex<Vec<AssignmentChangeHandler>>,
+    /// gh #62 produce-path self-fence. Off by default — dev and
+    /// single-broker disk mode wire [`LocalHeartbeat`] (never any
+    /// heartbeat), which would otherwise reject every write. The
+    /// cluster runtime enables it once a real [`HeartbeatSource`]
+    /// (the controller heartbeat stream) is wired.
+    self_fence: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -137,7 +143,31 @@ impl Coordinator {
             current: ArcSwapOption::empty(),
             inner: Mutex::new(Inner::default()),
             handlers: Mutex::new(Vec::new()),
+            self_fence: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Arm the gh #62 self-fence: produce acks require a controller
+    /// heartbeat within [`crate::self_fence::DEFAULT_HEARTBEAT_TIMEOUT`].
+    /// Call only when a real heartbeat stream is wired.
+    pub fn enable_self_fence(&self) {
+        self.self_fence
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Produce-path write gate. `true` = safe to ack. Always `true`
+    /// until [`Self::enable_self_fence`]; afterwards requires a
+    /// fresh controller heartbeat — a broker cut off from the
+    /// controller stops acking within the timeout even if its
+    /// `assignment.json` view is stale (the takeover safety bound).
+    pub fn heartbeat_fresh_for_writes(&self) -> bool {
+        if !self.self_fence.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        crate::self_fence::is_heartbeat_fresh(
+            self.last_heartbeat(),
+            crate::self_fence::DEFAULT_HEARTBEAT_TIMEOUT,
+        )
     }
 
     pub fn self_id(&self) -> &str {

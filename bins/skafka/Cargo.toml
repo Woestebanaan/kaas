@@ -32,6 +32,7 @@ sk-storage         = { path = "../../crates/sk-storage" }
 tokio              = { workspace = true }
 tokio-rustls       = { workspace = true }
 tokio-util         = { workspace = true }
+tonic              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
