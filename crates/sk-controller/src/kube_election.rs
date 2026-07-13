@@ -273,17 +273,26 @@ impl KubeLeaseElection {
     }
 
     /// Long-running election driver: acquire → `on_acquired(epoch,
-    /// leader_token)` → renew every `retry_period` → on loss cancel
-    /// `leader_token` and re-enter candidacy. Returns only when
-    /// `cancel` fires (best-effort releasing the Lease if held).
+    /// leader_token)` → renew every `retry_period` → on loss run
+    /// `on_lost`, cancel `leader_token`, and re-enter candidacy.
+    /// Returns only when `cancel` fires (best-effort releasing the
+    /// Lease if held).
     ///
     /// This is the Rust stand-in for client-go's `leaderelection`
     /// callbacks the Go side got for free: `on_acquired` ≙
     /// `OnStartedLeading` (spawn controller tasks bound to the
-    /// token), token cancellation ≙ `OnStoppedLeading`.
-    pub async fn campaign<F>(self: Arc<Self>, cancel: CancellationToken, on_acquired: F)
-    where
+    /// token), `on_lost` ≙ `OnStoppedLeading` — invoked
+    /// *synchronously before* any re-acquire, so state it flips
+    /// (e.g. an is_controller gauge) can never trail a newer
+    /// acquisition.
+    pub async fn campaign<F, G>(
+        self: Arc<Self>,
+        cancel: CancellationToken,
+        on_acquired: F,
+        on_lost: G,
+    ) where
         F: Fn(i64, CancellationToken) + Send + Sync,
+        G: Fn() + Send + Sync,
     {
         loop {
             let epoch = tokio::select! {
@@ -301,6 +310,7 @@ impl KubeLeaseElection {
             loop {
                 tokio::select! {
                     () = cancel.cancelled() => {
+                        on_lost();
                         leader_token.cancel();
                         self.release().await;
                         return;
@@ -318,13 +328,22 @@ impl KubeLeaseElection {
                     }
                     () = tokio::time::sleep(self.retry_period) => {}
                 }
-                match self.try_renew().await {
-                    Ok(true) => first_err_at = None,
-                    Ok(false) => {
+                // A single kube call must never block the loop past
+                // the renew window — the API server on a loaded node
+                // can stall for tens of seconds (observed p99 1.7 s,
+                // long tail ≫ lease_duration during pod churn) and an
+                // unbounded call here is how the lease gets stolen
+                // out from under a healthy controller. A timed-out
+                // attempt counts toward `renew_deadline` like any
+                // other failure (client-go semantics).
+                let attempt_budget = self.retry_period.max(Duration::from_secs(3));
+                match tokio::time::timeout(attempt_budget, self.try_renew()).await {
+                    Ok(Ok(true)) => first_err_at = None,
+                    Ok(Ok(false)) => {
                         warn!(identity = %self.identity, "controller lease lost to another holder");
                         break;
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         let since = *first_err_at.get_or_insert_with(std::time::Instant::now);
                         if since.elapsed() > self.renew_deadline {
                             warn!(%err, "controller lease renew failed past renew_deadline; abdicating");
@@ -332,8 +351,22 @@ impl KubeLeaseElection {
                         }
                         warn!(%err, "controller lease renew failed; retrying");
                     }
+                    Err(_elapsed) => {
+                        let since = *first_err_at.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() > self.renew_deadline {
+                            warn!(
+                                "controller lease renew timed out past renew_deadline; abdicating"
+                            );
+                            break;
+                        }
+                        warn!(
+                            budget_s = attempt_budget.as_secs(),
+                            "controller lease renew attempt timed out; retrying"
+                        );
+                    }
                 }
             }
+            on_lost();
             leader_token.cancel();
         }
     }

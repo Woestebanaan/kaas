@@ -257,10 +257,12 @@ async fn three_broker_controller_balances_and_reassigns() {
 
     // 1. All six partitions get exactly one owner, spread over all
     //    three brokers (rendezvous + smoothing caps skew at 1 ⇒
-    //    every broker owns exactly 2 of 6).
+    //    every broker owns exactly 2 of 6). The deadline allows for
+    //    the controller's 7 s heartbeat grace — no heartbeat clients
+    //    connect in this kube-free harness, so it waits it out.
     wait_until(
         "initial 3-broker assignment",
-        Duration::from_secs(5),
+        Duration::from_secs(15),
         || {
             coords[0].snapshot().is_some_and(|a| {
                 let owners: std::collections::HashSet<&str> =

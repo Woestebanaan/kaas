@@ -877,26 +877,28 @@ fn spawn_cluster_tasks(
         let heartbeat_bind = w.heartbeat_bind.clone();
         let c = cancel.clone();
         tasks.push(tokio::spawn(async move {
+            let gauge_flag = is_controller.clone();
             election
-                .campaign(c, move |epoch, leader_token| {
-                    is_controller.store(true, Ordering::Relaxed);
-                    let flag = is_controller.clone();
-                    let t = leader_token.clone();
-                    tokio::spawn(async move {
-                        t.cancelled().await;
-                        flag.store(false, Ordering::Relaxed);
-                    });
-                    tokio::spawn(run_controller(
-                        epoch,
-                        leader_token,
-                        dir.clone(),
-                        self_id.clone(),
-                        topics.clone(),
-                        registry.clone(),
-                        heartbeat_bind.clone(),
-                        topic_notify.clone(),
-                    ));
-                })
+                .campaign(
+                    c,
+                    move |epoch, leader_token| {
+                        is_controller.store(true, Ordering::Relaxed);
+                        tokio::spawn(run_controller(
+                            epoch,
+                            leader_token,
+                            dir.clone(),
+                            self_id.clone(),
+                            topics.clone(),
+                            registry.clone(),
+                            heartbeat_bind.clone(),
+                            topic_notify.clone(),
+                        ));
+                    },
+                    // Synchronous, ordered before any re-acquire — a
+                    // spawned watcher here raced the next stint's
+                    // store(true) and left the gauge stuck at 0.
+                    move || gauge_flag.store(false, Ordering::Relaxed),
+                )
                 .await;
         }));
     }
@@ -946,11 +948,33 @@ pub(crate) async fn run_controller(
 
     let live_topics = Arc::new(LiveTopicSource { registry: topics });
     let broker_src = Arc::new(ClusterBrokerSource {
-        registry,
+        registry: registry.clone(),
         heart: heart_srv.clone(),
     });
     let loop_handle = AssignmentLoop::new(dir, self_id, live_topics, broker_src.clone())
         .with_group_source(heart_srv.clone());
+
+    // Heartbeat grace: a fresh controller's server starts empty, and
+    // balancing over whichever single broker redialed first assigns
+    // the whole cluster to it — a takeover storm on every failover.
+    // Give peers one reconnect cycle (backoff caps at 5 s) to show
+    // up before the first recompute; the 2 s broker-set watcher
+    // still handles stragglers.
+    {
+        let want = registry.all().iter().filter(|b| b.ready).count();
+        let grace_end = tokio::time::Instant::now() + Duration::from_secs(7);
+        while heart_srv.connected_brokers().len() < want {
+            if leader_token.is_cancelled() || tokio::time::Instant::now() >= grace_end {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        info!(
+            connected = heart_srv.connected_brokers().len(),
+            registered_ready = want,
+            "controller: heartbeat grace complete"
+        );
+    }
 
     let version = match loop_handle.start(epoch).await {
         Ok(v) => v,
