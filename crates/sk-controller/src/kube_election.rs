@@ -333,10 +333,11 @@ impl KubeLeaseElection {
                 // can stall for tens of seconds (observed p99 1.7 s,
                 // long tail ≫ lease_duration during pod churn) and an
                 // unbounded call here is how the lease gets stolen
-                // out from under a healthy controller. A timed-out
-                // attempt counts toward `renew_deadline` like any
-                // other failure (client-go semantics).
-                let attempt_budget = self.retry_period.max(Duration::from_secs(3));
+                // out from under a healthy controller. Per-attempt
+                // budget = renew_deadline (client-go semantics: one
+                // slow-but-live call may use the whole window; a hung
+                // one burns it once and we abdicate cleanly).
+                let attempt_budget = self.renew_deadline.max(Duration::from_secs(3));
                 match tokio::time::timeout(attempt_budget, self.try_renew()).await {
                     Ok(Ok(true)) => first_err_at = None,
                     Ok(Ok(false)) => {

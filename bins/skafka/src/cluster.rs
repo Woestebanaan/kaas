@@ -289,7 +289,6 @@ pub fn install(
                     is_controller.clone(),
                     topic_notify.clone(),
                     cancel.clone(),
-                    &mut tasks,
                 ),
                 None => {
                     if let Some(handle) = spawn_single_broker_assignment_loop(
@@ -734,6 +733,17 @@ impl sk_controller::BrokerSource for ClusterBrokerSource {
 /// heartbeat client + status pump) and the election campaign that
 /// runs the controller stack while this broker holds the Lease.
 /// Port of Go's `startClusterRuntime` + `onAcquired`.
+///
+/// Every control-plane loop runs on a **dedicated OS thread with
+/// its own single-threaded tokio runtime and its own kube client**.
+/// Takeover storms run seconds-long blocking NFS I/O on the main
+/// runtime's workers, and a starved timer is how a healthy
+/// controller's lease renew froze for 28 s and got stolen (observed
+/// live; Go never hit this because goroutines preempt). The kube
+/// client must be built on that runtime too — its internal tower
+/// Buffer worker is spawned onto whichever runtime creates it.
+/// Only the controller stack (`run_controller`) is spawned back
+/// onto the main runtime, next to the storage it drives.
 #[allow(clippy::too_many_arguments)]
 fn spawn_cluster_tasks(
     w: ClusterWiring,
@@ -745,52 +755,57 @@ fn spawn_cluster_tasks(
     is_controller: Arc<AtomicBool>,
     topic_notify: Arc<TopicChangeNotifier>,
     cancel: CancellationToken,
-    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
 ) {
     let ns = w.identity.namespace.clone();
+    let main_rt = tokio::runtime::Handle::current();
 
-    // 1 s Lease poll: feeds the Coordinator's stale-epoch fence AND
-    // the heartbeat client's controller discovery.
-    tasks.push(tokio::spawn(run_lease_watch(
-        w.client.clone(),
-        ns.clone(),
-        CONTROLLER_LEASE_NAME.to_owned(),
-        w.lease_epoch.clone(),
-        cancel.clone(),
-    )));
-
-    // EndpointSlice watch → BrokerRegistry. The watch returns when
-    // its stream ends; restart with a small delay.
+    // --- dedicated control-plane thread ---
     {
-        let client = w.client.clone();
-        let watch_ns = ns.clone();
+        let ns = ns.clone();
         let svc = w.identity.dns.headless_service.clone();
+        let lease_epoch = w.lease_epoch.clone();
         let registry = w.registry.clone();
-        let c = cancel.clone();
-        tasks.push(tokio::spawn(async move {
-            loop {
-                run_endpoint_watch(
-                    client.clone(),
-                    watch_ns.clone(),
-                    svc.clone(),
-                    registry.clone(),
-                    c.clone(),
-                )
-                .await;
-                if c.is_cancelled() {
-                    return;
-                }
-                warn!("endpoint watch stream ended; restarting in 2s");
-                tokio::select! {
-                    () = c.cancelled() => return,
-                    () = tokio::time::sleep(Duration::from_secs(2)) => {}
-                }
-            }
-        }));
+        let heart = w.heart.clone();
+        let heartbeat_bind = w.heartbeat_bind.clone();
+        let lease_timings = w.lease_timings;
+        let coordinator_pump = coordinator.clone();
+        let cancel = cancel.clone();
+        let spawn_res = std::thread::Builder::new()
+            .name("skafka-control".to_owned())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(err) => {
+                        warn!(%err, "control-plane runtime build failed; multi-broker control plane DOWN");
+                        return;
+                    }
+                };
+                rt.block_on(control_plane(
+                    ns,
+                    svc,
+                    self_id,
+                    lease_epoch,
+                    registry,
+                    heart,
+                    heartbeat_bind,
+                    lease_timings,
+                    dir,
+                    topics,
+                    manager,
+                    coordinator_pump,
+                    is_controller,
+                    topic_notify,
+                    cancel,
+                    main_rt,
+                ));
+            });
+        if let Err(err) = spawn_res {
+            warn!(%err, "control-plane thread spawn failed; multi-broker control plane DOWN");
+        }
     }
-
-    // Long-lived heartbeat stream to whoever holds the Lease.
-    tasks.push(tokio::spawn(w.heart.clone().run(cancel.clone())));
 
     // Readiness gate (skafka.io/PartitionsReady): flip once the
     // first assignment.json applies, so the pod only joins the
@@ -833,22 +848,104 @@ fn spawn_cluster_tasks(
             });
         }));
     }
+}
+
+/// Body of the control-plane thread: builds its own kube client,
+/// then runs the lease watch, endpoint watch, heartbeat stream,
+/// status pump, and the election campaign until `cancel` fires.
+/// The campaign is awaited last so its release-on-shutdown runs
+/// before the runtime is torn down.
+#[allow(clippy::too_many_arguments)]
+async fn control_plane(
+    ns: String,
+    headless_svc: String,
+    self_id: String,
+    lease_epoch: Arc<KubeLeaseEpoch>,
+    registry: Arc<BrokerRegistry>,
+    heart: Arc<HeartbeatClient>,
+    heartbeat_bind: String,
+    lease_timings: (Duration, Duration, Duration),
+    dir: std::path::PathBuf,
+    topics: Arc<TopicRegistry>,
+    manager: Arc<Manager>,
+    coordinator: Arc<Coordinator>,
+    is_controller: Arc<AtomicBool>,
+    topic_notify: Arc<TopicChangeNotifier>,
+    cancel: CancellationToken,
+    main_rt: tokio::runtime::Handle,
+) {
+    // Own client: the main runtime's client buffers requests through
+    // a worker task pinned to the main runtime — exactly the
+    // starvation this thread exists to escape.
+    let client = loop {
+        match kube::Client::try_default().await {
+            Ok(c) => break c,
+            Err(err) => {
+                warn!(%err, "control plane: kube client init failed; retrying in 5s");
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+            }
+        }
+    };
+    info!("control plane up on dedicated runtime");
+
+    // 1 s Lease poll: feeds the Coordinator's stale-epoch fence AND
+    // the heartbeat client's controller discovery.
+    tokio::spawn(run_lease_watch(
+        client.clone(),
+        ns.clone(),
+        CONTROLLER_LEASE_NAME.to_owned(),
+        lease_epoch,
+        cancel.clone(),
+    ));
+
+    // EndpointSlice watch → BrokerRegistry. The watch returns when
+    // its stream ends; restart with a small delay.
+    {
+        let client = client.clone();
+        let watch_ns = ns.clone();
+        let registry = registry.clone();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                run_endpoint_watch(
+                    client.clone(),
+                    watch_ns.clone(),
+                    headless_svc.clone(),
+                    registry.clone(),
+                    c.clone(),
+                )
+                .await;
+                if c.is_cancelled() {
+                    return;
+                }
+                warn!("endpoint watch stream ended; restarting in 2s");
+                tokio::select! {
+                    () = c.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(2)) => {}
+                }
+            }
+        });
+    }
+
+    // Long-lived heartbeat stream to whoever holds the Lease.
+    tokio::spawn(heart.clone().run(cancel.clone()));
 
     // 1 s status pump: liveness + last-seen assignment version +
     // active consumer groups (feeds the controller's GroupSource).
     {
-        let heart = w.heart.clone();
-        let coord = coordinator.clone();
-        let mgr = manager.clone();
+        let heart = heart.clone();
         let c = cancel.clone();
-        tasks.push(tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     () = c.cancelled() => return,
                     _ = tick.tick() => {
-                        let version = coord
+                        let version = coordinator
                             .snapshot()
                             .map_or(0, |a| u64::try_from(a.assignment_version).unwrap_or(0));
                         // Disconnected during controller failover is
@@ -858,50 +955,46 @@ fn spawn_cluster_tasks(
                             timestamp_ms: unix_ms(),
                             last_seen_assignment_version: version,
                             partitions: Vec::new(),
-                            active_groups: mgr.local_groups(),
+                            active_groups: manager.local_groups(),
                         });
                     }
                 }
             }
-        }));
+        });
     }
 
     // Election: while we hold the skafka-controller Lease, run the
     // controller stack; on loss the leader token tears it down and
-    // we re-enter candidacy.
-    {
-        let election =
-            KubeLeaseElection::new(w.client.clone(), ns, CONTROLLER_LEASE_NAME, self_id.clone())
-                .with_timings(w.lease_timings.0, w.lease_timings.1, w.lease_timings.2);
-        let registry = w.registry.clone();
-        let heartbeat_bind = w.heartbeat_bind.clone();
-        let c = cancel.clone();
-        tasks.push(tokio::spawn(async move {
-            let gauge_flag = is_controller.clone();
-            election
-                .campaign(
-                    c,
-                    move |epoch, leader_token| {
-                        is_controller.store(true, Ordering::Relaxed);
-                        tokio::spawn(run_controller(
-                            epoch,
-                            leader_token,
-                            dir.clone(),
-                            self_id.clone(),
-                            topics.clone(),
-                            registry.clone(),
-                            heartbeat_bind.clone(),
-                            topic_notify.clone(),
-                        ));
-                    },
-                    // Synchronous, ordered before any re-acquire — a
-                    // spawned watcher here raced the next stint's
-                    // store(true) and left the gauge stuck at 0.
-                    move || gauge_flag.store(false, Ordering::Relaxed),
-                )
-                .await;
-        }));
-    }
+    // we re-enter candidacy. Awaited (not spawned) so the campaign's
+    // release-on-shutdown completes before this runtime drops.
+    let election = KubeLeaseElection::new(client, ns, CONTROLLER_LEASE_NAME, self_id.clone())
+        .with_timings(lease_timings.0, lease_timings.1, lease_timings.2);
+    let gauge_flag = is_controller.clone();
+    election
+        .campaign(
+            cancel,
+            move |epoch, leader_token| {
+                is_controller.store(true, Ordering::Relaxed);
+                // The controller stack does storage I/O — it belongs
+                // on the main runtime, not the control plane.
+                main_rt.spawn(run_controller(
+                    epoch,
+                    leader_token,
+                    dir.clone(),
+                    self_id.clone(),
+                    topics.clone(),
+                    registry.clone(),
+                    heartbeat_bind.clone(),
+                    topic_notify.clone(),
+                ));
+            },
+            // Synchronous, ordered before any re-acquire — a spawned
+            // watcher here raced the next stint's store(true) and
+            // left the gauge stuck at 0.
+            move || gauge_flag.store(false, Ordering::Relaxed),
+        )
+        .await;
+    info!("control plane shut down");
 }
 
 /// The controller stack: heartbeat gRPC server + AssignmentLoop +
