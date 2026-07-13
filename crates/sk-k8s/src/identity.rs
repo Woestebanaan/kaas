@@ -44,10 +44,19 @@ impl DnsConfig {
     /// Build the FQDN for `ordinal` under the StatefulSet's
     /// headless service. Mirrors Go's `Sprintf("%s.%s.%s.svc.%s",
     /// pod, headless, namespace, cluster_domain)`.
+    ///
+    /// Accepts both placeholder dialects: the Rust-native
+    /// `{ordinal}` AND Go's `%d` — the shared Helm chart emits
+    /// `SKAFKA_POD_NAME_PATTERN=<name>-%d` for the Go broker and
+    /// must keep doing so while the Go rollback path exists. A `%d`
+    /// passing through unreplaced put `skafka-%d.…` hostnames into
+    /// live Metadata responses (clients died on DNS).
     pub fn fqdn(&self, ordinal: i32) -> String {
+        let ord = ordinal.to_string();
         let pod = self
             .pod_name_pattern
-            .replace("{ordinal}", &ordinal.to_string());
+            .replace("{ordinal}", &ord)
+            .replace("%d", &ord);
         format!(
             "{pod}.{}.{}.svc.{}",
             self.headless_service, self.namespace, self.cluster_domain

@@ -208,7 +208,16 @@ impl HeartbeatClient {
         } else {
             format!("http://{target}")
         };
+        // Bounded connect + h2 keepalive: a controller pod replaced
+        // mid-stream leaves a silently-dead TCP connection (no FIN /
+        // RST reaches us), and without keepalive the recv side can
+        // hang forever — observed live as a broker stranded out of
+        // the alive set until manually bounced.
         let channel = tonic::transport::Channel::from_shared(endpoint)?
+            .connect_timeout(Duration::from_secs(5))
+            .http2_keep_alive_interval(Duration::from_secs(5))
+            .keep_alive_timeout(Duration::from_secs(5))
+            .keep_alive_while_idle(true)
             .connect()
             .await?;
         let mut client = ControllerHeartbeatClient::new(channel);
@@ -245,7 +254,23 @@ impl HeartbeatClient {
         &self,
         inbound: &mut tonic::Streaming<ControllerCommand>,
     ) -> anyhow::Result<()> {
-        while let Some(msg) = inbound.message().await? {
+        // The controller PINGs every 1 s — 10 s of silence means the
+        // stream is dead even if the transport hasn't noticed.
+        // Belt-and-braces with the channel's h2 keepalive.
+        const READ_TIMEOUT: Duration = Duration::from_secs(10);
+        loop {
+            let msg = match tokio::time::timeout(READ_TIMEOUT, inbound.message()).await {
+                Ok(next) => next?,
+                Err(_elapsed) => {
+                    sk_observability::metrics::global()
+                        .heartbeat_misses
+                        .add(1, &[]);
+                    return Err(anyhow::anyhow!(
+                        "heartbeat: no controller traffic for {READ_TIMEOUT:?}; reconnecting"
+                    ));
+                }
+            };
+            let Some(msg) = msg else { break };
             self.record_received();
             if let Some(h) = self.on_command.lock().as_ref() {
                 h(&msg);
