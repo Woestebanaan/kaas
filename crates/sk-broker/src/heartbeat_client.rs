@@ -254,10 +254,13 @@ impl HeartbeatClient {
         &self,
         inbound: &mut tonic::Streaming<ControllerCommand>,
     ) -> anyhow::Result<()> {
-        // The controller PINGs every 1 s — 10 s of silence means the
-        // stream is dead even if the transport hasn't noticed.
-        // Belt-and-braces with the channel's h2 keepalive.
-        const READ_TIMEOUT: Duration = Duration::from_secs(10);
+        // The controller PINGs every 1 s — sustained silence means
+        // the stream is dead even if the transport hasn't noticed.
+        // Belt-and-braces with the channel's h2 keepalive. 30 s (not
+        // lower): a controller briefly starved by takeover I/O must
+        // not have its whole broker set torn down and rebalanced,
+        // which is itself what feeds the next starvation.
+        const READ_TIMEOUT: Duration = Duration::from_secs(30);
         loop {
             let msg = match tokio::time::timeout(READ_TIMEOUT, inbound.message()).await {
                 Ok(next) => next?,

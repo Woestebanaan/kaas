@@ -253,6 +253,7 @@ async fn three_broker_controller_balances_and_reassigns() {
         registry.clone(),
         "127.0.0.1:0".to_owned(),
         notifier.clone(),
+        tokio::runtime::Handle::current(),
     ));
 
     // 1. All six partitions get exactly one owner, spread over all

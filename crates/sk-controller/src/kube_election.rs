@@ -49,7 +49,6 @@ pub const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(15);
 pub const DEFAULT_RENEW_DEADLINE: Duration = Duration::from_secs(10);
 pub const DEFAULT_RETRY_PERIOD: Duration = Duration::from_secs(2);
 
-#[derive(Clone)]
 pub struct KubeLeaseElection {
     client: Client,
     namespace: String,
@@ -58,6 +57,13 @@ pub struct KubeLeaseElection {
     lease_duration: Duration,
     renew_deadline: Duration,
     retry_period: Duration,
+    /// Last `leaseTransitions` we observed while holding — used by
+    /// [`Self::release`] so its apply preserves the counter. SSA
+    /// prunes previously-owned fields missing from the body; a
+    /// release that omitted `leaseTransitions` reset the controller
+    /// epoch 119 → 1 live, letting stale on-disk assignment state
+    /// outrank every subsequent controller.
+    last_transitions: std::sync::atomic::AtomicI32,
 }
 
 impl std::fmt::Debug for KubeLeaseElection {
@@ -86,6 +92,7 @@ impl KubeLeaseElection {
             lease_duration: DEFAULT_LEASE_DURATION,
             renew_deadline: DEFAULT_RENEW_DEADLINE,
             retry_period: DEFAULT_RETRY_PERIOD,
+            last_transitions: std::sync::atomic::AtomicI32::new(0),
         })
     }
 
@@ -207,6 +214,8 @@ impl KubeLeaseElection {
             };
             api.create(&PostParams::default(), &lease).await?;
         }
+        self.last_transitions
+            .store(new_transitions, std::sync::atomic::Ordering::Relaxed);
         Ok(Some(i64::from(new_transitions)))
     }
 
@@ -242,6 +251,8 @@ impl KubeLeaseElection {
             &Patch::Apply(&patch),
         )
         .await?;
+        self.last_transitions
+            .store(transitions, std::sync::atomic::Ordering::Relaxed);
         Ok(true)
     }
 
@@ -249,14 +260,25 @@ impl KubeLeaseElection {
     /// the next candidate doesn't wait out the full lease window
     /// (client-go's ReleaseOnCancel). Errors are logged and
     /// swallowed — the lease going stale is the fallback.
+    ///
+    /// The apply body MUST carry `leaseTransitions` (and the lease
+    /// duration): SSA prunes previously-owned fields that are
+    /// missing, and wiping the transitions counter resets the
+    /// cluster-wide controller epoch fence.
     async fn release(&self) {
+        let transitions = self
+            .last_transitions
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let duration_secs = i32::try_from(self.lease_duration.as_secs()).unwrap_or(i32::MAX);
         let patch = serde_json::json!({
             "apiVersion": "coordination.k8s.io/v1",
             "kind": "Lease",
             "metadata": { "name": self.lease_name, "namespace": self.namespace },
             "spec": {
                 "holderIdentity": "",
+                "leaseDurationSeconds": duration_secs,
                 "renewTime": Self::now_rfc3339(),
+                "leaseTransitions": transitions,
             }
         });
         if let Err(err) = self

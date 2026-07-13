@@ -976,7 +976,9 @@ async fn control_plane(
             move |epoch, leader_token| {
                 is_controller.store(true, Ordering::Relaxed);
                 // The controller stack does storage I/O — it belongs
-                // on the main runtime, not the control plane.
+                // on the main runtime, not the control plane. It
+                // gets the control-plane handle back so the
+                // heartbeat SERVER (liveness signal) stays isolated.
                 main_rt.spawn(run_controller(
                     epoch,
                     leader_token,
@@ -986,6 +988,7 @@ async fn control_plane(
                     registry.clone(),
                     heartbeat_bind.clone(),
                     topic_notify.clone(),
+                    tokio::runtime::Handle::current(),
                 ));
             },
             // Synchronous, ordered before any re-acquire — a spawned
@@ -1013,17 +1016,23 @@ pub(crate) async fn run_controller(
     registry: Arc<BrokerRegistry>,
     heartbeat_bind: String,
     topic_notify: Arc<TopicChangeNotifier>,
+    ctl_rt: tokio::runtime::Handle,
 ) {
     let heart_srv = HeartbeatServer::new();
 
-    // Heartbeat gRPC listener (fixed :9094 in the chart). A bind
-    // failure is survivable — the broker source falls back to the
-    // EndpointSlice registry — but noisy on purpose.
+    // Heartbeat gRPC listener (fixed :9094 in the chart). Spawned on
+    // the CONTROL-PLANE runtime: its 1 s PINGs are the liveness
+    // signal every peer's read-watchdog gates on, so it must not
+    // share fate with takeover/storage I/O on the main runtime — a
+    // starved server made every client tear down its stream, flap
+    // the broker set, and trigger the next rebalance storm. A bind
+    // failure is survivable (the broker source falls back to the
+    // EndpointSlice registry) but noisy on purpose.
     match heartbeat_bind.parse::<std::net::SocketAddr>() {
         Ok(addr) => {
             let svc = ControllerHeartbeatServer::new(HeartbeatService::new(heart_srv.clone()));
             let t = leader_token.clone();
-            tokio::spawn(async move {
+            ctl_rt.spawn(async move {
                 if let Err(err) = tonic::transport::Server::builder()
                     .add_service(svc)
                     .serve_with_shutdown(addr, t.cancelled())
