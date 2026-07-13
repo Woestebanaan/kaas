@@ -305,6 +305,17 @@ impl KubeLeaseElection {
                         self.release().await;
                         return;
                     }
+                    // The controller stack cancels its own token when
+                    // it can't run (e.g. the initial assignment write
+                    // failed). Release so another candidate takes over
+                    // immediately instead of us renewing a leaderless
+                    // lease.
+                    () = leader_token.cancelled() => {
+                        warn!(identity = %self.identity,
+                              "controller stack ended; releasing lease and re-entering candidacy");
+                        self.release().await;
+                        break;
+                    }
                     () = tokio::time::sleep(self.retry_period) => {}
                 }
                 match self.try_renew().await {

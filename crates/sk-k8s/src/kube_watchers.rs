@@ -239,7 +239,13 @@ pub async fn patch_readiness(
 
     let api: Api<Pod> = Api::namespaced(client, &namespace);
     let condition_status = if ready { "True" } else { "False" };
+    // Server-side apply requires apiVersion + kind in the body —
+    // without them the API server answers
+    // `invalid object type: /, Kind=` (400).
     let patch = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": { "name": pod_name, "namespace": namespace },
         "status": {
             "conditions": [
                 {

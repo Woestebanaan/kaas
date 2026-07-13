@@ -221,12 +221,20 @@ impl Cli {
         let cluster_id =
             env::var("SKAFKA_CLUSTER_ID").unwrap_or_else(|_| "skafka-rust-dev".to_owned());
 
-        let broker_id = env::var("SKAFKA_BROKER_ID")
-            .ok()
-            .map(|s| s.parse::<i32>())
-            .transpose()
-            .map_err(ConfigError::BrokerId)?
-            .unwrap_or(0);
+        // Explicit SKAFKA_BROKER_ID wins; otherwise derive the
+        // StatefulSet ordinal from MY_POD_NAME ("skafka-2" → 2) the
+        // way the Go broker did. A StatefulSet can't template
+        // per-pod env, so without this every replica boots as
+        // broker 0 and the whole cluster elects/renews under one
+        // identity. Dev mode (neither var set) stays broker 0.
+        let broker_id = match env::var("SKAFKA_BROKER_ID").ok().filter(|s| !s.is_empty()) {
+            Some(s) => s.parse::<i32>().map_err(ConfigError::BrokerId)?,
+            None => env::var("MY_POD_NAME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .and_then(|pod| pod.rsplit('-').next()?.parse::<i32>().ok())
+                .unwrap_or(0),
+        };
 
         let topics_seed = env::var("SKAFKA_TOPICS").unwrap_or_default();
         let log_level = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
