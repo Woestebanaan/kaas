@@ -485,8 +485,21 @@ impl Partition {
             let _ = self.flush.req_tx.try_send(());
         }
 
-        // acks == -1: wait for the fsync that covers our seq.
-        if acks == -1 {
+        // acks == -1: wait for the fsync — but ONLY when this append
+        // is the one that crossed the flush-interval threshold. This
+        // mirrors the Go engine's `waitForFlushIfAcksAllLocked`
+        // (`triggeredFlushSeq <= 0 → return nil`): with
+        // `flush_interval_messages == 1` every append triggers, so
+        // every acks=all append waits — honest semantics. With the
+        // interval raised (the durability/throughput dial), only the
+        // crossing append pays the fsync latency; everything else
+        // acks immediately, including appends landing while a flush
+        // is in flight. The previous shape waited on the
+        // last-requested seq from EVERY acks=all append, parking the
+        // whole pipeline for the full fsync window each cycle — worth
+        // −26% Strimzi-relative throughput vs the Go flavor at
+        // interval 10000 on NFS (phase 9 A.3 gate, gh #188).
+        if acks == -1 && triggered_flush {
             self.await_flush(my_flush_seq).await?;
         }
 
@@ -1110,6 +1123,70 @@ mod tests {
             // at minimum the call must not deadlock and must reflect
             // a non-zero completed_flush_seq.
             p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            assert!(p.inner.lock().completed_flush_seq >= 1);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn acks_all_below_interval_does_not_wait_for_any_flush() {
+        // gh #188: with the durability dial raised
+        // (flush_interval_messages ≫ 1), an acks=all append that does
+        // NOT cross the threshold must ack immediately — even if a
+        // flush is pending or in flight — mirroring the Go engine's
+        // `triggeredFlushSeq <= 0 → no wait`. The pre-fix shape parked
+        // every acks=all append on the last-requested seq, stalling
+        // the whole pipeline for the fsync window each cycle.
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig {
+                    flush_interval_messages: 1_000,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            // Two 5-record acks=all batches: far below the interval,
+            // so no flush is ever requested — the appends must return
+            // without any committer round trip.
+            p.append(0, -1, build_batch(5, 1_000)).await.unwrap();
+            p.append(0, -1, build_batch(5, 1_000)).await.unwrap();
+            assert_eq!(p.inner.lock().requested_flush_seq, 0);
+            assert_eq!(p.inner.lock().completed_flush_seq, 0);
+            p.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn acks_all_crossing_interval_still_waits() {
+        // The other half of the gh #188 contract: the append that
+        // crosses the threshold DOES wait for its fsync.
+        let tmp = tempfile::tempdir().unwrap();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs,
+                "t".into(),
+                0,
+                tmp.path().to_path_buf(),
+                PartitionConfig {
+                    flush_interval_messages: 8,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            p.append(0, -1, build_batch(5, 1_000)).await.unwrap();
+            assert_eq!(p.inner.lock().completed_flush_seq, 0);
+            // 5 + 5 crosses 8 → this append triggers seq 1 and must
+            // not return before the committer has fsynced it.
+            p.append(0, -1, build_batch(5, 1_000)).await.unwrap();
             assert!(p.inner.lock().completed_flush_seq >= 1);
             p.close().await.unwrap();
         });
