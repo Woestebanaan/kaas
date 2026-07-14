@@ -34,6 +34,17 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// Phase 9 bake harness (gh #152): when SKAFKA_COMPAT_BOOTSTRAP is
+	// set, skip the in-process broker entirely and point every test's
+	// SeedBrokers at that address — this is how the EOS smoke runs
+	// against the live (Rust) broker during the 72 h bake. The archive
+	// freeze doesn't apply: the Go test binary acts as a Kafka
+	// *client* here, not as the broker under test.
+	if addr := os.Getenv("SKAFKA_COMPAT_BOOTSTRAP"); addr != "" {
+		testAddr = addr
+		os.Exit(m.Run())
+	}
+
 	// Grab a free port before constructing the broker so Config.Port matches
 	// what the listener will actually bind to (needed for correct Metadata responses).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

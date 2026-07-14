@@ -1,0 +1,67 @@
+# skafka-scripts GO-FLAVOR CONTROL RUN against Go broker v0.1.190-preview.
+# Captured 2026-07-14 (Phase 9 workstream A.2, gh #152) with the Go
+# images temporarily swapped onto the production 3-broker cluster.
+#
+# This file is a CLASSIFICATION KEY, not a regression gate: the parity
+# contract is "every script that exits 0 against the Go broker exits 0
+# against the Rust broker". Rows here explain FAIL→SKIP downgrades (or
+# mandated fixes) in .parity-baseline.txt.
+#
+# Notable classifications this run settled:
+#   - kafka-acls.sh PASSes on Go       → DescribeAcls/CreateAcls/DeleteAcls
+#     (keys 29/30/31) + KafkaUser ACL writer were ported to Rust.
+#   - kafka-configs.sh PASSes on Go    → DescribeConfigs BROKER resource
+#     support (gh #109) was ported to Rust (the old baseline's
+#     "expected divergence" annotation was wrong — Go serves it).
+#   - kafka-log-dirs.sh PASSes on Go   → DescribeLogDirs (key 35) ported.
+#   - kafka-delete-records.sh / kafka-topics.sh /
+#     kafka-streams-application-reset.sh PASS on Go → DeleteRecords (21),
+#     DeleteTopics (20), and gh #86 synthetic CR names ported.
+#   - kafka-restart-resilience.sh FAILED once on Go (HWM=0 after a
+#     bounce-during-produce; producer acked 50k) and PASSed on immediate
+#     re-run — a Go-side timing flake, recorded as PASS below with this
+#     note. The Rust broker passed the same script deterministically.
+
+kafka-acls.sh                            PASS
+kafka-broker-api-versions.sh             PASS
+kafka-client-metrics.sh                  SKIP
+kafka-cluster.sh                         PASS
+kafka-configs.sh                         PASS
+kafka-console-consumer.sh                PASS
+kafka-console-producer.sh                PASS
+kafka-console-share-consumer.sh          SKIP
+kafka-consumer-groups.sh                 PASS
+kafka-consumer-perf-test.sh              PASS
+kafka-delegation-tokens.sh               SKIP
+kafka-delete-records.sh                  PASS
+kafka-dump-log.sh                        SKIP
+kafka-e2e-latency.sh                     PASS
+kafka-features.sh                        SKIP
+kafka-get-offsets.sh                     PASS
+kafka-groups.sh                          SKIP
+kafka-jmx.sh                             SKIP
+kafka-leader-election.sh                 SKIP
+kafka-log-dirs.sh                        PASS
+kafka-metadata-quorum.sh                 SKIP
+kafka-metadata-shell.sh                  SKIP
+kafka-producer-perf-test.sh              PASS
+kafka-reassign-partitions.sh             SKIP
+kafka-replica-verification.sh            SKIP
+kafka-restart-resilience.sh              PASS   # one HWM=0 flake, PASS on re-run — see header
+kafka-run-class.sh                       SKIP
+kafka-server-start.sh                    SKIP
+kafka-server-stop.sh                     SKIP
+kafka-share-consumer-perf-test.sh        SKIP
+kafka-share-groups.sh                    SKIP
+kafka-storage.sh                         SKIP
+kafka-streams-application-reset.sh       PASS
+kafka-streams-groups.sh                  SKIP
+kafka-topics.sh                          PASS
+kafka-transactions.sh                    PASS
+kafka-txn-coordinator.sh                 PASS
+kafka-txn-timeout.sh                     PASS
+kafka-verifiable-consumer.sh             PASS
+kafka-verifiable-producer.sh             PASS
+kafka-verifiable-share-consumer.sh       SKIP
+
+# Totals: 21 PASS, 20 SKIP, 0 unexplained FAIL.
