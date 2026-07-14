@@ -367,7 +367,14 @@ impl KafkaUserReconciler {
 
         let mut status = user.status.clone().unwrap_or_default();
         mutate(&mut status);
-        let body = serde_json::json!({ "status": status });
+        // Server-side apply requires apiVersion + kind in the body —
+        // without them the API server answers
+        // `invalid object type: /, Kind=` (400).
+        let body = serde_json::json!({
+            "apiVersion": "skafka.io/v1alpha1",
+            "kind": "KafkaUser",
+            "status": status,
+        });
         api.patch_status(
             name,
             &PatchParams::apply("skafka-operator").force(),
