@@ -4,27 +4,12 @@ Releases are tag-driven. Pushing a semver tag to `main` triggers the
 `release` workflow (`.github/workflows/docker-publish.yml`), which builds and
 publishes the broker image, the operator image, and the Helm chart to GHCR.
 
-## Status: mid-cutover (Phase 9)
-
-skafka is being rewritten from Go to Rust (see `rewrite.md`,
-`phase-9.md`). The **first Rust-numbered release is `v0.2.0-preview`**:
-the version line jumped from `v0.1.190-preview` per the Phase 9 plan —
-the one pre-authorised exception to patch-bump-only. Where things
-stand:
-
-- Every `v*` tag dual-publishes both flavors (since Phase 8): the Go
-  pair from `archive/Dockerfile*` and the Rust pair from
-  `bins/*/Dockerfile`, under `skafka[-preview]` / `skafka-rs[-preview]`
-  names (+ `-operator` variants).
-- The Helm chart's `image.flavor` knob (`go` | `rust`) selects the pair;
-  the default is `go` until the 72 h bake on `v0.2.0-preview` passes,
-  then `v0.2.1-preview` flips it to `rust`.
-- After two clean Rust-default releases, the Go tree is deleted, the
-  Rust images take over the plain names, and the patch line continues
-  from the Rust side (Phase 9 workstream F rewrites this doc to its
-  final single-flavor shape).
-
-The rules below apply to whichever flavor is currently being cut.
+Every `v*` tag builds the broker and operator from `bins/*/Dockerfile`
+and publishes to `skafka[-preview]` / `skafka-operator[-preview]`. The
+`v0.2.x` line is the first cut from the Rust workspace; `v0.1.x` tags
+predate it (the version line jumped from `v0.1.190-preview` to
+`v0.2.0-preview` at the cutover — the one pre-authorised exception to
+patch-bump-only).
 
 ## Versioning
 

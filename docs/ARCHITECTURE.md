@@ -1,9 +1,7 @@
 # skafka — Architecture
 
 Narrative + diagrams. For per-feature reference detail, see
-[`CLAUDE.md`](./CLAUDE.md); for the Rust rewrite plan and per-phase
-detail, see [`rewrite.md`](./rewrite.md) and the
-[`phase-N.md`](./phase-0.md) docs.
+[`CLAUDE.md`](../CLAUDE.md).
 
 ---
 
@@ -76,7 +74,7 @@ gossip protocol, no replicated state machine.
 
 ## Process topology
 
-### Broker — `cmd/skafka` (Go) / `bins/skafka` (Rust)
+### Broker — `bins/skafka`
 
 `StatefulSet` with stable pod ordinals (`skafka-0`, `skafka-1`, …). Each
 pod is a single broker process that:
@@ -93,7 +91,7 @@ Brokers are **runtime-independent of the operator**: once the broker
 process is up, K8s API outages don't block the Produce/Fetch hot path.
 The hot path makes zero K8s API calls.
 
-### Operator — `cmd/skafka-operator` (Go) / `bins/skafka-operator` (Rust)
+### Operator — `bins/skafka-operator`
 
 `Deployment`, single replica. Reconciles four CRDs into on-disk config
 files (auth + topics) and Kubernetes plumbing (TLS Certs + Routes):
@@ -302,7 +300,7 @@ Its extra responsibilities:
 
 - Observes peer brokers via heartbeat gRPC (`proto/heartbeat.proto`).
 - Computes partition + consumer-group assignments
-  (`internal/controller/balancer.go`).
+  (`crates/sk-controller/src/balancer.rs`).
 - Writes `assignment.json` epoch-prefixed (tmp + atomic rename). Stale
   epochs are rejected by `Coordinator::set_assignment`.
 - Mirrors the assignment into a `KafkaClusterAssignments` CR for
@@ -313,11 +311,11 @@ When does it recompute?
 | Trigger                          | Wired via                                          |
 |----------------------------------|----------------------------------------------------|
 | First win of controller Lease    | initial recompute                                  |
-| `KafkaTopic` CR add/modify/delete| `TopicWatcher` → `clusterRuntime.NotifyTopicChange`|
-| Broker joins/leaves alive set    | `watchBrokerSet` polls `BrokerSource.AliveBrokers` |
+| `KafkaTopic` CR add/modify/delete| `TopicWatcher` → topic-change notify (`bins/skafka/src/cluster.rs`) |
+| Broker joins/leaves alive set    | broker-set watcher polls the alive set (`bins/skafka/src/cluster.rs`) |
 
 Non-controller brokers watch `assignment.json` via fsnotify + 1 s poll
-(`internal/broker/coordinator.go`). The `TakeoverDriver` /
+(`crates/sk-broker/src/coordinator.rs`). The `TakeoverDriver` /
 `GroupTakeoverDriver` opens or relinquishes partitions in the storage
 engine when ownership changes. There is no per-partition Lease — the
 singleton `skafka-controller` Lease is the only K8s coordination
@@ -369,7 +367,7 @@ can never physically collide with a new leader's segment:
 
 The index is **sparse**: one entry every `index.interval.bytes` of log
 data (4 KiB default). Each entry is `(rel_offset:i32_be, file_pos:i32_be)`.
-`searchIndex` does a binary search returning the closest entry ≤ the
+Index lookup does a binary search returning the closest entry ≤ the
 target offset; the caller scans forward in the log from there. Mmap of
 the index is feature-gated behind `mmap` (the one unsafe-code carve-out
 in the workspace).
@@ -399,7 +397,7 @@ partition open. Written via tmp + fsync + rename (NFSv4 same-directory
 rename atomicity). Updated on: segment roll, `Relinquish`,
 `take_over`, the cleaner's `log_start` advance. **Not** updated on
 every append — the manifest can lag in-memory by up to one segment;
-`recoverSegment` reconciles on takeover by scanning the active segment
+segment recovery reconciles on takeover by scanning the active segment
 forward to the first malformed batch boundary.
 
 `producer-state.snapshot` is the idempotent-producer dedupe window
@@ -620,34 +618,6 @@ decoded-record representation is allowed to live.
 
 ---
 
-## Rewrite status
-
-The workspace is mid-port from Go to Rust. The Go tree lives under
-`archive/` and is frozen — bugfixes only, no new feature work. The
-Rust port lands phase-by-phase per [`rewrite.md`](./rewrite.md):
-
-| Phase | Scope                                     | Status         |
-|-------|-------------------------------------------|----------------|
-| 0     | Workspace bootstrap, CI, Dockerfiles      | **shipped**    |
-| 1     | Wire codec (sk-codec)                     | initial slice  |
-|       |                                           | shipped; rest  |
-|       |                                           | in gh #153–155 |
-| 2     | Storage engine (sk-storage)               | **in progress**|
-|       |                                           | (gh #156–159)  |
-| 3     | Single-broker server (sk-protocol, bin)   | unstarted      |
-| 4     | Auth (sk-auth)                            | unstarted      |
-| 5     | Coordinator & assignment                  | unstarted      |
-| 6     | Transactions, idempotence, advanced       | unstarted      |
-| 7     | Operator                                  | unstarted      |
-| 8     | Observability, parity validation          | unstarted      |
-| 9     | Cutover (Go → Rust default)               | unstarted      |
-
-Tracker: [gh #143](https://github.com/Woestebanaan/skafka/issues/143).
-The chart, CRDs, scripts, and `proto/heartbeat.proto` do **not** move
-during the port — the Rust port reuses them verbatim.
-
----
-
 ## Non-goals (the "why we don't do X" section)
 
 Each of these is a deliberate choice with a real cost to flipping:
@@ -696,8 +666,7 @@ flag it rather than adding the underlying machinery.
 
 ## Where to go next
 
-- Per-feature reference: [`CLAUDE.md`](./CLAUDE.md).
-- Rust rewrite plan: [`rewrite.md`](./rewrite.md) and the
-  [`phase-N.md`](./phase-0.md) phase docs.
-- Helm chart docs: [`deploy/helm/skafka/README.md`](./deploy/helm/skafka/README.md).
+- Per-feature reference: [`CLAUDE.md`](../CLAUDE.md).
+- Helm chart docs: [`deploy/helm/skafka/README.md`](../deploy/helm/skafka/README.md).
 - Release procedure: [`RELEASING.md`](./RELEASING.md).
+- Documentation book plan: [`book-plan.md`](./book-plan.md).

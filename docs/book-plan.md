@@ -1,16 +1,13 @@
 # Documentation Book Plan — mdbook + mdbook-mermaid
 
-Status: **proposed** (not started). Companion to [`rewrite.md`](./rewrite.md) — this plan is
-independent of the phase track and can land any time, but it deliberately positions itself as
-the durable replacement for the planning-doc era once Phase 9 completes.
+Status: **proposed** (not started).
 
 ## Context
 
 skafka needs documentation that *proves* Kafka API compatibility and reliability — for users
 evaluating it against Apache Kafka / Strimzi, and for future maintainers. Today the repo has:
 
-- `docs/ARCHITECTURE.md` (703 lines, 9 hand-drawn ASCII diagrams) — the behavioural spec.
-- `docs/rewrite.md` + `docs/phase-0..9.md` (~8,800 lines) — planning docs, not reference docs.
+- `docs/ARCHITECTURE.md` (~650 lines, 9 hand-drawn ASCII diagrams) — the behavioural spec.
 - Crate-level `//!` doc comments — good seeds, not navigable documentation.
 - **No root README, no docs site, no mdbook, no mermaid anywhere.**
 
@@ -18,24 +15,22 @@ The goal is an mdbook site (with mdbook-mermaid for diagrams) that explains all 
 carries a dedicated compatibility section: one page per implemented Kafka API key and one page
 per implemented KIP, plus an honest list of deliberate non-goals.
 
-### Inventory the book must cover (as of `v0.2.3-preview`, mid Phase 9)
+### Inventory the book must cover (as of `v0.2.3-preview`)
 
-- **40 Kafka API keys** served by the Go broker (`archive/internal/broker/broker.go`
-  registration; handlers in `archive/internal/protocol/handlers/`), **36 by the Rust broker**
-  (`bins/skafka/src/main.rs` dispatch; `crates/sk-codec/src/api/registry.rs` ApiSpec table).
-  Gap: keys 23 (OffsetForLeaderEpoch), 50/51 (User SCRAM Credentials), 60 (DescribeCluster).
-- **30 distinct KIPs** referenced across the codebase: ~22 implemented, 8 deliberately not
+- **36 Kafka API keys** registered by the broker (`bins/skafka/src/main.rs` dispatch;
+  `crates/sk-codec/src/api/registry.rs` ApiSpec table, with a test asserting the count).
+  Known gaps vs the Apache 3.7 admin surface, each an open follow-up: key 23
+  (OffsetForLeaderEpoch), 50/51 (Describe/AlterUserScramCredentials), 60 (DescribeCluster).
+- **~30 distinct KIPs** referenced across the codebase: ~22 implemented, 8 deliberately not
   (see §4 below for the full split).
-- 12 Rust crates + 2 bins (~48k LoC, real code — only `sk-test-harness` is still a stub),
-  plus the frozen Go tree under `archive/`.
+- 12 crates + 2 bins (~48k LoC — only `sk-test-harness` is still a stub).
 - 41 `scripts/kafka-*.sh` integration scripts (current parity baseline: 21 PASS / 20 SKIP / 0 FAIL).
 
 ## 1. Book scaffolding
 
 - **Book root at `docs/`**: `docs/book.toml` with `src = "src"`, build output `docs/book/`
-  (gitignored). Existing `docs/*.md` (phase docs, perf captures) stay untouched at the `docs/`
-  top level — they're planning history; the book links to them. This also avoids breaking the
-  relative links that crate doc-comments make into `docs/phase-N.md`.
+  (gitignored). Existing `docs/*.md` stay at the `docs/` top level; the book links to them
+  until their content is ported into chapters.
 - **mdbook-mermaid**: run `mdbook-mermaid install docs/` once — commits `mermaid.min.js` +
   `mermaid-init.js` and adds the preprocessor block to `book.toml`. Pin versions
   (mdbook 0.4.x, mdbook-mermaid 0.15.x) in the CI install step.
@@ -66,27 +61,24 @@ Part I — Architecture              ← port of ARCHITECTURE.md, ASCII → merm
 Part II — Kafka Compatibility      ← the "prove it" section
   Wire protocol & framing (KIP-482 flexible versions)
   API support matrix               ← auto-generated, see §3
-  Per-API reference: one page per API key (40), fixed template:
-    versions · semantics · deviations from Apache · Go+Rust source paths · test coverage
-  KIP index: matrix of all 30 KIPs (implemented / partial / deliberate non-goal)
+  Per-API reference: one page per API key (36), fixed template:
+    versions · semantics · deviations from Apache · source paths · test coverage
+  KIP index: matrix of all ~30 KIPs (implemented / partial / deliberate non-goal)
   Per-KIP pages (~22 implemented): what the KIP does, how skafka implements it,
     source refs, how it's verified
   Explicit non-goals with rationale (see §4)
-  Verification story: scripts/kafka-*.sh matrix, kafka-compat suites,
+  Verification story: scripts/kafka-*.sh matrix, integration suites,
     parity project board, bench methodology
 
 Part III — Code Tour
-  Workspace layout & Go→Rust crate map
+  Workspace layout & crate dependency graph
   One chapter per crate (12) + both bins, seeded from existing //! docs
-  The frozen Go archive (reference implementation)
 
 Part IV — Operations
   Helm chart & listener configuration
   Storage substrate requirements (NFS semantics)
   Releasing
   Performance vs Strimzi
-
-Appendix — Rewrite history (links to rewrite.md + phase-0…9)
 ```
 
 **Mermaid targets** (replacing the 9 ASCII diagrams plus new ones):
@@ -101,16 +93,15 @@ Appendix — Rewrite history (links to rewrite.md + phase-0…9)
 ## 3. Auto-generated API matrix (the honesty lever)
 
 `crates/sk-codec/src/api/registry.rs` already carries the `ApiSpec` table (36 keys, with a
-test asserting the count and per-key phase provenance). Add:
+test asserting the count). Add:
 
 - `cargo xtask gen-api-matrix` — dumps that table into `docs/src/compat/api-matrix.md`
-  (key, name, version range, Rust status), merged with a hand-maintained Go column and KIP
-  cross-references.
+  (key, name, version range, status), merged with KIP cross-references.
 - A `check-docs-drift` CI step mirroring the existing `check-crd-drift` pattern.
 
 The compatibility page then *cannot* silently rot — the strongest evidence available that the
-docs reflect the actual wire surface. The matrix will honestly show the 4 keys the Rust broker
-doesn't serve yet.
+docs reflect the actual wire surface. The matrix also honestly lists the 4 admin keys the
+broker doesn't serve yet.
 
 ## 4. KIP coverage (the section the book exists for)
 
@@ -118,7 +109,7 @@ Implemented (~22, each gets a page):
 
 | Area | KIPs |
 |---|---|
-| Wire protocol / codec | 482 (flexible versions), 516 (topic IDs), 101 (OffsetForLeaderEpoch), 107 (DeleteRecords), 195 (CreatePartitions), 339 (IncrementalAlterConfigs), 546 (client quotas API), 290 (ACL pattern types), 554 (SCRAM API — Go broker only today), 345 (static membership), 800 (leave/join reason) |
+| Wire protocol / codec | 482 (flexible versions), 516 (topic IDs), 101 (OffsetForLeaderEpoch semantics in storage), 107 (DeleteRecords), 195 (CreatePartitions), 339 (IncrementalAlterConfigs), 546 (client quotas API), 290 (ACL pattern types), 554 (SCRAM API — codec/operator support landed; dispatcher wiring pending), 345 (static membership), 800 (leave/join reason) |
 | Auth / quotas / storage | 13 (per-broker quotas), 371 (mTLS principal mapping), 219 (throttle ordering), 58 (min.compaction.lag.ms), 354 (delete.retention.ms), 32 (timestamp types, byte-opaque) |
 | Transactions / idempotence | 98 (EOS foundation), 360 (PID re-init / epoch bump), 447 (EOS v2 group offsets), 394 (MEMBER_ID_REQUIRED) |
 
@@ -129,10 +120,10 @@ metrics), **848** / **1071** (next-gen rebalance — post-3.7), **932** (share g
 plus the architectural non-goals: KRaft, replication/ISR, literal `__transaction_state` topic.
 
 Per-KIP page template: *what the KIP changes in Apache Kafka* → *how skafka implements it*
-(source paths, Go + Rust) → *how it's verified* (unit/integration test, `scripts/kafka-*.sh`
+(source paths) → *how it's verified* (unit/integration test, `scripts/kafka-*.sh`
 scenario, parity-board entry).
 
-Per-API page template: purpose · supported versions (Go vs Rust) · request/response handling ·
+Per-API page template: purpose · supported versions · request/response handling ·
 skafka-specific semantics & deviations from Apache 3.7 · source paths · test coverage.
 
 ## 5. CI & publishing
@@ -156,7 +147,7 @@ skafka-specific semantics & deviations from Apache 3.7 · source paths · test c
    mermaid; shrink ARCHITECTURE.md to a pointer stub (update the CLAUDE.md reference).
 3. **Compatibility core** — API matrix (generated) + KIP index + non-goals page +
    verification story.
-4. **Per-KIP pages** (~22) and **per-API pages** (40, template-driven; expect 2–3 commits).
+4. **Per-KIP pages** (~22) and **per-API pages** (36, template-driven; expect 2–3 commits).
 5. **Code tour + operations + Pages deploy.**
 
 ## 7. Verification (every milestone)
