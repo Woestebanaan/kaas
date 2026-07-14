@@ -137,6 +137,14 @@ fn crd_yaml<T: serde::Serialize>(crd: &T) -> Result<String> {
 fn canonicalise(yaml: &str) -> Result<String> {
     use serde_yaml::Value;
     let mut value: Value = serde_yaml::from_str(yaml)?;
+    // schemars emits `default: ""` for `#[serde(default)]` String
+    // fields, but the apiserver validates defaults against the same
+    // field's own constraints — a `default: ""` next to a
+    // `minLength: 1` or a non-empty-matching `pattern` makes the
+    // whole CRD unapplyable ("Invalid value: \"\""). An empty-string
+    // default is also semantically inert (serde already treats the
+    // absent field as empty), so strip every one of them.
+    strip_empty_string_defaults(&mut value);
     if let Some(map) = value.as_mapping_mut() {
         if let Some(meta) = map
             .get_mut(Value::String("metadata".into()))
@@ -168,6 +176,33 @@ fn canonicalise(yaml: &str) -> Result<String> {
     } else {
         format!("---\n{body}")
     })
+}
+
+/// Recursively remove `default: ""` mapping entries. See the note in
+/// [`canonicalise`] — empty-string defaults violate their own field
+/// constraints under apiserver CRD validation and carry no meaning.
+fn strip_empty_string_defaults(value: &mut serde_yaml::Value) {
+    use serde_yaml::Value;
+    match value {
+        Value::Mapping(map) => {
+            let is_empty_default = |v: &Value| matches!(v, Value::String(s) if s.is_empty());
+            if map
+                .get(Value::String("default".into()))
+                .is_some_and(is_empty_default)
+            {
+                map.remove(Value::String("default".into()));
+            }
+            for (_, v) in map.iter_mut() {
+                strip_empty_string_defaults(v);
+            }
+        }
+        Value::Sequence(seq) => {
+            for v in seq.iter_mut() {
+                strip_empty_string_defaults(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 // --- shared helpers ------------------------------------------------
