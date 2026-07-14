@@ -65,24 +65,18 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end -}}
 
 {{/*
-skafka.brokerImage / skafka.operatorImage — Phase 9 flavor knob
-(gh #152). An explicit .repository always wins (renders exactly as it
-did before the knob existed). Otherwise the repository is derived from
-image.flavor (go | rust — one knob switches broker AND operator) plus
+skafka.brokerImage / skafka.operatorImage — an explicit .repository
+always wins. Otherwise the repository defaults to the GHCR name plus
 a "-preview" suffix when the resolved tag is a pre-release (contains
 "-"), mirroring the exact rule docker-publish.yml uses to compute
-image names. Unknown flavors fail the render loudly.
+image names.
 */}}
 {{- define "skafka.brokerImage" -}}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- $repo := .Values.image.repository -}}
 {{- if not $repo -}}
-  {{- if not (has .Values.image.flavor (list "go" "rust")) -}}
-    {{- fail (printf "image.flavor must be \"go\" or \"rust\", got %q" .Values.image.flavor) -}}
-  {{- end -}}
-  {{- $rs := eq .Values.image.flavor "rust" | ternary "-rs" "" -}}
   {{- $pre := contains "-" $tag | ternary "-preview" "" -}}
-  {{- $repo = printf "ghcr.io/woestebanaan/skafka%s%s" $rs $pre -}}
+  {{- $repo = printf "ghcr.io/woestebanaan/skafka%s" $pre -}}
 {{- end -}}
 {{ $repo }}:{{ $tag }}
 {{- end -}}
@@ -90,8 +84,8 @@ image names. Unknown flavors fail the render loudly.
 {{/*
 skafka.listenersJSON — gh #126 helper. Iterates the user-facing
 listeners array (Strimzi shape) and emits the SKAFKA_LISTENERS env
-value as a JSON list-of-objects matching cmd/skafka/listeners.go's
-listenerSpec.
+value as a JSON list-of-objects matching the broker's listener
+spec (crates/sk-broker/src/cli.rs).
 
 Listener entries with no `enabled` key are treated as enabled
 (always-on listeners). Entries with `enabled: false` are skipped.
@@ -216,8 +210,8 @@ selfSigned cert-manager Issuer + Certificate (gh #131).
 skafka.hasAnyTLSListener — true if any enabled listener has tls: true,
 regardless of type. Drives the volume mount + SKAFKA_TLS_CERT_FILE env
 in broker-statefulset.yaml — internal-TLS and external-TLS share the
-same broker-side cert loader (one *tls.Config across all listeners,
-per cmd/skafka/listeners.go).
+same broker-side cert loader (one TLS config across all listeners,
+per crates/sk-protocol/src/server.rs).
 */}}
 {{- define "skafka.hasAnyTLSListener" -}}
 {{- $hit := "" -}}
@@ -268,12 +262,8 @@ is empty (broker treats unset env as "no superUsers").
 {{- $tag := .Values.operator.image.tag | default .Chart.AppVersion -}}
 {{- $repo := .Values.operator.image.repository -}}
 {{- if not $repo -}}
-  {{- if not (has .Values.image.flavor (list "go" "rust")) -}}
-    {{- fail (printf "image.flavor must be \"go\" or \"rust\", got %q" .Values.image.flavor) -}}
-  {{- end -}}
-  {{- $rs := eq .Values.image.flavor "rust" | ternary "-rs" "" -}}
   {{- $pre := contains "-" $tag | ternary "-preview" "" -}}
-  {{- $repo = printf "ghcr.io/woestebanaan/skafka-operator%s%s" $rs $pre -}}
+  {{- $repo = printf "ghcr.io/woestebanaan/skafka-operator%s" $pre -}}
 {{- end -}}
 {{ $repo }}:{{ $tag }}
 {{- end -}}

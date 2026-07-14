@@ -68,69 +68,28 @@ jobs:
           if [[ "$VERSION" == *-* ]]; then
             echo "broker_image=ghcr.io/${OWNER}/skafka-preview" >> "$GITHUB_OUTPUT"
             echo "operator_image=ghcr.io/${OWNER}/skafka-operator-preview" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "broker_image=ghcr.io/${OWNER}/skafka" >> "$GITHUB_OUTPUT"
             echo "operator_image=ghcr.io/${OWNER}/skafka-operator" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build + push broker image (go, from archive/)
-        # During the Rust rewrite the Go binaries still ship from archive/.
-        # Phase 8 (this workflow revision) also publishes the Rust
-        # binaries alongside — see the "Rust image stanzas" block
-        # below. Phase 9 of docs/rewrite.md flips the chart default.
-        uses: docker/build-push-action@v7
-        with:
-          context: archive
-          file: archive/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.names.outputs.broker_image }}:${{ steps.names.outputs.image_tag }}
-
-      - name: Build + push operator image (go, from archive/)
-        uses: docker/build-push-action@v7
-        with:
-          context: archive
-          file: archive/Dockerfile.operator
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.names.outputs.operator_image }}:${{ steps.names.outputs.image_tag }}
-
-      # ----------------------------------------------------------------------
-      # Rust image stanzas (Phase 8). Publish alongside the Go images
-      # under separate repo names — the Helm chart still defaults to
-      # the Go images. Phase 9 introduces the user-facing `image.flavor`
-      # toggle and eventually flips the default.
-      # ----------------------------------------------------------------------
-      - name: Compute Rust image names
-        id: rust_names
-        run: |
-          if [[ "${{ steps.names.outputs.prerelease }}" == "true" ]]; then
-            echo "broker_image=ghcr.io/${{ steps.names.outputs.owner }}/skafka-rs-preview" >> "$GITHUB_OUTPUT"
-            echo "operator_image=ghcr.io/${{ steps.names.outputs.owner }}/skafka-operator-rs-preview" >> "$GITHUB_OUTPUT"
-          else
-            echo "broker_image=ghcr.io/${{ steps.names.outputs.owner }}/skafka-rs" >> "$GITHUB_OUTPUT"
-            echo "operator_image=ghcr.io/${{ steps.names.outputs.owner }}/skafka-operator-rs" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build + push broker image (rust)
+      - name: Build + push broker image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: bins/skafka/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.rust_names.outputs.broker_image }}:${{ steps.names.outputs.image_tag }}
+          tags: ${{ steps.names.outputs.broker_image }}:${{ steps.names.outputs.image_tag }}
 
-      - name: Build + push operator image (rust)
+      - name: Build + push operator image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: bins/skafka-operator/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.rust_names.outputs.operator_image }}:${{ steps.names.outputs.image_tag }}
+          tags: ${{ steps.names.outputs.operator_image }}:${{ steps.names.outputs.image_tag }}
 
       - uses: azure/setup-helm@v5
         with:

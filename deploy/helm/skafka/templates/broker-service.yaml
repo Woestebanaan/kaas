@@ -24,7 +24,7 @@ spec:
     - name: heartbeat
       # Internal-only: brokers dial each other's heartbeat port to reach
       # the elected cluster controller. Headless DNS gives each pod a
-      # stable name so the resolver in cmd/skafka/cluster_runtime.go can
+      # stable name so the resolver in bins/skafka/src/cluster.rs can
       # follow Lease handoffs.
       port: {{ .Values.broker.ports.heartbeat }}
       targetPort: heartbeat

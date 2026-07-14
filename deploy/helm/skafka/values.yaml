@@ -1,19 +1,16 @@
 image:
-  # flavor selects the default image repositories for BOTH the broker
-  # and the operator (a mixed-flavor deployment is not a supported
-  # shape). "go" -> ghcr.io/woestebanaan/skafka[-operator], "rust" ->
-  # ghcr.io/woestebanaan/skafka[-operator]-rs. A "-preview" suffix is
-  # appended automatically when the resolved tag is a pre-release
-  # (contains "-"), mirroring the release workflow's naming rule.
-  flavor: go            # go | rust
-  repository: ""        # explicit value overrides flavor entirely
+  # The default repository is ghcr.io/woestebanaan/skafka, with a
+  # "-preview" suffix appended automatically when the resolved tag is
+  # a pre-release (contains "-"), mirroring the release workflow's
+  # naming rule. An explicit repository overrides that derivation.
+  repository: ""        # explicit value overrides the derived default
   tag: ""               # defaults to Chart.appVersion
   pullPolicy: IfNotPresent
 
 operator:
   enabled: true
   image:
-    repository: ""      # explicit value overrides image.flavor entirely
+    repository: ""      # explicit value overrides the derived default
     tag: ""
     pullPolicy: IfNotPresent
   resources:
@@ -100,7 +97,7 @@ broker:
   # v3 cluster-controller Lease (Phase 4). One Lease per cluster; the
   # winning broker runs the AssignmentLoop + heartbeat gRPC server.
   # Tighter durations = faster failover, more etcd writes; defaults match
-  # client-go's recommended renew/retry ratios.
+  # the Kubernetes client's recommended renew/retry ratios.
   controllerLease:
     durationSeconds: 15      # SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS
     renewDeadlineSeconds: 10 # SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS
@@ -250,7 +247,7 @@ observability:
       # "no data" — rate() needs ≥2 samples. 30s ensures rate([60s])
       # always sees 2+ samples. Increase if metric volume is a problem;
       # decrease (e.g. "15s") for higher-resolution dashboards.
-      # Accepts any Go time.Duration string.
+      # Accepts duration strings like "15s", "1m".
       exportInterval: "30s"
     traces:
       enabled: false

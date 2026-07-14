@@ -3,38 +3,24 @@
 Deploys the skafka broker StatefulSet and operator Deployment backed by a single
 shared ReadWriteMany PersistentVolumeClaim.
 
-## Image flavor (Go vs Rust)
+## Images
 
-skafka is mid-cutover from Go to Rust (see `../../../docs/rewrite.md`); every
-release tag publishes both flavors' images. The chart selects between them with
-one knob:
+The chart derives the broker and operator image repositories from the resolved
+tag: `ghcr.io/woestebanaan/skafka` + `skafka-operator`, with a `-preview`
+suffix appended automatically when the tag is a pre-release (contains a `-`),
+matching the release workflow's image-naming rule — so the chart default
+points at images that actually exist for preview tags, with no override
+needed.
 
-```yaml
-image:
-  flavor: go            # go | rust — selects broker AND operator repositories
-```
-
-`flavor: go` (the default) resolves `ghcr.io/woestebanaan/skafka` +
-`skafka-operator`; `flavor: rust` resolves `skafka-rs` + `skafka-operator-rs`.
-A `-preview` suffix is appended automatically when the resolved tag is a
-pre-release (contains a `-`), matching the release workflow's image-naming
-rule — so the chart default now points at images that actually exist for
-preview tags, with no override needed.
-
-No other chart values change with the flavor — env vars, listener config, CRD
-shape, and the `/data/__cluster/` on-disk layout are identical across flavors,
-which is what makes switching (and rolling back) image-only.
-
-**Explicit repositories still win.** Setting `image.repository` and/or
-`operator.image.repository` bypasses flavor resolution entirely for that image
-(the empty-string defaults mean "derive from flavor"). Use this for airgapped
-mirrors or a deliberately mixed-flavor deployment (not a supported shape, but
-not blocked):
+**Explicit repositories win.** Setting `image.repository` and/or
+`operator.image.repository` bypasses the derivation entirely for that image
+(the empty-string defaults mean "derive from the tag"). Use this for airgapped
+mirrors:
 
 ```bash
 helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
-  --set image.repository=registry.example.com/mirrors/skafka-rs-preview \
-  --set operator.image.repository=registry.example.com/mirrors/skafka-operator-rs-preview \
+  --set image.repository=registry.example.com/mirrors/skafka-preview \
+  --set operator.image.repository=registry.example.com/mirrors/skafka-operator-preview \
   ...
 ```
 
@@ -96,12 +82,10 @@ skafka stores all partition data on a single shared PVC. The StorageClass must
 support `ReadWriteMany` and provide NFSv4-class semantics: atomic same-directory
 rename, fsync durability, and close-to-open consistency.
 
-Phase 4 dropped flock entirely — single-writer enforcement now comes from
-epoch-prefixed segment filenames + the BrokerCoordinator's ownership decision
-(see `archive/internal/controller/` in the Go tree, or `crates/sk-controller`
-once the Rust port lands — see `../../../docs/rewrite.md`), so the StorageClass no
-longer needs to support `flock()`. Any RWX volume that meets NFSv4-class
-semantics works.
+Single-writer enforcement comes from epoch-prefixed segment filenames + the
+broker coordinator's ownership decision (see `crates/sk-controller`), so the
+StorageClass does not need to support `flock()`. Any RWX volume that meets
+NFSv4-class semantics works.
 
 | StorageClass | Status | Notes |
 |---|---|---|
@@ -173,9 +157,8 @@ See `values.yaml` for the full set of tunables. Common overrides:
 
 | Key | Default | Purpose |
 |---|---|---|
-| `image.flavor` | go | Image flavor (`go` \| `rust`) for broker and operator |
-| `image.repository` | `""` | Explicit broker image repo; overrides `image.flavor` |
-| `operator.image.repository` | `""` | Explicit operator image repo; overrides `image.flavor` |
+| `image.repository` | `""` | Explicit broker image repo; overrides the derived default |
+| `operator.image.repository` | `""` | Explicit operator image repo; overrides the derived default |
 | `broker.replicaCount` | 3 | Number of broker pods |
 | `storage.className` | ceph-filesystem | RWX StorageClass |
 | `storage.size` | 500Gi | PVC capacity |

@@ -174,8 +174,8 @@ spec:
               value: {{ .Values.observability.otlp.metrics.endpoint | quote }}
             # gh #133: explicit push interval. Defaults to the value
             # set in values.yaml (30s). Override here without touching
-            # the broker binary — accepts any Go time.Duration string
-            # (e.g. "15s", "1m"). The SDK default would be 60s; at
+            # the broker binary — accepts duration strings like
+            # "15s", "1m". The SDK default would be 60s; at
             # that cadence rate([1m]) windows often see only one
             # sample and Grafana stat panels show "no data".
             #
@@ -245,9 +245,9 @@ spec:
             {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
             {{- if include "skafka.hasAnyTLSListener" . }}
             # gh #131: shared TLS material across every tls:true listener
-            # (internal or external). The broker code in
-            # cmd/skafka/listeners.go reuses a single *tls.Config for all
-            # of them — per-listener cert files are a future extension.
+            # (internal or external). The broker reuses a single TLS config
+            # for all of them (crates/sk-protocol/src/server.rs) —
+            # per-listener cert files are a future extension.
             - name: SKAFKA_TLS_CERT_FILE
               value: /tls/tls.crt
             - name: SKAFKA_TLS_KEY_FILE

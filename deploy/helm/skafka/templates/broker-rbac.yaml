@@ -12,9 +12,9 @@ metadata:
   name: {{ include "skafka.fullname" . }}-broker
   labels: {{- include "skafka.labels" . | nindent 4 }}
 rules:
-  # Controller election + epoch watch via Leases. The Rust broker
+  # Controller election + epoch watch via Leases. The broker
   # acquires/renews the skafka-controller Lease with server-side
-  # apply, which needs `patch` (the Go client-go path used `update`).
+  # apply, which needs `patch`.
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch]
@@ -45,7 +45,7 @@ rules:
     resources: [kafkatopics]
     verbs: [get, list, watch, create, update, patch, delete]
   # KafkaClusterAssignments mirror: the elected controller broker
-  # writes Status to it via internal/controller/k8s_mirror.go after every
+  # writes Status to it via crates/sk-controller/src/k8s_mirror.rs after every
   # assignment.json change. Read on every broker (debug/diag); update
   # only fires on the controller, but RBAC is per-pod identity.
   - apiGroups: [skafka.io]
