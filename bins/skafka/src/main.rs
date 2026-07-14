@@ -531,12 +531,23 @@ fn spawn_reloader(
 
 fn build_engine(
     data_dir: Option<PathBuf>,
-    _flush_interval_messages: i64,
+    flush_interval_messages: i64,
 ) -> Result<Arc<dyn StorageEngine>> {
     match data_dir {
         Some(dir) => {
             std::fs::create_dir_all(&dir).context("creating SKAFKA_DATA_DIR")?;
-            let cfg = PartitionConfig::default();
+            // SKAFKA_FLUSH_INTERVAL_MESSAGES is THE durability vs
+            // throughput dial (mirrors Apache's
+            // log.flush.interval.messages; default 1 = honest
+            // acks=all). It was parsed by the CLI but dropped on the
+            // floor here, silently running every deployment at
+            // flush-per-batch — found in phase 9 A.3 as a 2.8×
+            // throughput gap against the Go flavor on identical
+            // values (gh #152).
+            let cfg = PartitionConfig {
+                flush_interval_messages,
+                ..PartitionConfig::default()
+            };
             let engine = DiskStorageEngine::new(Arc::new(RealFs), dir, cfg);
             Ok(Arc::new(engine))
         }
