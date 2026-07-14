@@ -1,7 +1,7 @@
 //! `TakeoverDriver` — reacts to assignment changes by driving the
 //! storage engine through `take_over` / `relinquish`.
 //!
-//! Port of `archive/internal/broker/takeover.go`. Registered as an
+//! Registered as an
 //! [`AssignmentChangeHandler`] on the [`crate::coordinator::Coordinator`];
 //! runs synchronously on the watcher task. The driver does *not*
 //! perform recovery itself — it dispatches per-partition

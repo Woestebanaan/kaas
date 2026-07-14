@@ -1,7 +1,4 @@
-//! sk-storage — DiskStorageEngine port from `archive/internal/storage/`.
-//!
-//! Phase 2 of the Rust rewrite. See [`docs/phase-2.md`](../../../docs/phase-2.md)
-//! for the full plan and the workstream breakdown that produced these modules.
+//! sk-storage — the DiskStorageEngine.
 //!
 //! # Byte-opacity contract
 //!

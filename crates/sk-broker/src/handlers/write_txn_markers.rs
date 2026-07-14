@@ -1,7 +1,5 @@
 //! WriteTxnMarkers handler (key 27, v0–v1).
 //!
-//! Port of `archive/internal/protocol/handlers/write_txn_markers.go`.
-//!
 //! Receiver-side marker writer. The txn coordinator sends one
 //! [`Request`] per partition-leader broker after `EndTxn`; the
 //! receiving broker validates leadership, builds a COMMIT / ABORT

@@ -1,6 +1,6 @@
 //! Deterministic hash routing for group + txn coordinator selection.
 //!
-//! Port of `archive/internal/broker/group_hash.go`. Pure functions
+//! Pure functions
 //! over `(key, brokers, alive)`; no state, no I/O. The Coordinator
 //! consults these for `OwnsGroup` / `GroupCoordinator` /
 //! `OwnsTxn` / `TxnCoordinator` whenever the explicit-override tier
@@ -13,7 +13,7 @@
 //! `FindCoordinator` — so any deterministic 32-bit hash works as
 //! long as every broker uses the same one. FNV-1a is trivial to
 //! implement inline (no extra dep), deterministic across
-//! architectures, and matches the Go side's `hash/fnv` output
+//! architectures, and matches the v0.1 output
 //! byte-for-byte.
 //!
 //! ## Stable divisor
@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 
 /// FNV-1a 32-bit over `bytes`. Inlined to avoid a tiny external
-/// dep; matches `std::hash::Hasher` from Go's `hash/fnv` output for
+/// dep; output matches the standard FNV-1a vectors for
 /// equal inputs.
 fn fnv1a_32(bytes: &[u8]) -> u32 {
     const OFFSET_BASIS: u32 = 0x811c_9dc5;
@@ -52,13 +52,13 @@ pub fn coordinator_slot(key: &str, num_brokers: usize) -> usize {
     usize::try_from(h % n).unwrap_or(0)
 }
 
-/// Convenience wrapper kept for API parity with the Go side. See
+/// Convenience wrapper. See
 /// [`coordinator_slot`] for the invariants.
 pub fn group_coordinator_slot(group_id: &str, num_brokers: usize) -> usize {
     coordinator_slot(group_id, num_brokers)
 }
 
-/// Convenience wrapper kept for API parity with the Go side. See
+/// Convenience wrapper. See
 /// [`coordinator_slot`] for the invariants.
 pub fn txn_coordinator_slot(transactional_id: &str, num_brokers: usize) -> usize {
     coordinator_slot(transactional_id, num_brokers)
@@ -221,8 +221,8 @@ mod tests {
         assert_eq!(g, t);
     }
 
-    /// Cross-port byte-for-byte check vs Go's `hash/fnv`. Vectors
-    /// pulled from a standalone `fnv.New32a().Sum32()` run for the
+    /// Byte-for-byte check against FNV-1a reference vectors
+    /// captured from the v0.1 implementation for the
     /// same inputs.
     #[test]
     fn fnv1a_known_values() {

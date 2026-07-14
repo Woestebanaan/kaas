@@ -8,8 +8,6 @@
 //! Per-protocol `metadata` and per-member `metadata` are
 //! **non-nullable** per Apache's schema (gh #96): empty bytes are
 //! normal, null kills the Java client during rebalance.
-//!
-//! Port of `archive/internal/protocol/codec/api/join_group.go`.
 
 use bytes::BytesMut;
 
@@ -26,7 +24,7 @@ use crate::primitives::{
 use crate::tagged;
 use crate::Bytes;
 
-// Min 2, matching the Go broker: v0 lacks `rebalance_timeout_ms`
+// Min 2: v0 lacks `rebalance_timeout_ms`
 // (added v1) and this module decodes it unconditionally, so
 // advertising v0 offered a shape we never parsed correctly.
 pub const VERSIONS: (i16, i16) = (2, 9);

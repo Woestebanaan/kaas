@@ -198,13 +198,11 @@ impl Fs for RealFs {
 // the default `RealFs` impl because the trait object hides the concrete
 // `std::fs::File` we need to call `sync_all` on. Production atomic-write
 // paths reach for [`fsync_path`] instead, which opens, flushes, and syncs
-// a known path — matching how `archive/internal/storage/manifest.go:78-119`
-// works (open-write-sync-close-rename, one syscall set per file).
+// a known path (open-write-sync-close-rename, one syscall set per file).
 // ---------------------------------------------------------------------------
 
 /// Open `p` read-write, sync_all, close. Used by atomic-rename writers
-/// after the bulk write is complete. Matches Go's `f.Sync()` followed
-/// by `f.Close()` semantics.
+/// after the bulk write is complete.
 pub fn fsync_path(p: &Path) -> io::Result<()> {
     let f = std::fs::OpenOptions::new().read(true).write(true).open(p)?;
     f.sync_all()

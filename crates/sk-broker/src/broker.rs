@@ -250,7 +250,7 @@ impl Broker {
     /// store is wired; transactional handlers fall back to either a
     /// `COORDINATOR_NOT_AVAILABLE` (15) response or — for
     /// `InitProducerId` — a fresh PID with `epoch = 0` plus a one-
-    /// shot warning, matching the Go reference's stage-A degradation.
+    /// shot warning (graceful degradation).
     pub fn txn_state(&self) -> Option<Arc<TxnStateStore>> {
         self.txn_state.read().clone()
     }

@@ -1,6 +1,6 @@
 //! Consumer-group state machine.
 //!
-//! Port of `archive/internal/coordinator/group.go`. State transitions
+//! State transitions
 //! mirror Apache Kafka's `GroupCoordinator`:
 //!
 //! ```text
@@ -9,22 +9,22 @@
 //!   └─────────────────────── (last leave)   (new join → PreparingRebalance)
 //! ```
 //!
-//! The Go side wires goroutines and channels for the blocking
-//! `join` / `sync` waiters. In tokio those become per-member
+//! The blocking
+//! `join` / `sync` waiters are per-member
 //! `oneshot::Sender<...>` slots stored against the join/sync waiter
 //! lists; handler tasks `.await` the matching `oneshot::Receiver`.
 //!
 //! Timers (rebalance completion, heartbeat session timeout) are
 //! tokio tasks awaiting `sleep_until(deadline)` and re-locking the
 //! group's `Mutex` to mutate state on wake. The previous JoinHandle
-//! is `.abort()`-ed on reset to mirror Go's `time.Timer.Reset`.
+//! is `.abort()`-ed on reset (timer-reset semantics).
 //!
-//! The 877-line Go port lands incrementally. This Phase-5 cut covers:
+//! The coordinator surface lands incrementally. This cut covers:
 //!
 //! - Dynamic membership (anonymous `member_id=""` joining a new group).
 //! - The gh #98 waiter-drain — `remove_member` wakes any pending
 //!   joiner with `UNKNOWN_MEMBER_ID` so a session-timed-out leader
-//!   doesn't strand its join() goroutine.
+//!   doesn't strand its join() waiter.
 //! - The gh #111 cold-start delay — initial rebalance extends by
 //!   `INITIAL_REBALANCE_DELAY_MS` on each new arrival, capped at the
 //!   max member `rebalance_timeout_ms`.
@@ -234,8 +234,7 @@ pub struct HeartbeatRequest {
 }
 
 /// Per-group state held under a single `Mutex` — every public method
-/// re-acquires it. Same coarse-grained discipline as the Go side
-/// (`sync.Mutex`).
+/// re-acquires it (coarse-grained on purpose).
 pub struct Group {
     state: Mutex<GroupInner>,
 }
@@ -412,7 +411,7 @@ impl Group {
             Ok(out) => out,
             Err(_) => JoinOutcome {
                 // Channel dropped without delivery — group was shut
-                // down. Mirror Go's `removeMember → UNKNOWN_MEMBER_ID`.
+                // down → UNKNOWN_MEMBER_ID.
                 error_code: error_codes::UNKNOWN_MEMBER_ID,
                 generation_id: 0,
                 leader: String::new(),

@@ -1,7 +1,6 @@
 //! `RetentionCleaner` — size-based log retention.
 //!
-//! Port of the `delete`-policy half of
-//! `archive/internal/storage/cleaner.go`. Walks every owned partition
+//! The `delete`-policy cleaner. Walks every owned partition
 //! and asks each Partition for its size-based cleanup target; calls
 //! `delete_records` when the target is non-trivial.
 //!

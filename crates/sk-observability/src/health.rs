@@ -1,7 +1,7 @@
 //! Axum-backed `/healthz` + `/readyz` handlers.
 //!
-//! Port of `archive/internal/observability/health.go`. The JSON shape
-//! matches the Go output verbatim so dashboards + scripts written
+//! The `/healthz` JSON shape
+//! is pinned so dashboards + scripts written
 //! against the plan-v3 schema keep working.
 //!
 //! [`RuntimeState`] is the v3 broker view — implementations must be

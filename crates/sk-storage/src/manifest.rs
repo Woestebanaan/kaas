@@ -1,6 +1,6 @@
 //! Per-partition manifest: `manifest.json`.
 //!
-//! Port of `archive/internal/storage/manifest.go`. The manifest is the
+//! The manifest is the
 //! source of truth for `(epoch, high_watermark, log_start_offset)` on
 //! partition open; segment scanning is the fallback when the manifest
 //! is missing or unreadable.
@@ -10,16 +10,16 @@
 //! [`crate::atomic_write::atomic_write_json`] — tmp + fsync + rename
 //! in the same directory, matching NFSv4 same-dir rename atomicity.
 //!
-//! # Wire compatibility with Go
+//! # On-disk compatibility
 //!
-//! The on-disk JSON matches Go's `encoding/json` output verbatim:
+//! The JSON layout is pinned to the v0.1 output verbatim:
 //!
 //! ```json
 //! {"epoch":5,"highWatermark":1000,"logStartOffset":0}
 //! ```
 //!
-//! camelCase via serde rename rules; field order matches Go's
-//! struct-tag declaration order so the Phase 2 exit-criterion-#6 byte
+//! camelCase via serde rename rules; field order matches the v0.1
+//! declaration order so the byte
 //! diff against a captured fixture passes.
 
 use std::io;
@@ -132,8 +132,8 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn json_matches_go_camelcase_layout() {
-        // Phase 2 exit criterion #6: manifest.json bytes match Go.
+    fn json_matches_v01_camelcase_layout() {
+        // manifest.json bytes are pinned to the v0.1 layout.
         let m = Manifest {
             epoch: 5,
             high_watermark: 1000,
@@ -142,7 +142,7 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(
             json, r#"{"epoch":5,"highWatermark":1000,"logStartOffset":0}"#,
-            "manifest JSON shape diverged from Go"
+            "manifest JSON shape diverged from the pinned v0.1 layout"
         );
     }
 

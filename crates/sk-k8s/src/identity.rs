@@ -1,6 +1,6 @@
 //! Broker identity derived from the K8s downward API.
 //!
-//! Port of `archive/internal/k8s/broker.go`. The pod name IS the
+//! The pod name IS the
 //! broker identity — no registration protocol needed. Pure code, no
 //! kube deps.
 //!
@@ -42,13 +42,13 @@ pub struct DnsConfig {
 
 impl DnsConfig {
     /// Build the FQDN for `ordinal` under the StatefulSet's
-    /// headless service. Mirrors Go's `Sprintf("%s.%s.%s.svc.%s",
-    /// pod, headless, namespace, cluster_domain)`.
+    /// headless service. Shape:
+    /// `{pod}.{headless}.{namespace}.svc.{cluster_domain}`.
     ///
-    /// Accepts both placeholder dialects: the Rust-native
-    /// `{ordinal}` AND Go's `%d` — the shared Helm chart emits
-    /// `SKAFKA_POD_NAME_PATTERN=<name>-%d` for the Go broker and
-    /// must keep doing so while the Go rollback path exists. A `%d`
+    /// Accepts both placeholder dialects: the native
+    /// `{ordinal}` AND printf-style `%d` — the Helm chart emits
+    /// `SKAFKA_POD_NAME_PATTERN=<name>-%d`, the pattern v0.1
+    /// deployments were configured with. A `%d`
     /// passing through unreplaced put `skafka-%d.…` hostnames into
     /// live Metadata responses (clients died on DNS).
     pub fn fqdn(&self, ordinal: i32) -> String {
@@ -132,8 +132,8 @@ impl BrokerIdentity {
 /// Extract the trailing integer from a hyphen-separated name — used
 /// by both [`BrokerIdentity::from_env`] and consumers that need to
 /// translate `"skafka-2"` back to `2`. Returns `None` on parse
-/// failure (the Go side returned `-1` from the public
-/// `ParseOrdinalFromIdentity` wrapper; we use `Option<i32>` for
+/// failure (the v0.1 implementation returned `-1` from its public
+/// wrapper; we use `Option<i32>` for
 /// honesty).
 pub fn parse_ordinal(name: &str) -> Option<i32> {
     let last = name.rsplit('-').next()?;

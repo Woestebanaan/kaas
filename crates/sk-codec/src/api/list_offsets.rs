@@ -1,6 +1,5 @@
 //! ListOffsets — API key 2. v1–v7, flexible from v6 (KIP-482).
 //!
-//! Port of `archive/internal/protocol/codec/api/list_offsets.go`.
 //!
 //! # Version map
 //!

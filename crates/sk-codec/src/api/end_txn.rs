@@ -1,6 +1,5 @@
 //! EndTxn — API key 26. v0–v3, flexible from v3.
 //!
-//! Port of `archive/internal/protocol/codec/api/end_txn.go`.
 //!
 //! Sent by a transactional producer to commit or abort the current
 //! transaction. The txn coordinator transitions Ongoing → CompleteCommit

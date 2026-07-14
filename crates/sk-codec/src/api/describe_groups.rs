@@ -8,8 +8,6 @@
 //! Per-member `metadata` and `assignment` are **non-nullable** per
 //! Apache's schema (gh #96): the Java AdminClient throws on null
 //! markers during describe.
-//!
-//! Port of `archive/internal/protocol/codec/api/describe_groups.go`.
 
 use bytes::BytesMut;
 

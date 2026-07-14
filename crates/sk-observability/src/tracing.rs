@@ -5,8 +5,8 @@
 //! stubs in `bins/skafka/main.rs` and `bins/skafka-operator/main.rs`.
 //!
 //! The OTel layer emits every `tracing::span!` as an OTel span through
-//! the tracer built in [`crate::bootstrap`]. Same correlation ID
-//! contract as the Go side's `CorrelationHandler` — every log line
+//! the tracer built in [`crate::bootstrap`]. Correlation-ID
+//! contract: every log line
 //! carries `trace_id` + `span_id` when a span is active.
 
 use opentelemetry_sdk::trace::Tracer as SdkTracer;

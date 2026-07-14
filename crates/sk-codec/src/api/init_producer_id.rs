@@ -1,6 +1,5 @@
 //! InitProducerId — API key 22. v0–v4, flexible from v2 (KIP-482).
 //!
-//! Port of `archive/internal/protocol/codec/api/init_producer_id.go`.
 //!
 //! The Java producer issues this on startup when
 //! `enable.idempotence=true` (the default since Kafka 3.0) to obtain a

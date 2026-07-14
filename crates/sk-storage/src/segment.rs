@@ -1,7 +1,6 @@
 //! Segment files: filenames, [`SegmentMeta`], [`ActiveSegment`].
 //!
-//! Port of `archive/internal/storage/segment.go`. Phase 2 second slice
-//! adds the file-I/O surface on top of the filename helpers that
+//! Segment files: the file-I/O surface on top of the filename helpers that
 //! landed in the initial slice.
 //!
 //! # Layout
@@ -36,7 +35,7 @@ pub const LOG_EXT: &str = ".log";
 /// `.index` filename suffix.
 pub const INDEX_EXT: &str = ".index";
 
-/// "Sealed-by-takeover" marker — produced by an older Go path; new
+/// "Sealed-by-takeover" marker — produced by older (v0.1) releases; new
 /// writes never emit it. [`list_segments`] skips files with this
 /// suffix.
 const SEALED_EXT: &str = ".log.sealed";
@@ -193,7 +192,7 @@ pub fn parse_batch_offsets(raw: &[u8]) -> Result<(i64, i32, i64), io::Error> {
 /// post-crash partial-write boundary, and the returned HWM reflects
 /// only fully-persisted batches. Read through a 4 MiB-window
 /// [`BufReader`] so NFS substrates open large logs in MB/s, not
-/// RPCs/s. Mirrors `archive/internal/storage/segment.go:260-292`.
+/// RPCs/s.
 pub fn scan_high_watermark<R: Read + Seek>(f: &mut R, segment_base_offset: i64) -> io::Result<i64> {
     f.seek(SeekFrom::Start(0))?;
     let mut br = BufReader::with_capacity(SCAN_HWM_BUF_SIZE, f);
@@ -245,8 +244,7 @@ pub fn scan_high_watermark<R: Read + Seek>(f: &mut R, segment_base_offset: i64) 
 /// Binary-search the index for the largest entry whose `rel_offset` is
 /// `<= (target_offset - segment_base_offset)`. Returns the
 /// corresponding file position, or 0 if the index is empty or the
-/// target precedes every entry. Mirrors
-/// `archive/internal/storage/segment.go:452-477`.
+/// target precedes every entry.
 pub fn search_index_bytes(data: &[u8], segment_base_offset: i64, target_offset: i64) -> i64 {
     let n = data.len() / INDEX_ENTRY_SIZE;
     if n == 0 {
@@ -426,7 +424,7 @@ impl ActiveSegment {
         }
         if let Ok(meta) = fs.stat(&self.meta.index_path) {
             // Map "N index entries" to "approx 4096*N bytes of log
-            // covered". Rough estimate matches Go's behaviour; an
+            // covered". Rough estimate; an
             // exact value isn't required for appends.
             self.last_indexed_log_pos = meta.len() / 8 * 4096;
         }

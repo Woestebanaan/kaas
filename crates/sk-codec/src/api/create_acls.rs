@@ -3,8 +3,7 @@
 //! Versions 0..=3. Flexible (KIP-482) from v2. v1+ adds
 //! `pattern_type` on each creation (KIP-290).
 //!
-//! Port of the key-30 slice of
-//! `archive/internal/protocol/codec/api/acls.go` (gh #107).
+//! Key-30 slice of the ACL admin surface (gh #107).
 
 use bytes::BytesMut;
 

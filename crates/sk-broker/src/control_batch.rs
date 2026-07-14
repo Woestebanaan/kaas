@@ -1,8 +1,8 @@
 //! v2 RecordBatch encoder for transactional COMMIT / ABORT markers.
 //!
-//! Port of `archive/internal/protocol/handlers/control_batch.go` —
-//! byte-for-byte equivalent so a Go-written marker batch and a
-//! Rust-written one decode to the same record by any Kafka 3.x
+//! Control-batch encoder —
+//! byte-for-byte stable so a v0.1-written marker batch and a
+//! current one decode to the same record by any Kafka 3.x
 //! client (and vice versa).
 //!
 //! ### Wire shape

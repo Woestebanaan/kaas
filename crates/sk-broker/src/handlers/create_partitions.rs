@@ -81,7 +81,7 @@ impl Handler for CreatePartitionsHandler {
             }
 
             // No writer → broker is running without K8s admin
-            // surface. Mirror the Go side: refuse cleanly.
+            // surface: refuse cleanly.
             let Some(w) = writer.as_ref() else {
                 results.push(error_result(
                     &topic.name,

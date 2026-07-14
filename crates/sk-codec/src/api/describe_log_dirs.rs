@@ -4,8 +4,6 @@
 //! which also adds TotalBytes/UsableBytes — clients negotiate down
 //! from the max we advertise). A null topics array on the request
 //! means "describe every log dir, every topic".
-//!
-//! Port of `archive/internal/protocol/codec/api/describe_log_dirs.go`.
 
 use bytes::BytesMut;
 

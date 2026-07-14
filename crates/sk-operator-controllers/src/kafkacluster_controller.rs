@@ -1,5 +1,3 @@
-//! Port of `archive/operator/controllers/kafkacluster_controller.go`.
-//!
 //! Reconciler that materialises a `KafkaCluster` CR into the
 //! external-listener plumbing:
 //!
@@ -57,8 +55,7 @@ pub struct KafkaClusterReconciler {
     /// experimental channel's v1alpha2, so the group exists and the
     /// resource still 404s. Installing the CRDs later requires an
     /// operator restart to be noticed — an acceptable trade (same
-    /// caching behaviour as controller-runtime's RESTMapper on the
-    /// Go side).
+    /// caching behaviour as controller-runtime's RESTMapper).
     tls_routes_served: tokio::sync::OnceCell<bool>,
     certificates_served: tokio::sync::OnceCell<bool>,
 }
@@ -365,7 +362,7 @@ impl KafkaClusterReconciler {
     }
 
     /// Get-or-create-or-update for the cert-manager / Gateway-API
-    /// DynamicObjects. Mirrors the Go side's `applyUnstructured`.
+    /// DynamicObjects.
     /// Sets OwnerReferences + management labels on every write.
     async fn apply_unstructured(
         &self,
@@ -446,8 +443,8 @@ impl KafkaClusterReconciler {
             delete_if_present(&cert_api, &cert_name).await?;
         }
 
-        // Services + TLSRoutes per ordinal. Use the same 10-floor
-        // upper bound the Go side uses to catch shrink scenarios.
+        // Services + TLSRoutes per ordinal, with a 10-floor
+        // upper bound to catch shrink scenarios.
         // TLSRoutes are skipped entirely when the Gateway API isn't
         // installed — every such delete was an unrouted plain-text
         // 404 the client had to error-parse (gh #187).
@@ -574,10 +571,10 @@ pub fn build_bootstrap_servers(cluster: &KafkaCluster) -> Vec<String> {
         .collect()
 }
 
-/// Minimal substitute for Go's `fmt.Sprintf(pattern, ordinal)` over a
+/// Minimal printf-style formatter over a
 /// `%d` template. Supports exactly one `%d` placeholder anywhere in
 /// the pattern; on a malformed pattern, returns the literal pattern
-/// (matches Go's behaviour when the pattern has no verb).
+/// verbatim.
 fn format_hostname(pattern: &str, ordinal: i32) -> String {
     if let Some(idx) = pattern.find("%d") {
         let (head, rest) = pattern.split_at(idx);
@@ -614,8 +611,8 @@ fn has_controller_owner(refs: &Option<Vec<OwnerReference>>, cluster: &KafkaClust
         .any(|r| r.uid == uid && r.controller.unwrap_or(false))
 }
 
-/// Delete an object if it exists. NotFound is treated as success —
-/// the Go side similarly ignores delete errors in this teardown path.
+/// Delete an object if it exists. NotFound is treated as success
+/// (delete errors in this teardown path are ignored).
 async fn delete_if_present<K>(api: &Api<K>, name: &str) -> Result<(), ControllerError>
 where
     K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
@@ -696,7 +693,7 @@ mod tests {
 
     #[test]
     fn format_hostname_no_verb_returns_pattern_verbatim() {
-        // Matches Go's behaviour when fmt.Sprintf gets a pattern with no verb.
+        // A pattern with no verb renders verbatim.
         assert_eq!(format_hostname("static.host", 5), "static.host");
     }
 
@@ -712,7 +709,7 @@ mod tests {
 
     #[test]
     fn build_bootstrap_servers_uses_external_port_with_fallback() {
-        // Zero port → fallback to 9093 (matches Go's `port == 0 → 9093`).
+        // Zero port → fallback to 9093.
         let c = cluster_with(2, "broker-%d.kafka", 0);
         assert_eq!(
             build_bootstrap_servers(&c),

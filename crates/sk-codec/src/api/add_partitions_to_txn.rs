@@ -1,6 +1,5 @@
 //! AddPartitionsToTxn — API key 24. v0–v3, flexible from v3.
 //!
-//! Port of `archive/internal/protocol/codec/api/add_partitions_to_txn.go`.
 //!
 //! Sent by a transactional producer before its first Produce to a
 //! partition under an open transaction. The txn coordinator records

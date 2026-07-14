@@ -1,7 +1,7 @@
 //! Env-var parsing for `bins/skafka/main.rs`.
 //!
-//! All knobs are env-only — no flag parser. Names match the Go
-//! broker (`SKAFKA_*`) so the chart's env block doesn't churn
+//! All knobs are env-only — no flag parser. Names are stable
+//! (`SKAFKA_*`) so the chart's env block doesn't churn
 //! between flavours.
 
 use std::env;
@@ -111,8 +111,7 @@ impl<'de> Deserialize<'de> for ListenerEntry {
             Some(TlsField::Bool(true)) => {
                 // Chart-shape boolean: resolve cert paths from the
                 // Secret-mount env vars the chart populates. Same
-                // paths for every TLS listener — the Go side did the
-                // same (cmd/skafka/listeners.go).
+                // paths for every TLS listener.
                 let cert = std::env::var("SKAFKA_TLS_CERT_FILE")
                     .unwrap_or_else(|_| "/tls/tls.crt".to_owned());
                 let key = std::env::var("SKAFKA_TLS_KEY_FILE")
@@ -171,8 +170,7 @@ pub struct Cli {
     /// config. Dev-mode default.
     pub auth_disabled: bool,
     /// `""` (default) → `AllowAllAuthorizer`. `"simple"` → ACL-based
-    /// `AclEngine`. Mirrors `SKAFKA_AUTHORIZATION_TYPE` on the Go
-    /// side / Strimzi `authorization.type`.
+    /// `AclEngine`. Mirrors Strimzi `authorization.type`.
     pub authorization_type: String,
     /// `User:foo,User:bar`-shape comma list. Wraps the chosen
     /// authorizer in `SuperUserAuthorizer` for early-allow.
@@ -222,8 +220,8 @@ impl Cli {
             env::var("SKAFKA_CLUSTER_ID").unwrap_or_else(|_| "skafka-rust-dev".to_owned());
 
         // Explicit SKAFKA_BROKER_ID wins; otherwise derive the
-        // StatefulSet ordinal from MY_POD_NAME ("skafka-2" → 2) the
-        // way the Go broker did. A StatefulSet can't template
+        // StatefulSet ordinal from MY_POD_NAME ("skafka-2" → 2).
+        // A StatefulSet can't template
         // per-pod env, so without this every replica boots as
         // broker 0 and the whole cluster elects/renews under one
         // identity. Dev mode (neither var set) stays broker 0.

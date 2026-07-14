@@ -1,8 +1,6 @@
 //! Controller-side `ControllerHeartbeat` gRPC server.
 //!
-//! Port of `archive/internal/controller/heartbeat_server.go`. The
-//! Go side wires the bidirectional `Stream` rpc onto a `sync.Map`
-//! of per-broker `clientState`; we use a `parking_lot::Mutex<HashMap>`
+//! Wires the bidirectional `Stream` rpc onto a `parking_lot::Mutex<HashMap>`
 //! over the same shape. Each connected broker's send half is a
 //! bounded `tokio::sync::mpsc::Sender<ControllerCommand>` — slow
 //! consumers get their `ASSIGNMENT_CHANGED` push dropped (the 1 s
@@ -38,13 +36,11 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::debug;
 
-/// Default 1 s ping cadence — matches the Go side's
-/// `time.NewTicker(time.Second)`.
+/// Default 1 s ping cadence.
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Per-direction mpsc buffer size. 4 slots is enough for one
-/// `ASSIGNMENT_CHANGED` + a few PINGs in flight; matches Go's
-/// `make(chan ..., 4)`. Slow consumers drop their push and pick
+/// `ASSIGNMENT_CHANGED` + a few PINGs in flight. Slow consumers drop their push and pick
 /// up the change via the 1 s file poll.
 const SEND_BUFFER: usize = 4;
 
@@ -174,8 +170,7 @@ impl HeartbeatServer {
 
 /// The heartbeat server IS the controller's live group catalog —
 /// every broker reports its `active_groups` upstream, so the union
-/// feeds `BalanceGroups` directly (mirrors Go's
-/// `WithGroupSource(heartSrv)`).
+/// feeds `BalanceGroups` directly.
 impl crate::assignment_writer::GroupSource for HeartbeatServer {
     fn active_groups(&self) -> Vec<String> {
         Self::active_groups(self)

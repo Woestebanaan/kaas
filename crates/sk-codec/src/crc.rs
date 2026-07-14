@@ -1,9 +1,9 @@
 //! CRC32C (Castagnoli) wrapper used to validate v2 RecordBatch CRC fields.
 //!
 //! Thin pass-through over the `crc32c` crate, which engages SSE4.2 CRC32
-//! intrinsics on x86_64 and ARMv8 CRC instructions on aarch64. The Go side
-//! uses `hash/crc32.MakeTable(crc32.Castagnoli)` which compiles to the same
-//! instructions on the same hardware — outputs are byte-identical.
+//! intrinsics on x86_64 and ARMv8 CRC instructions on aarch64. Same
+//! Castagnoli polynomial every Kafka implementation uses — outputs are
+//! byte-identical across releases.
 
 use thiserror::Error;
 
@@ -63,7 +63,7 @@ pub fn verify_batch_crc(batch: &[u8]) -> Result<(), CrcError> {
 mod tests {
     use super::*;
 
-    /// Canonical Castagnoli test vector — same value the Go side asserts.
+    /// Canonical Castagnoli test vector (published reference value).
     #[test]
     fn known_vector_123456789() {
         assert_eq!(compute(b"123456789"), 0xE306_9283);

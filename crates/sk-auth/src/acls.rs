@@ -1,6 +1,6 @@
 //! `acls.json` loader + ACL evaluation.
 //!
-//! Port of `archive/internal/auth/acl.go`. Deny takes precedence over
+//! Deny takes precedence over
 //! Allow; default is deny. Decisions are cached for 5 s keyed on
 //! `(principal_name, resource_type, resource_name, op)` to keep the
 //! Produce/Fetch hot path off the rule walk.

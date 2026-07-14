@@ -7,8 +7,8 @@
 //! `plainPassword`; the static path exists for tests and dev-mode
 //! opt-in.
 //!
-//! The K8s ServiceAccount JWT flavor (the Go side's `SAExchange`) is
-//! deferred to **Phase 7** alongside the rest of the K8s plumbing.
+//! The K8s ServiceAccount JWT flavor is deferred — an open
+//! follow-up alongside the rest of the K8s plumbing.
 
 use std::sync::Arc;
 

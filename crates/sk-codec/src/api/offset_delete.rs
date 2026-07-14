@@ -10,8 +10,6 @@
 //! `throttle_time_ms` (the opposite of DeleteGroups). Per-partition
 //! errors live on each `PartitionResponse` and are only set when the
 //! group-level `error_code` is 0.
-//!
-//! Port of `archive/internal/protocol/codec/api/offset_delete.go`.
 
 use bytes::BytesMut;
 

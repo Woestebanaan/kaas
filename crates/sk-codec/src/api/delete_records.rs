@@ -4,8 +4,6 @@
 //! `kafka-delete-records.sh` / Kafbat's "Purge messages" to advance a
 //! partition's log start offset (KIP-107); earlier records become
 //! invisible to Fetch and eligible for retention cleanup.
-//!
-//! Port of `archive/internal/protocol/codec/api/delete_records.go`.
 
 use bytes::BytesMut;
 

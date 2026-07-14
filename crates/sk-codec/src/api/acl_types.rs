@@ -1,8 +1,7 @@
 //! Shared wire types for the ACL admin APIs — DescribeAcls (29),
 //! CreateAcls (30), DeleteAcls (31).
 //!
-//! Port of the enum tables + CR string mapping in
-//! `archive/internal/protocol/codec/api/acls.go` (gh #107). The int8
+//! Enum tables + CR string mapping for the ACL surface (gh #107). The int8
 //! codes match `org.apache.kafka.common.{resource,acl}` constants so
 //! AdminClient requests translate 1:1 to the CR-side representation
 //! the operator's ACL reconcile already speaks.

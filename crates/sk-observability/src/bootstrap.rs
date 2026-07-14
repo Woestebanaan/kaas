@@ -1,14 +1,13 @@
 //! OTel SDK bring-up.
 //!
-//! Port of `archive/internal/observability/bootstrap.go`. Reads:
+//! Observability bootstrap. Reads:
 //!
 //! * `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — if set, push metrics via
 //!   OTLP/HTTP (http/protobuf). Prometheus's native OTLP receiver
-//!   (`/api/v1/otlp/v1/metrics`) speaks only http/protobuf — the Go
-//!   side used `otlpmetrichttp` for the same reason; exporting gRPC
+//!   (`/api/v1/otlp/v1/metrics`) speaks only http/protobuf; exporting gRPC
 //!   here just gets an h2 GoAway from Prometheus.
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT` — if set, push traces via OTLP/gRPC.
-//! * `SKAFKA_METRIC_EXPORT_INTERVAL` — Go-duration string (`30s` etc.).
+//! * `SKAFKA_METRIC_EXPORT_INTERVAL` — duration string (`30s` etc.).
 //!   Default `30s` per gh #133 (SDK default is 60s → `rate([1m])`
 //!   panels see one sample and gap).
 //! * `OTEL_SERVICE_VERSION`, `MY_POD_NAME`, `SKAFKA_NAMESPACE` — folded
@@ -213,15 +212,15 @@ fn build_sampler() -> Sampler {
     Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))
 }
 
-/// Parse a Go-style duration string (`"30s"`, `"500ms"`) into a
+/// Parse a short-form duration string (`"30s"`, `"500ms"`) into a
 /// [`Duration`]. Returns `None` on parse failure so the caller falls
 /// back to the default rather than dying on a chart-config typo.
 fn parse_duration_env(name: &str) -> Option<Duration> {
     let raw = std::env::var(name).ok()?;
-    parse_go_duration(&raw)
+    parse_duration_str(&raw)
 }
 
-fn parse_go_duration(s: &str) -> Option<Duration> {
+fn parse_duration_str(s: &str) -> Option<Duration> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -256,11 +255,11 @@ fn split_num_unit(s: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Ensure the endpoint carries a URI scheme. Unlike Go's
-/// `otlptracegrpc.WithEndpoint` (which wants bare `host:port`), the
+/// Ensure the endpoint carries a URI scheme. Unlike the v0.1
+/// exporter (which wanted bare `host:port`), the
 /// Rust exporters parse the endpoint as a full URI — a scheme-less
 /// `host:port` makes hyper read `host` as the scheme and the export
-/// dies with `InvalidUri`. Chart values written for the Go broker
+/// dies with `InvalidUri`. Chart values written for earlier releases
 /// omit the scheme, so default them to `http://` (in-cluster,
 /// plaintext; `OTEL_EXPORTER_OTLP_INSECURE=true` deployments).
 fn ensure_scheme(s: &str) -> String {
@@ -289,24 +288,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_duration_accepts_go_forms() {
-        assert_eq!(parse_go_duration("30s"), Some(Duration::from_secs(30)));
-        assert_eq!(parse_go_duration("500ms"), Some(Duration::from_millis(500)));
-        assert_eq!(parse_go_duration("1m"), Some(Duration::from_secs(60)));
-        assert_eq!(parse_go_duration("2h"), Some(Duration::from_secs(7200)));
+    fn parse_duration_accepts_short_forms() {
+        assert_eq!(parse_duration_str("30s"), Some(Duration::from_secs(30)));
         assert_eq!(
-            parse_go_duration("1000us"),
+            parse_duration_str("500ms"),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(parse_duration_str("1m"), Some(Duration::from_secs(60)));
+        assert_eq!(parse_duration_str("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(
+            parse_duration_str("1000us"),
             Some(Duration::from_micros(1000))
         );
-        assert_eq!(parse_go_duration("100"), Some(Duration::from_secs(100)));
+        assert_eq!(parse_duration_str("100"), Some(Duration::from_secs(100)));
     }
 
     #[test]
     fn parse_duration_rejects_garbage() {
-        assert_eq!(parse_go_duration(""), None);
-        assert_eq!(parse_go_duration("abc"), None);
-        assert_eq!(parse_go_duration("-1s"), None);
-        assert_eq!(parse_go_duration("1years"), None);
+        assert_eq!(parse_duration_str(""), None);
+        assert_eq!(parse_duration_str("abc"), None);
+        assert_eq!(parse_duration_str("-1s"), None);
+        assert_eq!(parse_duration_str("1years"), None);
     }
 
     #[test]

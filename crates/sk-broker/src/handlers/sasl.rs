@@ -1,7 +1,5 @@
 //! SASL handlers — `SaslHandshake` (17) + `SaslAuthenticate` (36).
 //!
-//! Port of `archive/internal/protocol/handlers/sasl.go`.
-//!
 //! `SaslHandshakeHandler` advertises the broker's enabled mechanisms
 //! and stamps the picked mechanism on `ConnState`. The
 //! `SaslAuthenticateHandler` drives the per-listener engine's
@@ -110,8 +108,7 @@ impl Handler for SaslAuthenticateHandler {
             )
         };
 
-        // Reject PLAIN over a non-TLS connection — matches the Go
-        // SaslAuthenticate path. Password lives in the bytes the
+        // Reject PLAIN over a non-TLS connection. Password lives in the bytes the
         // client is about to send; refuse before instantiating the
         // exchange.
         if let Some(mech) = mechanism.as_deref() {
@@ -125,8 +122,8 @@ impl Handler for SaslAuthenticateHandler {
         }
 
         // Instantiate the exchange on the first call. Default to
-        // SCRAM-SHA-512 if the client skipped the handshake — same
-        // permissive default the Go side ships.
+        // SCRAM-SHA-512 if the client skipped the handshake — the
+        // long-standing permissive default.
         if !has_state {
             let mech = mechanism.as_deref().unwrap_or("SCRAM-SHA-512");
             let eng = self.engines.for_listener(&listener_name);

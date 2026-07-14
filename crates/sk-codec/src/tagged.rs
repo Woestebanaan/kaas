@@ -22,7 +22,7 @@ pub struct TaggedField {
     pub value: Bytes,
 }
 
-/// Read and discard every tagged field. Mirrors Go's `ReadTaggedFields` —
+/// Read and discard every tagged field —
 /// unknown tags are silently consumed, and known tags are not surfaced to
 /// the caller. Use [`read_into`] when a handler needs to inspect specific
 /// tags.

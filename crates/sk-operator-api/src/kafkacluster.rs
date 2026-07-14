@@ -1,6 +1,5 @@
 //! `KafkaCluster` — top-level cluster CR.
 //!
-//! Port of `archive/operator/api/v1alpha1/kafkacluster_types.go`.
 //! Drives the operator's external-listener plumbing: cert-manager
 //! `Certificate`, per-broker `Service`, and Gateway-API `TLSRoute`.
 //! The broker StatefulSet itself is owned by the Helm chart — this
@@ -92,7 +91,7 @@ pub struct ExternalListener {
     #[schemars(default = "default_external_port")]
     pub port: i32,
 
-    /// Go-fmt-style `%d` for the broker ordinal, e.g.
+    /// printf-style `%d` for the broker ordinal, e.g.
     /// `broker-%d.kafka.example.com`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hostname_pattern: String,

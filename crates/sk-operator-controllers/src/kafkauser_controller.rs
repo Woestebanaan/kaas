@@ -1,5 +1,3 @@
-//! Port of `archive/operator/controllers/kafkauser_controller.go`.
-//!
 //! Reconciler that materialises a `KafkaUser` CR into:
 //!
 //! - One entry in `<data_dir>/__cluster/credentials.json` carrying
@@ -156,7 +154,7 @@ impl KafkaUserReconciler {
     }
 
     /// Build the credential entry + (for SCRAM auto-password) the
-    /// output Secret name. Mirrors the Go switch by `auth.type`.
+    /// output Secret name, switched by `auth.type`.
     async fn build_credential(
         &self,
         user: &KafkaUser,

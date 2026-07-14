@@ -1,4 +1,4 @@
-//! Cluster assignment — Rust analogue of Go's `kafkaapi.Assignment`.
+//! Cluster assignment — the `assignment.json` schema.
 //!
 //! `<data_dir>/__cluster/assignment.json` is the authoritative cluster
 //! state: which broker leads which partition (and serves which
@@ -6,10 +6,9 @@
 //! writer; every other broker is a reader and observes changes via
 //! [`Coordinator`].
 //!
-//! Serde shape matches the Go side byte-for-byte (`camelCase` field
-//! names, `RFC3339Nano` timestamp encoding) so a Rust-written file
-//! decodes cleanly under the Go reader and vice-versa — the Phase 9
-//! cutover requirement.
+//! Serde shape is pinned byte-for-byte (`camelCase` field
+//! names, `RFC3339Nano` timestamp encoding) so files written by any
+//! release — v0.1 included — decode cleanly under any other.
 //!
 //! [`Coordinator`]: crate::coordinator::Coordinator
 
@@ -45,8 +44,8 @@ pub enum PartitionRole {
 pub struct BrokerAssignment {
     pub id: String,
     pub health: BrokerHealth,
-    /// RFC3339Nano timestamp. Stored as a string so the Rust↔Go
-    /// timestamp byte equality is exact — `chrono` / `time` add
+    /// RFC3339Nano timestamp. Stored as a string so
+    /// cross-release timestamp byte equality is exact — `chrono` / `time` add
     /// trailing-zero variance.
     pub last_seen: String,
 }
@@ -70,8 +69,7 @@ pub struct ConsumerGroupAssignment {
 }
 
 /// Cluster-wide authoritative assignment, persisted under
-/// `__cluster/assignment.json`. See the Go shape in
-/// `archive/pkg/kafkaapi/assignment.go`.
+/// `__cluster/assignment.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Assignment {

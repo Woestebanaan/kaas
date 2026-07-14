@@ -1,6 +1,6 @@
 //! skafka-operator — Phase 7 binary.
 //!
-//! Port of `archive/cmd/skafka-operator/main.go`. Boots three
+//! Boots three
 //! reconcilers (KafkaTopic, KafkaUser, KafkaCluster) against a
 //! namespace-scoped `kube::Client`, runs the leader-elected startup
 //! sweep, exposes `/healthz` + `/readyz` over axum, and shuts down

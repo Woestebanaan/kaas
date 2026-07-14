@@ -1,7 +1,5 @@
 //! AddOffsetsToTxn handler (key 25, v0–v3).
 //!
-//! Port of `archive/internal/protocol/handlers/add_offsets_to_txn.go`.
-//!
 //! Single top-level `ErrorCode` (no per-partition shape). The
 //! `EndTxn` path uses the recorded group list to fire the offset
 //! hook on commit/abort.

@@ -9,7 +9,7 @@ use bytes::{Bytes, BytesMut};
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Default ceiling on a single frame's body. 100 MiB matches the Go broker's
+/// Default ceiling on a single frame's body. 100 MiB matches the v0.1 broker's
 /// implicit limit (any larger value would have to be configured anyway).
 pub const MAX_FRAME_SIZE: usize = 100 * 1024 * 1024;
 

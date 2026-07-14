@@ -1,6 +1,5 @@
 //! Produce — API key 0. v3–v9, flexible from v9 (KIP-482).
 //!
-//! Port of `archive/internal/protocol/codec/api/produce.go`.
 //!
 //! # Byte opacity
 //!

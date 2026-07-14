@@ -1,8 +1,7 @@
 //! API-key router.
 //!
 //! Routes an incoming `(header, body)` pair to the right handler.
-//! Matches the contract of
-//! `archive/internal/protocol/dispatch.go`: unsupported key →
+//! Contract: unsupported key →
 //! `UNSUPPORTED_VERSION` (35); version out-of-range → also 35, except
 //! for key 18 (`ApiVersions`) which clamps to the broker's max so old
 //! clients can still negotiate.
@@ -34,8 +33,7 @@ pub const ERR_UNSUPPORTED_VERSION: i16 = 35;
 pub const ERR_CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
 
 /// API keys allowed before SASL completes — handshake (17),
-/// ApiVersions (18), and authenticate (36). Same set as the Go
-/// `preSASLKeys` map.
+/// ApiVersions (18), and authenticate (36).
 pub const PRE_AUTH_KEYS: &[i16] = &[17, 18, 36];
 
 pub fn is_pre_auth(api_key: i16) -> bool {
@@ -151,8 +149,8 @@ impl Dispatcher {
     }
 
     /// Dispatch one request. Always returns `(body, header_version)` —
-    /// errors land in the body as a wire error_code, mirroring the Go
-    /// `errorResponse` pattern. Truly fatal conditions (panic, etc.)
+    /// errors land in the body as a wire error_code (the
+    /// error-response pattern). Truly fatal conditions (panic, etc.)
     /// are the connection task's problem, not ours.
     pub async fn dispatch(
         &self,
@@ -165,7 +163,7 @@ impl Dispatcher {
         let spec = registry::lookup(api_key);
         let out = self.dispatch_inner(conn, header, body, spec, api_key).await;
         // Label by numeric api_key to cap cardinality — the API name
-        // is one lookup away in dashboards. Cross-hairs with Go's
+        // is one lookup away in dashboards. Cross-hairs with the
         // `request.latency` histogram (workspace metric name).
         sk_observability::metrics::global().request_latency.record(
             started.elapsed().as_secs_f64(),
@@ -253,10 +251,10 @@ fn error_body(
     api_version: i16,
     error_code: i16,
 ) -> (BytesMut, HeaderVersion) {
-    // Match Go's errorResponse: just the error_code as the body. The
+    // Error response: just the error_code as the body. The
     // dispatcher's caller prepends the correlation_id + maybe
     // tagged-fields. The header version is derived from the spec
-    // (or V0 if the key was unknown — see Go's errorResponseRaw).
+    // (or V0 if the key was unknown).
     let hv = response_header_version(spec, api_version);
     let mut body = BytesMut::with_capacity(2);
     write_i16(&mut body, error_code);

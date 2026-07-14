@@ -1,6 +1,6 @@
 //! Multi-listener accept loop.
 //!
-//! Models `archive/internal/protocol/server.go` but rustified:
+//! Multi-listener server bring-up:
 //! - one `tokio::task` per accepted connection,
 //! - cancellation via [`CancellationToken`],
 //! - per-listener TLS plumbing (`tls_config: Option<...>`) — wired
@@ -9,7 +9,7 @@
 //! Three independent axes per listener: exposure (`addr`),
 //! encryption (`tls_config`), and authentication (which the
 //! dispatcher pulls from per-listener via the `connstate::listener_name`
-//! tag in Phase 4). Same Strimzi-shape model as the Go side.
+//! tag in Phase 4). Strimzi-shape listener model.
 
 use std::io;
 use std::net::SocketAddr;
@@ -263,8 +263,8 @@ async fn accept_loop(
             res = listener.accept() => {
                 match res {
                     Ok((stream, peer)) => {
-                        // TCP_NODELAY, matching the Go server's
-                        // SetNoDelay(true) (archive server.go:244).
+                        // TCP_NODELAY on every accepted conn
+                        // (gh #188).
                         // Kafka responses are tiny (a produce ack is
                         // ~50 bytes); with Nagle on, each one can sit
                         // in the kernel for up to ~40 ms against the
@@ -272,7 +272,7 @@ async fn accept_loop(
                         // connection's pipeline at
                         // in_flight × request_size / inflated_RTT.
                         // Found as phase 9's −24 % Strimzi-relative
-                        // throughput gap vs the Go flavor: broker CPU
+                        // throughput gap vs the v0.1 flavor: broker CPU
                         // idle, in-broker latency equal-or-better,
                         // client-observed RTT inflated (gh #188).
                         if let Err(err) = stream.set_nodelay(true) {

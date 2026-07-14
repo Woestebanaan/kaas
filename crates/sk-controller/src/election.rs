@@ -1,7 +1,6 @@
 //! Controller election seam.
 //!
-//! Port shape of `archive/internal/controller/election.go`. The Go
-//! side hand-rolls a Lease patch loop against the kube API and
+//! The v0.1 implementation hand-rolled a Lease patch loop against the kube API and
 //! surfaces `lease_transitions` as the controller epoch passed into
 //! [`AssignmentLoop::start`].
 //!

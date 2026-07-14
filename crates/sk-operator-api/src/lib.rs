@@ -1,6 +1,6 @@
 //! sk-operator-api — CRD type definitions used by the operator and the broker.
 //!
-//! Phase 7 port of `archive/operator/api/v1alpha1/`. Four CRD types
+//! Four CRD types
 //! plus a shared scheme module:
 //!
 //! - [`kafkacluster::KafkaCluster`] — top-level cluster config, drives
@@ -21,8 +21,8 @@
 //! `<T>::api(client)`, `<T>::crd()`, and the apiVersion/kind metadata
 //! for free, and `schemars::JsonSchema` so `xtask gen-crds`
 //! (workstream E) can walk the type and emit YAML. Field-level
-//! validation annotations mirror the kubebuilder ones from the Go
-//! tree — see each module for the field-by-field mapping.
+//! validation annotations preserve the v0.1 CRD schema — see each
+//! module for the field-by-field mapping.
 
 #![allow(missing_debug_implementations)]
 

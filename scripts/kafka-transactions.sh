@@ -5,8 +5,8 @@
 # script used to drive is no longer reachable from the Kafka 4.x CLI
 # — `kafka-verifiable-producer.sh` in 4.x dropped --transactional-id
 # / --transaction-duration-ms. The producer txn flow is exercised
-# via Go integration tests (internal/coordinator + storage suites)
-# instead.
+# via the broker integration tests (sk-coordinator + sk-storage
+# suites) instead.
 #
 # The remaining wire-protocol probe is the admin `kafka-transactions.sh
 # --list` / `--describe-transactions` path. Both call ListTransactions
@@ -36,4 +36,4 @@ else
   esac
 fi
 
-echo ">> PASS (admin-tool wire surface accounted for; producer-side txn flow runs under go test)"
+echo ">> PASS (admin-tool wire surface accounted for; producer-side txn flow runs under cargo test)"

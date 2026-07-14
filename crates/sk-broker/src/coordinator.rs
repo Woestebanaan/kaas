@@ -1,8 +1,6 @@
 //! Broker-side `Coordinator` — assignment.json watcher + ownership
 //! lookup + group/txn source.
 //!
-//! Port of `archive/internal/broker/coordinator.go`.
-//!
 //! The Coordinator does three things on the hot path:
 //!
 //! 1. **Read** the most recent `Assignment` (atomic-swapped via
@@ -39,8 +37,7 @@ use crate::assignment::{Assignment, AssignmentChangeHandler};
 use crate::group_hash::{pick_group_coordinator, pick_txn_coordinator};
 use sk_coordinator::{BrokerId, GroupAssignmentSource, TxnAssignmentSource};
 
-/// 1 s mtime / fsnotify poll cadence — matches the Go side's
-/// `time.NewTicker(time.Second)` safety net.
+/// 1 s mtime / fsnotify poll cadence (safety net).
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// "What is the controller's current Lease epoch?" — the fence used
@@ -371,7 +368,7 @@ impl TxnAssignmentSource for Coordinator {
 }
 
 /// Bump `skafka.assignment.polls` after every mtime tick. The
-/// `change_detected` label matches the Go side's split so dashboards
+/// `change_detected` label lets dashboards
 /// can distinguish "watcher is running but nothing changed" from
 /// "watcher is running and just applied a fresh assignment".
 fn record_poll(change_detected: bool) {
@@ -385,7 +382,7 @@ fn record_poll(change_detected: bool) {
 }
 
 /// Canonical `"topic/partition"` cache key used by both ownership
-/// and leader lookups. Mirrors Go's hot-path `partitionKey`.
+/// and leader lookups.
 pub fn partition_key(topic: &str, partition: i32) -> String {
     let mut s = String::with_capacity(topic.len() + 12);
     s.push_str(topic);

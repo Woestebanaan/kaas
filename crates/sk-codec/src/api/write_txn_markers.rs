@@ -1,6 +1,5 @@
 //! WriteTxnMarkers — API key 27. v0–v1, flexible from v1.
 //!
-//! Port of `archive/internal/protocol/codec/api/write_txn_markers.go`.
 //!
 //! Sent by the txn coordinator to each partition's leader to write
 //! the COMMIT/ABORT control batch. The receiving broker validates

@@ -1,6 +1,6 @@
 //! Pod-readiness gate plumbing.
 //!
-//! Port of `archive/internal/k8s/readiness.go`. The Helm chart
+//! The Helm chart
 //! declares a custom `skafka.io/PartitionsReady` `readinessGate` on
 //! each broker pod; the broker is not added to the headless
 //! `Service`'s endpoints until that gate flips to `True`. Driven by

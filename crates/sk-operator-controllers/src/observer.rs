@@ -1,7 +1,6 @@
 //! Reconcile-event observer.
 //!
-//! Mirrors `archive/operator/controllers/reconcile_observer.go`. The
-//! Go side wraps each `Reconcile` call in a small `Observed(...)`
+//! Wraps each `Reconcile` call in a small observer
 //! decorator that increments per-kind OTel counters (success / error
 //! / requeue) before returning to the caller. In Rust we expose the
 //! same shape as a small struct that reconcilers spawn into; Phase 8

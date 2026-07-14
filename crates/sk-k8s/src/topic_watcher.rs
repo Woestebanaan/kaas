@@ -1,6 +1,6 @@
 //! `KafkaTopic` CR change watcher.
 //!
-//! Port of `archive/internal/k8s/topic_watcher.go`. Same two-layer
+//! Same two-layer
 //! split as [`crate::endpoints`]: a pure-state cache that fires
 //! callbacks on divergence, plus a kube-bound pump (in
 //! `crate::kube_watchers`) that consumes

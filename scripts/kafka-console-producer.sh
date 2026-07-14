@@ -43,7 +43,7 @@ echo "$out" | grep -qE "${TOPIC}:0:8\$" || { echo "FAIL: end-offset != 8 after i
 # IllegalStateException from the Java client's state machine
 # before any wire request reaches the broker. The gh #22-#27 chain
 # is exercised at the wire level by `kafka-txn-coordinator.sh` and
-# end-to-end with franz-go in `tests/kafka-compat/eos_v2_test.go`.
+# end-to-end by the broker integration test `bins/skafka/tests/eos_v2.rs`.
 
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --delete --topic "$TOPIC" || true
 

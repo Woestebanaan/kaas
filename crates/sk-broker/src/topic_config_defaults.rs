@@ -34,8 +34,7 @@ pub struct Entry {
 }
 
 /// Subset of Apache's topic-config keys that skafka actually
-/// honours (gh #116 cleaner + compactor + retention). The Go
-/// reference exposes the same set; clients gate on these for
+/// honours (gh #116 cleaner + compactor + retention). Clients gate on these for
 /// `--describe` output, so the table is small but load-bearing.
 pub const ALL_KEYS: &[Entry] = &[
     Entry {

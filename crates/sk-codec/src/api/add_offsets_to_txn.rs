@@ -1,6 +1,5 @@
 //! AddOffsetsToTxn — API key 25. v0–v3, flexible from v3.
 //!
-//! Port of `archive/internal/protocol/codec/api/add_offsets_to_txn.go`.
 //!
 //! Sent by a transactional producer before TxnOffsetCommit to tell
 //! the txn coordinator "I'm going to commit offsets for consumer

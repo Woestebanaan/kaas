@@ -1,6 +1,5 @@
 //! TxnOffsetCommit — API key 28. v0–v3, flexible from v3.
 //!
-//! Port of `archive/internal/protocol/codec/api/txn_offset_commit.go`.
 //!
 //! Sent by a transactional producer to stage consumer-group offset
 //! commits as part of an open transaction. The group coordinator

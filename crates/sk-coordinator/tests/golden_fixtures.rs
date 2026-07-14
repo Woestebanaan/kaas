@@ -1,8 +1,8 @@
-//! gh #172 — round-trip Go-written slot + fence-log files through
+//! gh #172 — round-trip v0.1-written slot + fence-log files through
 //! the Rust serde types and assert byte equality.
 //!
-//! The fixtures under `tests/fixtures/` are captured by the Go
-//! tool at `archive/cmd/capture-txn-fixtures`. They exercise the
+//! The fixtures under `tests/fixtures/` were captured from a live
+//! v0.1 broker. They exercise the
 //! shapes Phase 6 cares about:
 //!
 //! - `txn_state/slot-9.json`  — single entry, `CompleteCommit`,
@@ -79,8 +79,8 @@ fn fence_log_round_trips() {
     // HashMap is unordered. Use BTreeMap for stable serialization.
     let state: std::collections::BTreeMap<String, i16> = serde_json::from_slice(bytes).unwrap();
     let reencoded = serde_json::to_vec(&state).unwrap();
-    // The Go writer happens to emit keys in sorted order for this
-    // map (encoding/json sorts map keys lexicographically). The
+    // The v0.1 writer emitted keys in sorted order for this
+    // map (its JSON encoder sorts map keys lexicographically). The
     // BTreeMap re-serialization does the same, so the round trip
     // is exact.
     assert_eq!(bytes, reencoded.as_slice(), "fence log round trip drift");

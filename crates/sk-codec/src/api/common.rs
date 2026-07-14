@@ -4,7 +4,7 @@
 //! representations of the same field based on the per-call `flexible`
 //! flag. They mirror the `readString` / `nullableString` /
 //! `writeString` / `readArray` helpers in
-//! `archive/internal/protocol/codec/api/produce.go` and friends.
+//! the v0.1 codec modules.
 //!
 //! Names deliberately shadow the underlying primitives in
 //! [`crate::primitives`]; the qualifier `api::common::` at the call

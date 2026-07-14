@@ -1,5 +1,3 @@
-//! Port of `archive/tests/byte-opacity/tripwire_test.go`.
-//!
 //! Two layers of protection against the "broker is a byte mover, not
 //! a byte interpreter" invariant slipping:
 //!
@@ -30,8 +28,7 @@ use sk_storage::{MemoryStorage, StorageEngine};
 /// the offset / delta / attribute fields are zeros — the codec never
 /// looks at the record payload.
 ///
-/// Same shape as
-/// `archive/tests/testutil/recordbatch::Encode` for the fields the
+/// Covers the fields the
 /// broker actually inspects (baseOffset, batchLength, magic,
 /// lastOffsetDelta). Everything else is filler; the storage engine
 /// only reads bytes `[0..8]` (baseOffset), `[8..12]` (batchLength),

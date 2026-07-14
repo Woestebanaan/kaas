@@ -1,8 +1,7 @@
 //! EndTxn handler (key 26, v0–v3).
 //!
-//! Port of `archive/internal/protocol/handlers/end_txn.go` plus the
-//! Phase 6 plan §C.5 same-broker marker fast path that Go doesn't
-//! ship.
+//! EndTxn (API key 26), including a same-broker marker fast path
+//! (an improvement over v0.1).
 //!
 //! Sequence:
 //! 1. Validate ownership + (pid, epoch) and transition state via
@@ -16,7 +15,7 @@
 //!    skipped — the gh #114 cross-broker `WriteTxnMarkers` RPC picks
 //!    them up.
 //!
-//! `acks = -1` matches Go's marker dispatch: control markers commit
+//! `acks = -1` for marker dispatch: control markers commit
 //! transactions, so they must be durable before we ack the producer.
 //!
 //! [`TxnOffsetHook`]: sk_coordinator::TxnOffsetHook

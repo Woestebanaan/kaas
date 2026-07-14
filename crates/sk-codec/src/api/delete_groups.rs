@@ -4,8 +4,6 @@
 //! `AdminClient.deleteConsumerGroups()` and
 //! `kafka-consumer-groups.sh --delete` to drop a consumer group's
 //! coordinator-side state plus its committed offsets (gh #89).
-//!
-//! Port of `archive/internal/protocol/codec/api/delete_groups.go`.
 
 use bytes::BytesMut;
 

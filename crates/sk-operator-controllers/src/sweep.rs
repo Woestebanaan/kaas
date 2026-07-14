@@ -1,7 +1,7 @@
 //! Leader-elected startup sweep.
 //!
-//! Ports `SweepTopics` and `SweepCredentials` from the Go controllers
-//! package. Cleanup is reconcile-time best-effort in the steady
+//! Startup sweeps for orphaned topic dirs and stale credential
+//! entries. Cleanup is reconcile-time best-effort in the steady
 //! state, but if the operator was down while a CR delete event
 //! fired, the per-CR `NotFound` branch never runs. The sweep covers
 //! that gap: at boot (after leader election + cache sync) it walks
@@ -9,7 +9,7 @@
 //! users / topics that no longer have a CR.
 //!
 //! Both functions return the list of names they removed so the
-//! caller can log them — same shape Go uses.
+//! caller can log them.
 
 use std::collections::HashSet;
 use std::path::Path;

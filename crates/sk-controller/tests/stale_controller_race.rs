@@ -3,8 +3,7 @@
 //! Two simulated controllers race on the same `assignment.json`.
 //! The losing controller writes with an older `controller_epoch`;
 //! the Coordinator's epoch fence must reject that write so brokers
-//! never see a stale view of cluster state. Mirrors the Go
-//! `archive/tests/stale-controller-race/race_test.go`.
+//! never see a stale view of cluster state.
 //!
 //! Kube-free port: instead of two real Lease-driven controllers, the
 //! test drives two [`sk_controller::AssignmentLoop`] instances at

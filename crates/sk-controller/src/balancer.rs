@@ -1,6 +1,6 @@
 //! Partition + consumer-group placement.
 //!
-//! Port of `archive/internal/controller/balancer.go`. Pure functions
+//! Pure functions
 //! over `(prev assignment, alive brokers, inputs)`; no state, no
 //! I/O. Both shapes — partition placement and group placement —
 //! follow the same three-step recipe:
@@ -16,9 +16,9 @@
 //!    enforce `max(per-broker count) - min ≤ 1`. Group placement
 //!    skips smoothing because each group is a single unit.
 //!
-//! Hash: XXH64 via `twox-hash`. Mirrors Go's `xxhash/v2`
-//! byte-for-byte so a Rust-written assignment matches a Go-written
-//! one for the same input (cutover requirement). The previous
+//! Hash: XXH64 via `twox-hash`, byte-for-byte stable so an
+//! assignment written by any release matches a v0.1-written
+//! one for the same input (upgrade requirement). The previous
 //! FNV-1a 64 had pathological avalanche on broker IDs differing by
 //! one byte and drove a 50/25/25 skew on 3-broker clusters
 //! (skafka#112).
@@ -45,9 +45,9 @@ pub struct GroupSpec {
 }
 
 /// `XXH64(topic || 0x00 || partition_be || 0x00 || broker)`.
-/// Mirrors the Go side's `rendezvousHash` byte sequence so a
-/// Rust-driven controller picks the same broker as a Go-driven one
-/// for the same inputs (cutover A/B testing).
+/// The byte sequence is pinned so any controller build picks the
+/// same broker as a v0.1-driven one for the same inputs (upgrade
+/// compatibility).
 pub fn rendezvous_hash(topic: &str, partition: i32, broker: &str) -> u64 {
     let mut h = twox_hash::XxHash64::with_seed(0);
     h.write(topic.as_bytes());
@@ -224,8 +224,7 @@ pub fn balance_groups(
 /// until `max - min ≤ 1`. Deterministic — ties broken
 /// lexicographically on broker ID; victim picked by highest
 /// rendezvous score for the recipient (= the move closest to a
-/// no-op from rendezvous's perspective). Mirrors Go's
-/// `smoothPartitions` shape. Owned `String` keys throughout so the
+/// no-op from rendezvous's perspective). Owned `String` keys throughout so the
 /// counts map doesn't tangle with the `alive` slice's lifetime.
 fn smooth_partitions(slots: &mut [PartitionSlot], alive: &[String]) {
     if alive.len() < 2 || slots.is_empty() {

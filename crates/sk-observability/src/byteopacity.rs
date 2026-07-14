@@ -1,7 +1,7 @@
 //! Byte-opacity tripwire counters.
 //!
-//! Port of `archive/internal/observability/byteopacity.go`. The
-//! rewrite plan's load-bearing invariant is "the broker is a byte
+//! The
+//! load-bearing invariant is "the broker is a byte
 //! mover, not a byte interpreter": no code path should decode
 //! individual records or re-encode a `RecordBatch`. These counters
 //! MUST stay at zero in steady state — every increment is a bug and

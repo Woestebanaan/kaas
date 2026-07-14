@@ -6,7 +6,6 @@
 //! lookup) and the single-coordinator response shape with a
 //! `coordinators` array.
 //!
-//! Port of `archive/internal/protocol/codec/api/find_coordinator.go`.
 //! See gh #91 PR 3 — at v3 the wire shape is the legacy
 //! single-coordinator form wrapped in flexible tagged fields, NOT an
 //! array. Clients only switch to the v4 array once the broker

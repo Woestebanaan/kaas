@@ -1,7 +1,6 @@
 //! InitProducerId handler (key 22).
 //!
-//! Port of `archive/internal/protocol/handlers/init_producer_id.go`
-//! with the Phase 6 transactional path wired in.
+//! InitProducerId (API key 22) with the transactional path wired in.
 //!
 //! Non-transactional (`transactional_id: None`) — hand out a fresh
 //! PID with `epoch = 0` from the broker's monotonic counter. Same as
@@ -16,8 +15,7 @@
 //!    fresh PID with `epoch = 0`; every subsequent call returns the
 //!    SAME PID with `epoch += 1`.
 //! 3. Without a store (boot window / dev mode), fall back to fresh
-//!    PID + a one-shot `tracing::warn!` — matches the Go reference's
-//!    stage-A degradation. A zombie writer could still squeak under
+//!    PID + a one-shot `tracing::warn!` (graceful degradation). A zombie writer could still squeak under
 //!    its old (PID, epoch) in that window.
 //!
 //! Cross-broker fence broadcast (gh #30 / #108 phase 2) lands in
@@ -96,8 +94,8 @@ impl InitProducerIdHandler {
         let store = match self.broker.txn_state() {
             Some(s) => s,
             None => {
-                // No store wired (boot window or dev mode). Match
-                // the Go fallback: hand out a fresh PID, log once.
+                // No store wired (boot window or dev mode):
+                // hand out a fresh PID, log once.
                 // The producer can make progress but the gh #22
                 // fence-on-rejoin contract is silently disabled
                 // this connection.
@@ -169,8 +167,7 @@ fn map_store_error(err: &TxnStateError) -> i16 {
         TxnStateError::EpochFenced => ERR_PRODUCER_FENCED,
         TxnStateError::Concurrent => 51, // CONCURRENT_TRANSACTIONS
         TxnStateError::InvalidState => ERR_INVALID_TXN_STATE,
-        // Persistence failure — Go reference logs + falls back to a
-        // fresh PID. Surface as COORDINATOR_NOT_AVAILABLE so the
+        // Persistence failure — surface as COORDINATOR_NOT_AVAILABLE so the
         // client retries instead of silently bypassing the fence.
         TxnStateError::Io(_) | TxnStateError::Decode(_) => ERR_COORDINATOR_NOT_AVAILABLE,
     }
@@ -256,8 +253,8 @@ mod tests {
 
     #[tokio::test]
     async fn transactional_without_store_falls_back_to_fresh_pid() {
-        // Phase-3-style broker: txn_state not installed. Matches Go
-        // fallback — fresh PID + warn, error_code 0.
+        // Broker without txn_state installed: fallback —
+        // fresh PID + warn, error_code 0.
         let h = InitProducerIdHandler::new(broker());
         let resp = call(&h, Some("tx-1"), 60_000).await;
         assert_eq!(resp.error_code, 0);

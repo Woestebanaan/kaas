@@ -1,7 +1,7 @@
 //! `GroupTakeoverDriver` — consumer-group analogue of
 //! [`TakeoverDriver`].
 //!
-//! Port of `archive/internal/broker/group_takeover.go`. Watches
+//! Watches
 //! assignment changes and tells `coordinator::Manager` to drop
 //! in-memory state for groups no longer assigned here.
 //!

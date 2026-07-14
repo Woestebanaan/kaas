@@ -1,6 +1,6 @@
 //! Idempotent-producer state.
 //!
-//! Port of `archive/internal/storage/idempotence.go`. The classifier
+//! The classifier
 //! is a pure function: caller (Append) holds the partition mutex, the
 //! classifier inspects the per-PID window, returns an [`Outcome`],
 //! and the caller records the accepted batch via
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use parking_lot::Mutex;
 
-/// Five batches per PID. Matches Apache Kafka 3.7 and the Go reference.
+/// Five batches per PID. Matches Apache Kafka 3.7.
 pub const RING_SIZE: usize = 5;
 
 /// One cache slot in the per-producer window.
@@ -54,7 +54,7 @@ pub struct BatchProducerInfo {
     pub last_seq: i32,
 }
 
-/// Outcome of the idempotence classifier. The Go side conflates "no
+/// Outcome of the idempotence classifier. v0.1 conflated "no
 /// PID" and "transactional control batch" into `idemNotIdempotent`;
 /// we keep them as one variant ([`Outcome::NotIdempotent`]) for the
 /// same reason — the caller's handling is identical.
@@ -131,8 +131,8 @@ pub fn parse_batch_producer_info(raw: &[u8]) -> Result<BatchProducerInfo, Idempo
         first_seq: base_seq,
         // `last_seq = first_seq + last_offset_delta`. For PID == -1
         // the values are arbitrary and ignored downstream, so we
-        // don't validate overflow here — matches Go's silent
-        // promotion.
+        // don't validate overflow here — the silent
+        // promotion is intentional.
         last_seq: base_seq.wrapping_add(last_offset_delta),
     })
 }

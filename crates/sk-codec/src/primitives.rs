@@ -1,8 +1,7 @@
 //! Wire primitives: signed integers, varints, strings, bytes, arrays.
 //!
 //! Free functions over `&mut bytes::Bytes` (read side) and `&mut bytes::BytesMut`
-//! (write side). 1:1 port of `archive/internal/protocol/codec/reader.go` and
-//! `writer.go`.
+//! (write side).
 //!
 //! ## Null sentinel encoding
 //!
@@ -288,7 +287,7 @@ pub fn read_nullable_bytes(buf: &mut Bytes) -> Result<Option<Bytes>, CodecError>
     let len = usize::try_from(raw).map_err(|_| CodecError::LengthOverflow)?;
     require(buf, len)?;
     // `copy_to_bytes` increments refcount on the underlying arena — true
-    // zero-copy, matching the Go `gh #132` sub-slice optimisation.
+    // zero-copy (gh #132).
     Ok(Some(buf.copy_to_bytes(len)))
 }
 
@@ -372,8 +371,8 @@ pub fn write_uuid(buf: &mut BytesMut, v: &[u8; 16]) {
 // ---------------------------------------------------------------------------
 
 /// Read the length prefix of a legacy (int32) array. Returns the element
-/// count; a negative wire value (null array) is normalised to 0 to match the
-/// Go side's "null = empty" semantics.
+/// count; a negative wire value (null array) is normalised to 0
+/// ("null = empty" wire semantics).
 pub fn read_array_len(buf: &mut Bytes) -> Result<usize, CodecError> {
     let raw = read_i32(buf)?;
     if raw < 0 {
@@ -461,7 +460,7 @@ mod tests {
 
     #[test]
     fn uvarint_known_values() {
-        // Cross-reference values from the Go test suite.
+        // Cross-reference values from the v0.1 test suite.
         for &v in &[
             0u64,
             1,

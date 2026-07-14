@@ -6,8 +6,6 @@
 //! `require_stable` boolean on the request (KIP-447 read-committed
 //! offset fetch); v8+ replaces the single-group shape with a batch
 //! `groups[]` form.
-//!
-//! Port of `archive/internal/protocol/codec/api/offset_fetch.go`.
 
 use bytes::BytesMut;
 

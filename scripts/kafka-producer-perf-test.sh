@@ -21,9 +21,8 @@ echo ">> Scenario 2 (gh #13): produce 1k records under each compression codec"
 # this test confirms each codec round-trips through Produce without
 # the broker tripping on the codec-bit combination. A consumer would
 # decompress on its end; this script only verifies the producer
-# wire path (the matching Go test in tests/kafka-compat covers the
-# consumer side, where ALL four codecs decode back to the original
-# bytes).
+# wire path (consumer-side coverage, where ALL four codecs decode
+# back to the original bytes, lives in the broker integration tests).
 for codec in gzip snappy lz4 zstd; do
   echo "  -- $codec"
   "$KAFKA_BIN/kafka-producer-perf-test.sh" --topic "$TOPIC" \

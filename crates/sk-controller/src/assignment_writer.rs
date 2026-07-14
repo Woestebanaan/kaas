@@ -1,6 +1,6 @@
 //! Atomic `assignment.json` writer + recompute loop.
 //!
-//! Port of `archive/internal/controller/assignment.go`. The
+//! The
 //! controller broker is the only writer; every other broker reads
 //! the file via [`sk_broker::Coordinator`]. The writer's job is to
 //! recompute the assignment on every input change (broker join/
@@ -35,7 +35,7 @@ use crate::k8s_mirror::{CrMirror, NoopMirror};
 
 /// "Tell the loop *why* it should recompute". Reasons are
 /// informational — they end up on tracing spans but don't gate the
-/// recompute itself. Mirrors Go's `AssignmentChangeReason`.
+/// recompute itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum AssignmentReason {
     BrokerJoined,
@@ -107,8 +107,7 @@ impl GroupSource for StaticSources {
 ///
 /// Single-task ownership: all state mutation happens inside
 /// [`AssignmentLoop::update_assignment`] (which currently runs the
-/// recompute inline rather than via a channel). The Go side uses a
-/// coalescing channel; Phase 5 ships the inline shape because
+/// recompute inline rather than via a coalescing channel because
 /// production callers (`bins/skafka/main.rs`) don't generate enough
 /// concurrent updates to warrant the coalescing yet. A follow-up
 /// can introduce a `tokio::mpsc` queue if the call rate climbs.

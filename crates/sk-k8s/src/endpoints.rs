@@ -1,6 +1,6 @@
 //! Live map of broker endpoints derived from `EndpointSlice` events.
 //!
-//! Port of `archive/internal/k8s/endpoints.go`. Two layers:
+//! Two layers:
 //!
 //! 1. [`BrokerRegistry`] — the pure-state map keyed on
 //!    StatefulSet ordinal. Apply events via

@@ -1,6 +1,6 @@
 //! `KafkaUser` — Strimzi-shape user CR.
 //!
-//! Port of `archive/operator/api/v1alpha1/kafkauser_types.go`. Carries
+//! Carries
 //! per-user authentication (`scram-sha-512` / `tls` /
 //! `kubernetes-serviceaccount`), inline `spec.authorization.acls`
 //! (post-gh #135 — `KafkaACL` and `KafkaUserGroup` are gone), and

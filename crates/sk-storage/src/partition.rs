@@ -1,9 +1,7 @@
 //! Per-partition write path: mutex-guarded state, lock-free read snapshot,
 //! per-partition committer task.
 //!
-//! Port of `archive/internal/storage/engine.go:221-589`'s `partitionState`
-//! plus its committer goroutine. The Phase 2 plan's workstream D in
-//! [`docs/phase-2.md`](../../../docs/phase-2.md). One [`Partition`] per
+//! Per-partition write path plus its committer task. One [`Partition`] per
 //! `(topic, partition)` tuple; the engine layer ([`crate::engine`]) holds
 //! a `DashMap<(String, i32), Arc<Partition>>` and routes calls.
 //!
@@ -13,7 +11,7 @@
 //!   manifest persist, producer-state mutation — all under this mutex.
 //! - `ArcSwap<ReadSnapshot>` for the **read-path observation channel** —
 //!   `high_watermark()` / `log_start_offset()` / `epoch()` read without
-//!   ever blocking on the mutex. Mirrors the Go gh #134 fix that kept the
+//!   ever blocking on the mutex. Preserves the gh #134 fix that kept the
 //!   OTel gauge alive when a stuck NAS fsync held the partition lock for
 //!   the watchdog deadline.
 //! - One [`tokio::task`] per partition (the **committer**) that drains
@@ -55,8 +53,7 @@ use crate::producer_snapshot::{read_producer_snapshot, write_producer_snapshot};
 use crate::segment::{self, parse_batch_offsets, ActiveSegment, SegmentMeta};
 use crate::txn_index::{AbortedTxn, AbortedTxnIndex, OpenTxnIndex};
 
-/// Per-partition tuning knobs. Ported from Go's
-/// `archive/internal/storage/engine.go::Config`.
+/// Per-partition tuning knobs.
 #[derive(Debug, Clone)]
 pub struct PartitionConfig {
     /// Roll the active segment at this size. Default 1 GiB matches
@@ -353,7 +350,7 @@ impl Partition {
             }
 
             // Epoch fence — caller's epoch must be ≥ our current
-            // epoch. The Go side returns `ErrEpochMismatch`; same here.
+            // epoch; a stale epoch is rejected.
             if i64::from(epoch) < guard.epoch {
                 return Err(StorageError::EpochMismatch);
             }
@@ -487,7 +484,7 @@ impl Partition {
 
         // acks == -1: wait for the fsync — but ONLY when this append
         // is the one that crossed the flush-interval threshold. This
-        // mirrors the Go engine's `waitForFlushIfAcksAllLocked`
+        // mirrors the v0.1 engine's `waitForFlushIfAcksAllLocked`
         // (`triggeredFlushSeq <= 0 → return nil`): with
         // `flush_interval_messages == 1` every append triggers, so
         // every acks=all append waits — honest semantics. With the
@@ -497,7 +494,7 @@ impl Partition {
         // is in flight. The previous shape waited on the
         // last-requested seq from EVERY acks=all append, parking the
         // whole pipeline for the full fsync window each cycle — worth
-        // −26% Strimzi-relative throughput vs the Go flavor at
+        // −26% Strimzi-relative throughput vs the v0.1 flavor at
         // interval 10000 on NFS (phase 9 A.3 gate, gh #188).
         if acks == -1 && triggered_flush {
             self.await_flush(my_flush_seq).await?;
@@ -1133,7 +1130,7 @@ mod tests {
         // gh #188: with the durability dial raised
         // (flush_interval_messages ≫ 1), an acks=all append that does
         // NOT cross the threshold must ack immediately — even if a
-        // flush is pending or in flight — mirroring the Go engine's
+        // flush is pending or in flight — mirroring the v0.1 engine's
         // `triggeredFlushSeq <= 0 → no wait`. The pre-fix shape parked
         // every acks=all append on the last-requested seq, stalling
         // the whole pipeline for the fsync window each cycle.

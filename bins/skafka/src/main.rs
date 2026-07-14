@@ -55,17 +55,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 /// Hot-reload interval for credentials.json + acls.json. 10 s
-/// matches the Go side's mtime poll. The Phase 4 plan calls out a
-/// follow-up to swap in `notify` inotify during Phase 8.
+/// mtime poll. Swapping in `notify` inotify is an open follow-up.
 const RELOAD_INTERVAL_SECS: u64 = 10;
 
-/// Init-container entry point. Mirrors
-/// `archive/cmd/skafka/main.go::runInit` — chown/chmod the data dir
+/// Init-container entry point — chown/chmod the data dir
 /// to the broker uid/gid so the broker container (uid=65532) can
 /// mkdir topic dirs at runtime even when the CSI provisioner
 /// silently skipped fsGroup-driven perms (skafka#110).
 ///
-/// Skips the KafkaTopic CR walk the Go side did — the operator
+/// Skips any KafkaTopic CR walk — the operator
 /// creates partition dirs on first reconcile, and the storage
 /// engine mkdirs lazily on Produce; the CR walk was an optimisation
 /// to have the dirs pre-warm, not a correctness requirement.
@@ -542,7 +540,7 @@ fn build_engine(
             // acks=all). It was parsed by the CLI but dropped on the
             // floor here, silently running every deployment at
             // flush-per-batch — found in phase 9 A.3 as a 2.8×
-            // throughput gap against the Go flavor on identical
+            // throughput gap against the v0.1 flavor on identical
             // values (gh #152).
             let cfg = PartitionConfig {
                 flush_interval_messages,
@@ -590,7 +588,7 @@ fn build_dispatcher(
         Arc::new(DescribeGroupsHandler::new(broker.clone())),
     );
     d.register(16, 0, 4, Arc::new(ListGroupsHandler::new(broker.clone())));
-    // Phase 9 workstream A — Go-parity admin surface (gh #152).
+    // Admin surface (gh #152).
     d.register(20, 0, 5, Arc::new(DeleteTopicsHandler::new(broker.clone())));
     d.register(
         21,
@@ -798,7 +796,7 @@ fn _silence_unused_hashmap() -> HashMap<u8, u8> {
 /// `broker.coordinator()` so the health server can be spawned before
 /// the cluster runtime installs one (dev mode never does — the
 /// handler then renders the documented zero-value shape, same as the
-/// Go broker in local mode).
+/// v0.1 broker in local mode).
 struct BrokerRuntimeState(Arc<Broker>);
 
 impl BrokerRuntimeState {
@@ -858,8 +856,8 @@ impl sk_observability::health::RuntimeState for BrokerRuntimeState {
         .unwrap_or(i32::MAX)
     }
     fn partitions_assigned(&self) -> i32 {
-        // Single-writer-per-partition: assigned == led. The Go broker
-        // distinguishes them only while a takeover is mid-recovery.
+        // Single-writer-per-partition: assigned == led (they diverge
+        // only while a takeover is mid-recovery).
         self.partitions_led()
     }
     fn partitions_recovering(&self) -> i32 {

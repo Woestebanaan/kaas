@@ -1,7 +1,6 @@
 //! `tmp + fsync + rename` writer for partition metadata files.
 //!
-//! Direct port of the dance in
-//! `archive/internal/storage/manifest.go:78-119`. NFSv4 guarantees
+//! NFSv4 guarantees
 //! that a same-directory rename is atomic, so a crash mid-write
 //! leaves either the old file or the new one — never a torn JSON
 //! payload.
@@ -27,7 +26,7 @@ use crate::fs::{fsync_path, Fs};
 ///
 /// On any failure after the tmp file is opened, the tmp file is
 /// removed before the error is propagated so a partial write never
-/// leaks. Mirrors the cleanup branches in Go's `writeManifest`.
+/// leaks.
 pub fn atomic_write_json<T: Serialize>(
     fs: &dyn Fs,
     dir: &Path,
@@ -40,7 +39,7 @@ pub fn atomic_write_json<T: Serialize>(
 /// Same as [`atomic_write_json`] but pretty-printed (2-space indent +
 /// newline-terminated). The operator-side `credentials.json` /
 /// `acls.json` writers use this so the on-disk format stays
-/// byte-equal to Go's `json.MarshalIndent` output — humans inspect
+/// byte-equal to the v0.1 pretty-printed output — humans inspect
 /// these files and the existing tooling expects multi-line layout.
 pub fn atomic_write_json_pretty<T: Serialize>(
     fs: &dyn Fs,
@@ -61,7 +60,7 @@ fn atomic_write_json_inner<T: Serialize>(
     fs.mkdir_all(dir)?;
     let data = if pretty {
         let mut v = serde_json::to_vec_pretty(payload).map_err(io::Error::other)?;
-        // Go's json.MarshalIndent doesn't add a trailing newline either,
+        // The v0.1 writer didn't add a trailing newline either,
         // so don't append one — keep the output byte-identical.
         v.shrink_to_fit();
         v

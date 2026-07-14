@@ -4,8 +4,6 @@
 //! the chosen SASL mechanism name; response advertises the broker's
 //! enabled mechanisms plus an error code that is non-zero when the
 //! requested mechanism is not enabled.
-//!
-//! Port of `archive/internal/protocol/codec/api/sasl_handshake.go`.
 
 use bytes::BytesMut;
 
@@ -21,8 +19,8 @@ pub const VERSIONS: (i16, i16) = (0, 1);
 
 const fn header_for(_version: i16) -> HeaderVersion {
     // v0 and v1 both use the legacy request header (V1) and a V0
-    // response header. The Go side picks V1 for the request because
-    // it carries client_id; SaslHandshake has never gone flexible.
+    // response header. V1 is right for the request because it
+    // carries client_id; SaslHandshake has never gone flexible.
     HeaderVersion::V1
 }
 

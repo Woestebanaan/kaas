@@ -9,8 +9,6 @@
 //! assignments for the new partitions. skafka uses single-writer-per-
 //! partition (no replication), so the field is parsed for protocol
 //! fidelity but unused at the handler.
-//!
-//! Port of the Go protocol layer's CreatePartitions handling.
 
 use bytes::BytesMut;
 

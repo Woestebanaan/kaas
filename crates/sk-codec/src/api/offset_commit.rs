@@ -5,8 +5,6 @@
 //! `throttle_time_ms` on the response; v6+ adds
 //! `committed_leader_epoch` per partition; v7+ adds nullable
 //! `group_instance_id` (KIP-345).
-//!
-//! Port of `archive/internal/protocol/codec/api/offset_commit.go`.
 
 use bytes::BytesMut;
 
@@ -20,11 +18,11 @@ use crate::primitives::{read_i16, read_i32, read_i64, write_i16, write_i32, writ
 use crate::tagged;
 use crate::Bytes;
 
-// Min 2, matching the Go broker: v1's per-partition
+// Min 2: v1's per-partition
 // `commit_timestamp` (and v2–4's `retention_time_ms`) are not
-// decoded here — same as Go — so don't advertise v0/v1 shapes
+// decoded here, so don't advertise v0/v1 shapes
 // this module never parsed correctly. (v2–4 retention remains a
-// shared Go+Rust divergence from Apache; tracked post-cutover.)
+// known divergence from Apache; tracked as follow-up.)
 pub const VERSIONS: (i16, i16) = (2, 8);
 pub const MIN_FLEXIBLE: i16 = 8;
 

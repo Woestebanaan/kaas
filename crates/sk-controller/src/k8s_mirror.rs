@@ -1,7 +1,6 @@
 //! CRMirror trait + `NoopMirror` impl.
 //!
-//! Port of `archive/internal/controller/k8s_mirror.go`. The Go side
-//! reflects the current assignment into a `KafkaClusterAssignments`
+//! Reflects the current assignment into a `KafkaClusterAssignments`
 //! CR for `kubectl describe` debugging. The plan is explicit that
 //! mirror failures are fire-and-forget — a successful
 //! `AssignmentStore::write` is the authoritative record, and the

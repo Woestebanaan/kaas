@@ -1,6 +1,6 @@
 //! SCRAM-SHA-512 server state machine (RFC 5802).
 //!
-//! Port of `archive/internal/auth/scram.go`. Two steps:
+//! Two steps:
 //!
 //! 1. **client-first** — `"n,,n=<user>,r=<clientNonce>"`. Server
 //!    looks up the user's stored credentials, appends an 18-byte
@@ -28,8 +28,7 @@ use crate::engine::SaslExchange;
 use crate::errors::AuthError;
 use crate::types::{Principal, PrincipalKind};
 
-/// 18-byte nonce suffix matches the Go implementation's
-/// `rand.Read(make([]byte, 18))`. Base64-no-pad → 24 chars.
+/// 18-byte random nonce suffix. Base64-no-pad → 24 chars.
 const NONCE_SUFFIX_BYTES: usize = 18;
 
 #[derive(Debug)]
@@ -110,8 +109,8 @@ impl ScramExchange {
     fn handle_client_first(&mut self, msg: &[u8]) -> Result<(Vec<u8>, bool), AuthError> {
         let s = std::str::from_utf8(msg).map_err(|_| AuthError::MalformedSaslMessage)?;
 
-        // Strip the GS2 header ("n,," or "y,,"). The Go side uses the
-        // first occurrence of ",," — preserve that.
+        // Strip the GS2 header ("n,," or "y,,") at the
+        // first occurrence of ",,".
         let bare_idx = s.find(",,").ok_or(AuthError::MalformedSaslMessage)? + 2;
         self.client_first_bare = s[bare_idx..].to_owned();
 

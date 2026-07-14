@@ -3,8 +3,6 @@
 //! Versions 0..=4. Flexible (KIP-482) from v3. v1+ adds
 //! `throttle_time_ms` on the response; v4+ adds a `states_filter`
 //! array on the request and a `group_state` field per result.
-//!
-//! Port of `archive/internal/protocol/codec/api/list_groups.go`.
 
 use bytes::BytesMut;
 

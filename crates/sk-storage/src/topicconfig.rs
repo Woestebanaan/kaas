@@ -1,6 +1,6 @@
 //! Per-topic configuration file: `/data/<topic>/.config.json`.
 //!
-//! Port of `archive/internal/storage/topicconfig.go`. The operator
+//! The operator
 //! writes this file when reconciling a `KafkaTopic` CR; the broker
 //! reads it on partition open and via the `notify`-driven hot-reload
 //! task (Phase 2 workstream D).
@@ -38,7 +38,7 @@ pub struct TopicConfigFile {
     pub segment_bytes: Option<i64>,
 
     /// `cleanup.policy` — `"delete"`, `"compact"`, or `"compact,delete"`.
-    /// Empty string omitted to match Go's `omitempty` tag.
+    /// Empty string omitted from the JSON (v0.1 `omitempty` compatibility).
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub cleanup_policy: String,
 

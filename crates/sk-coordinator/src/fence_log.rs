@@ -1,6 +1,5 @@
 //! Outbound producer-epoch fence log (gh #108 phase 2).
 //!
-//! Port of `archive/internal/coordinator/fence_log.go`.
 //!
 //! When this broker is the txn coordinator for `transactional.id`
 //! and `InitProducerId` bumps the epoch, every partition this
@@ -13,7 +12,7 @@
 //! peer brokers' [`FenceWatcher`] picks it up.
 //!
 //! On-disk shape: a JSON object mapping stringified `pid → epoch`.
-//! Stringified because `serde_json` (matching Go's `encoding/json`)
+//! Stringified because `serde_json` (like the v0.1 encoder)
 //! doesn't support non-string map keys.
 //!
 //! Atomic `tmp + fsync + rename` per Append. Idempotent — appending

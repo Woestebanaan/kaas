@@ -55,8 +55,8 @@ use tracing::{info, warn};
 
 use sk_broker::TopicRegistry;
 
-/// Name of the singleton controller Lease — same object the Go
-/// broker elects on, so a mixed-flavor rollout can't split-brain.
+/// Name of the singleton controller Lease — same object earlier
+/// releases elect on, so a mixed-version rollout can't split-brain.
 const CONTROLLER_LEASE_NAME: &str = "skafka-controller";
 
 /// Cadence of the txn-timeout reaper. Matches Apache Kafka's
@@ -581,7 +581,7 @@ fn prepare_cluster_wiring(
 
     // Heartbeat client follows the Lease holder: resolver re-runs at
     // the start of every reconnect cycle, so controller failover =
-    // one reconnect (Go: cluster_runtime.go's WithTargetFunc).
+    // one reconnect.
     let hb_port = env_or("SKAFKA_PEER_HEARTBEAT_PORT", "9094")
         .parse::<i32>()
         .unwrap_or(9094);
@@ -640,8 +640,7 @@ fn registry_lookup(registry: Arc<BrokerRegistry>) -> Arc<dyn BrokerLookup> {
 /// While this broker holds the Lease, the controller loop installs
 /// an mpsc sender here; topic-watcher callbacks fire
 /// [`TopicChangeNotifier::notify`], which is a no-op on
-/// non-controller brokers (Go: `clusterRuntime.NotifyTopicChange`
-/// gating on `activeLoop != nil`, gh #74).
+/// non-controller brokers (gh #74).
 #[derive(Default)]
 pub struct TopicChangeNotifier {
     tx: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<AssignmentReason>>>,
@@ -696,7 +695,7 @@ impl sk_broker::ClusterBrokerView for RegistryBrokerView {
 /// Controller's view of the alive broker set: EndpointSlice-ready ∩
 /// heartbeat-connected, falling back to registry-only while no
 /// heartbeat has arrived yet (fresh controller, brokers still
-/// dialing). Port of Go's `brokerSourceAdapter` (gh #77).
+/// dialing). See gh #77.
 struct ClusterBrokerSource {
     registry: Arc<BrokerRegistry>,
     heart: Arc<HeartbeatServer>,
@@ -742,14 +741,13 @@ impl sk_controller::BrokerSource for ClusterBrokerSource {
 /// Spawn the always-on cluster tasks (lease watch, endpoint watch,
 /// heartbeat client + status pump) and the election campaign that
 /// runs the controller stack while this broker holds the Lease.
-/// Port of Go's `startClusterRuntime` + `onAcquired`.
 ///
 /// Every control-plane loop runs on a **dedicated OS thread with
 /// its own single-threaded tokio runtime and its own kube client**.
 /// Takeover storms run seconds-long blocking NFS I/O on the main
 /// runtime's workers, and a starved timer is how a healthy
 /// controller's lease renew froze for 28 s and got stolen (observed
-/// live; Go never hit this because goroutines preempt). The kube
+/// live). The kube
 /// client must be built on that runtime too — its internal tower
 /// Buffer worker is spawned onto whichever runtime creates it.
 /// Only the controller stack (`run_controller`) is spawned back
@@ -1012,8 +1010,7 @@ async fn control_plane(
 
 /// The controller stack: heartbeat gRPC server + AssignmentLoop +
 /// broker-set watcher + topic-change trigger. Runs until
-/// `leader_token` fires (Lease lost or shutdown). Port of Go's
-/// `onAcquired` closure in `cluster_runtime.go`.
+/// `leader_token` fires (Lease lost or shutdown).
 /// `pub(crate)` so the cluster_smoke integration test (which
 /// includes this module via `#[path]`) can drive it without kube.
 #[allow(clippy::too_many_arguments)]
@@ -1158,8 +1155,7 @@ fn unix_ms() -> i64 {
 
 /// Adapts the live cluster runtime to [`sk_observability::GaugeSource`]
 /// so the Phase-10 observable gauges sample real values on every
-/// export. Port of `archive/cmd/skafka/cluster_runtime.go`'s
-/// `runtimeGaugeSource`.
+/// export.
 struct RuntimeGaugeSource {
     coordinator: Arc<Coordinator>,
     engine: Arc<dyn StorageEngine>,

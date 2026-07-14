@@ -1,7 +1,5 @@
 //! TxnOffsetCommit handler (key 28, v0–v3).
 //!
-//! Port of `archive/internal/protocol/handlers/txn_offset_commit.go`.
-//!
 //! Stages the consumer-group offset commit in the [`OffsetStore`]'s
 //! pending layer keyed by `(group_id, producer_id)`. Pending offsets
 //! are **not** visible to `OffsetFetch` until the txn coordinator

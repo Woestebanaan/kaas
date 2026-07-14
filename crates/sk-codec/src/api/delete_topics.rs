@@ -3,9 +3,7 @@
 //! Versions 0..=5. Flexible (KIP-482) from v4. v1+ adds
 //! `throttle_time_ms` on the response; v5+ adds a nullable
 //! `error_message` per result. v6 added topic-id addressing and made
-//! the name nullable — not supported (same cap as the Go broker).
-//!
-//! Port of `archive/internal/protocol/codec/api/delete_topics.go`.
+//! the name nullable — not supported.
 
 use bytes::BytesMut;
 

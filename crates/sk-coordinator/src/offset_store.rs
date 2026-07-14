@@ -2,10 +2,8 @@
 //! `<data_dir>/__consumer_offsets/<group>.json` with `tmp + rename`
 //! atomicity.
 //!
-//! Port of `archive/internal/coordinator/offsets.go`. Same wire-
-//! readable JSON shape: a Go-written file decodes here unchanged,
-//! and a Rust-written file decodes in the Go reader (cutover
-//! requirement). Two on-disk schemas survive: the gh #21 v2 envelope
+//! Wire-readable JSON shape pinned across releases: a v0.1-written
+//! file decodes here unchanged, and vice-versa. Two on-disk schemas survive: the gh #21 v2 envelope
 //! `{"offsets":{...}, "metadata":{...}}` and the legacy v1 plain
 //! `map[string]int64`. Read paths accept both; new writes always
 //! emit v2.
@@ -20,7 +18,7 @@
 //!    layer 1, `discard_pending` drops. Memory-only: an unfinished
 //!    transaction reset on broker restart (matches Apache's "in-
 //!    flight offsets aren't recovered" contract).
-//! 3. The on-disk file. Lock is dropped before disk I/O — Go's
+//! 3. The on-disk file. Lock is dropped before disk I/O — the
 //!    "snap then write" pattern, so a concurrent `fetch` doesn't
 //!    block on filesystem latency.
 
@@ -279,8 +277,8 @@ impl OffsetStore {
             }
             group.clone()
         };
-        // Legacy plain-map shape on disk after a partition-delete
-        // matches the Go side's `os.WriteFile(snap)` — keeps the
+        // Legacy plain-map shape on disk after a partition-delete keeps
+        // the
         // forward-compat read path working from either side of the
         // cutover. New full Commits restamp the v2 envelope.
         let name = format!("{group_id}.json");

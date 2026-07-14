@@ -1,7 +1,6 @@
 //! sk-codec — Kafka wire frames, primitives, CRC32C, KIP-482 tagged fields.
 //!
-//! Port of `archive/internal/protocol/codec/`. Bit-perfect equivalent of the
-//! Go codec: every API key/version the Go broker registers encodes/decodes
+//! Kafka wire codec: every registered API key/version encodes/decodes
 //! byte-identically against captured Apache Kafka 3.7 fixtures.
 //!
 //! # Byte-opacity contract
@@ -16,8 +15,6 @@
 //! the matching counter in [`tripwires`]. The integration tests in
 //! `crates/sk-codec/tests/` assert both counters read zero after every run.
 //!
-//! See `docs/phase-1.md` for the full scope and the workstream breakdown
-//! that produced these modules.
 
 pub mod api;
 pub mod crc;

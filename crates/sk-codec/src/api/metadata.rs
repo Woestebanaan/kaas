@@ -1,7 +1,6 @@
 //! Metadata — API key 3. v1–v10, flexible from v9 (KIP-482).
 //!
-//! Port of `archive/internal/protocol/codec/api/metadata.go` clamped
-//! to the version range the Go broker registers (v1–v10). v11 dropped
+//! Clamped to the version range the broker registers (v1–v10). v11 dropped
 //! `IncludeClusterAuthorizedOperations`; v12 made topic names a
 //! compact nullable string. Both are out of scope for Phase 3 —
 //! clients negotiating to v11+ fall back to v10 via ApiVersions.

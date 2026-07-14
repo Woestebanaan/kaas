@@ -1,6 +1,6 @@
 //! `ssl.principal.mapping.rules` (gh #43, KIP-371).
 //!
-//! Port of `archive/internal/auth/principal_mapping.go`. Each rule is
+//! Each rule is
 //! one of:
 //!
 //! - `"DEFAULT"` — return the subject's CommonName unchanged.
@@ -87,8 +87,7 @@ impl PrincipalMapper {
 /// Split the rule spec at rule boundaries. Rules are separated by
 /// commas, but commas can appear inside a `RULE:`'s regex body
 /// (Subject DNs use them as a separator). Split only at commas
-/// immediately followed by `RULE:` or `DEFAULT`. Mirrors the Go
-/// `splitRules` heuristic.
+/// immediately followed by `RULE:` or `DEFAULT`.
 fn split_rules(spec: &str) -> Vec<String> {
     let bytes = spec.as_bytes();
     let mut out = Vec::new();

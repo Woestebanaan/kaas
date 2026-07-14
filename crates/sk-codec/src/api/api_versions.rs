@@ -2,8 +2,6 @@
 //!
 //! Versions 0..=4 supported. Flexible (KIP-482) since v3. v3 added the
 //! `client_software_name` / `client_software_version` request fields.
-//!
-//! Port of `archive/internal/protocol/codec/api/api_versions.go`.
 
 use bytes::BytesMut;
 

@@ -1,6 +1,6 @@
 //! Top-level storage error sentinels.
 //!
-//! Mirrors the sentinel set the Go `internal/storage` package exposes —
+//! Storage error sentinels —
 //! Phase 2 commits map them onto wire error codes in `sk-protocol`'s
 //! Produce/Fetch handlers.
 

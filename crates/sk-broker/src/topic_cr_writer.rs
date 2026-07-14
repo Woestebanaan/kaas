@@ -1,7 +1,6 @@
 //! `TopicCRWriter` — broker → `KafkaTopic` CR patch path.
 //!
-//! Port of `archive/internal/k8s/topic_cr_writer.go`. The Phase 7
-//! admin handlers `CreatePartitions` (key 37) and
+//! The admin handlers `CreatePartitions` (key 37) and
 //! `IncrementalAlterConfigs` (key 44) translate wire-level config
 //! changes into PATCH operations on the corresponding `KafkaTopic`
 //! CR. The operator then reconciles the change normally — no
@@ -211,9 +210,8 @@ pub fn config_key_to_json_field(key: &str) -> Option<&'static str> {
 /// `skafka-topic-<16 hex of sha1[:8]>` and stash the literal Kafka
 /// name in `spec.topicName`.
 ///
-/// The synthetic shape MUST stay byte-identical to the Go broker's
-/// `nameForCR` (`archive/internal/k8s/topic_cr_writer.go`): during
-/// the Phase 9 mixed-flavor window both flavors must resolve the
+/// The synthetic shape MUST stay byte-identical to the v0.1 broker's
+/// output: during a mixed-version rollout both sides must resolve the
 /// same Kafka name to the same CR, or a flavor flip would duplicate
 /// CRs for the same topic directory.
 pub fn name_for_cr(kafka_name: &str) -> (String, String) {
@@ -231,8 +229,8 @@ pub fn name_for_cr(kafka_name: &str) -> (String, String) {
 }
 
 /// K8s resource-name validation: lowercase alphanumeric labels with
-/// interior hyphens, dot-separated. Mirrors the Go side's `rfc1123`
-/// regex without pulling the regex crate in.
+/// interior hyphens, dot-separated. Implements the rfc1123
+/// check without pulling the regex crate in.
 fn is_rfc1123_subdomain(s: &str) -> bool {
     !s.is_empty()
         && s.split('.').all(|label| {

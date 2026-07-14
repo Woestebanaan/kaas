@@ -1,7 +1,5 @@
 //! sk-auth — SCRAM-256/512, mTLS, ACLs, quotas, principal mapping.
 //!
-//! Phase 4 of the rewrite. See [`docs/phase-4.md`](../../../docs/phase-4.md).
-//!
 //! Module layout:
 //!
 //! - [`credentials`] — Strimzi-shape `credentials.json` loader +

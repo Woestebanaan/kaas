@@ -1,8 +1,7 @@
 //! Coordinator façade — the entry point handlers in `sk-broker` call
 //! into.
 //!
-//! Port of `archive/internal/coordinator/coordinator.go`. The Go side
-//! exposes one struct that wraps `OffsetStore`, the per-group state
+//! One struct that wraps `OffsetStore`, the per-group state
 //! machine map, and the hot-swappable `GroupAssignmentSource` /
 //! `TxnAssignmentSource` traits. This Rust port keeps the same shape
 //! and the same ownership boundaries — the source traits are
@@ -27,7 +26,7 @@ use crate::group::{
 };
 use crate::offset_store::{FetchSpec, OffsetStore};
 
-/// Broker-id type. Mirrors Go's `string` ID per the StatefulSet pod
+/// Broker-id type: a string, the StatefulSet pod
 /// name (`skafka-0`, `skafka-1`, …).
 pub type BrokerId = String;
 
@@ -377,8 +376,7 @@ impl Manager {
         {
             Ok(()) => 0,
             // Best-effort: handler logs but reports success per
-            // Apache's "offset commit eventual consistency" — same
-            // as the Go side's `_ = m.offsets.CommitWithMetadata`.
+            // Apache's "offset commit eventual consistency".
             Err(_) => 0,
         }
     }
@@ -424,7 +422,7 @@ impl Manager {
             }
         }
         // Drop in-memory state, then disk. Errors past the in-memory
-        // wipe are swallowed (best-effort, matches Go) — a stale file
+        // wipe are swallowed (best-effort) — a stale file
         // on the PVC is harmless and gets re-cleaned on next
         // start-up sweep.
         if let Some((_, g)) = self.groups.remove(group_id) {

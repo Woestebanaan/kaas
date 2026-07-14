@@ -1,5 +1,3 @@
-//! Port of `archive/operator/controllers/acls.go`.
-//!
 //! Walks every `KafkaUser` CR in the operator's namespace, projects
 //! their inline `spec.authorization.acls` into the on-disk
 //! `acls.json` shape, and atomic-writes the file under
@@ -32,8 +30,8 @@ pub struct AclFile {
     pub acls: Vec<AclEntry>,
 }
 
-/// One ACL rule as stored on disk. Field shapes mirror the Go
-/// `ACLEntry` byte-for-byte (the broker's existing `sk-auth` loader
+/// One ACL rule as stored on disk. Field shapes are pinned
+/// byte-for-byte (the broker's existing `sk-auth` loader
 /// gates on these names).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AclEntry {
@@ -46,7 +44,7 @@ pub struct AclEntry {
     pub operations: Vec<String>,
 
     /// `Allow` or `Deny` (capitalised). Case-sensitive on the broker
-    /// side — see `archive/internal/auth/acl.go`.
+    /// side — see `crates/sk-auth/src/acls.rs`.
     pub permission: String,
 }
 

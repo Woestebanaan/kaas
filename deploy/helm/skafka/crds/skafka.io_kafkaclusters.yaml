@@ -83,7 +83,7 @@ spec:
                         - enabled
                         type: object
                       hostnamePattern:
-                        description: Go-fmt-style `%d` for the broker ordinal, e.g. `broker-%d.kafka.example.com`.
+                        description: printf-style `%d` for the broker ordinal, e.g. `broker-%d.kafka.example.com`.
                         type: string
                       port:
                         default: 9093

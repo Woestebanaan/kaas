@@ -1,11 +1,10 @@
 //! Central OTel instrument registry.
 //!
-//! Port of `archive/internal/observability/metrics.go`. Every metric
-//! name, description, unit, and label set here must stay byte-equal to
-//! the Go output — the parity gate in Phase 8 diffs a captured Go
-//! OTLP payload against the Rust binary's first push.
+//! Every metric
+//! name, description, unit, and label set here is pinned — dashboards
+//! and alert rules were written against the v0.1 OTLP output.
 //!
-//! The 14 `register_*` helpers exactly mirror the Go layout; adding a
+//! The 14 `register_*` helpers keep that layout; adding a
 //! new subsystem means adding a new helper and a new entry on
 //! [`Metrics`]. Do NOT sneak instruments into an existing helper — the
 //! grouping is load-bearing for reviewer legibility.

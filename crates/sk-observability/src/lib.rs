@@ -1,6 +1,6 @@
 //! sk-observability — OTLP metrics + tracing, /healthz, tripwires.
 //!
-//! Port of `archive/internal/observability/`. Central registry for every
+//! Central registry for every
 //! OTel instrument skafka emits; `bootstrap` wires OTLP push (metrics)
 //! and OTLP gRPC (traces) against the endpoints exposed by the chart via
 //! the standard `OTEL_EXPORTER_OTLP_*` env vars.

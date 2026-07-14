@@ -1,6 +1,6 @@
 //! Fetch — API key 1. v4–v12, flexible from v12 (KIP-482).
 //!
-//! Port of `archive/internal/protocol/codec/api/fetch.go`. v13+
+//! v13+
 //! (UUID topic ids in request) is not in scope for Phase 3 — clients
 //! negotiating to v13 fall back to v12 via ApiVersions.
 //!

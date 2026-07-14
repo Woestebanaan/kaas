@@ -9,8 +9,6 @@
 //! next server payload or the final outcome. Apache's `error_code` is
 //! `NETWORK_EXCEPTION` (13) for protocol violations and
 //! `SASL_AUTHENTICATION_FAILED` (58) for failed credentials.
-//!
-//! Port of `archive/internal/protocol/codec/api/sasl_authenticate.go`.
 
 use bytes::BytesMut;
 

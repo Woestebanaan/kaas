@@ -26,9 +26,8 @@ impl ApiSpec {
     }
 }
 
-/// Every API key the Go broker registers in
-/// `archive/internal/broker/broker.go:555-891`. Phase 1 seeds with one
-/// entry; the rest land as their per-API modules are ported.
+/// Every API key the broker registers, with its supported version
+/// range. One entry per per-API module.
 pub const ALL: &[ApiSpec] = &[
     crate::api::produce::SPEC,
     crate::api::fetch::SPEC,
@@ -61,7 +60,7 @@ pub const ALL: &[ApiSpec] = &[
     crate::api::incremental_alter_configs::SPEC,
     crate::api::describe_client_quotas::SPEC,
     crate::api::alter_client_quotas::SPEC,
-    // Phase 9 workstream A — Go-parity admin surface (gh #152)
+    // Admin surface (gh #152)
     crate::api::delete_topics::SPEC,
     crate::api::delete_records::SPEC,
     crate::api::describe_acls::SPEC,
@@ -111,7 +110,7 @@ mod tests {
         // admin surface (Describe/AlterConfigs, CreatePartitions,
         // Describe/AlterClientQuotas). Phase 8 workstream C added
         // key 19 (CreateTopics) once the scripts smoke started
-        // needing it. Phase 9 workstream A added the Go-parity
+        // needing it. gh #152 added the
         // admin keys 20, 21, 29, 30, 31, 35 (DeleteTopics,
         // DeleteRecords, the ACL trio, DescribeLogDirs).
         assert_eq!(ALL.len(), 36);

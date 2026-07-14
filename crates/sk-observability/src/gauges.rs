@@ -1,6 +1,6 @@
 //! Runtime observable gauges + [`GaugeSource`] trait.
 //!
-//! Port of `archive/internal/observability/gauges.go`. The Phase 10
+//! The
 //! runtime gauges (`skafka.is.controller`, `skafka.assignment.version`,
 //! per-partition leader/epoch/HWM) are registered once on the meter at
 //! [`crate::bootstrap`] time; a single global [`GaugeSource`] provides

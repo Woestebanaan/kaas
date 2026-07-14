@@ -3,8 +3,6 @@
 //! Versions 0..=4. Flexible (KIP-482) since v4. v1+ adds
 //! `throttle_time_ms` on the response; v3+ adds a nullable
 //! `group_instance_id` on the request (KIP-345 static membership).
-//!
-//! Port of `archive/internal/protocol/codec/api/heartbeat.go`.
 
 use bytes::BytesMut;
 

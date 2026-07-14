@@ -5,8 +5,7 @@
 //! carries a null filter. Partition sizes come straight from
 //! [`StorageEngine::partition_size`].
 //!
-//! Port of `archive/internal/protocol/handlers/admin.go`'s
-//! `DescribeLogDirsHandler`.
+//! DescribeLogDirs (API key 35).
 //!
 //! [`StorageEngine::partition_size`]: sk_storage::StorageEngine::partition_size
 

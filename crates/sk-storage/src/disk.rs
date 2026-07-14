@@ -159,7 +159,7 @@ impl StorageEngine for DiskStorageEngine {
     ) -> Result<Bytes, StorageError> {
         let started = std::time::Instant::now();
         // Read on an unknown partition returns empty (matches
-        // MemoryStorage and the Go side's "no data" semantics —
+        // MemoryStorage —
         // clients receive an empty Fetch response, not an error).
         let out = if let Some(entry) = self.partitions.get(&(topic.to_owned(), partition)) {
             entry.value().read(start_offset, max_bytes).await

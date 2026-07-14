@@ -1,6 +1,6 @@
 //! K8s API call instrumentation wrapper.
 //!
-//! Port of `archive/internal/observability/k8s_api.go`. Wraps a single
+//! Wraps a single
 //! apiserver call so the duration + result land on
 //! [`Metrics::k8s_api_latency`] / [`Metrics::k8s_api_calls`].
 //!

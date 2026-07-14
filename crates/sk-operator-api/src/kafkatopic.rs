@@ -1,6 +1,6 @@
 //! `KafkaTopic` — partition-dir + topic-config CR.
 //!
-//! Port of `archive/operator/api/v1alpha1/kafkatopic_types.go`. The
+//! The
 //! operator's `KafkaTopicReconciler` materialises one partition
 //! directory per partition under `/data/<topic>/<partition>/`,
 //! writes a `.config.json` next to it, and mints `Status.TopicID`

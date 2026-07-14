@@ -1,6 +1,6 @@
 //! Per-partition producer-state snapshot: `producer-state.snapshot`.
 //!
-//! Port of `archive/internal/storage/producer_snapshot.go`. Writes the
+//! Writes the
 //! [`ProducerStates`] window to disk so the idempotent-producer dedupe
 //! contract survives broker restart. The snapshot lives next to the
 //! partition's `manifest.json`; both go through
@@ -167,8 +167,8 @@ mod tests {
 
     #[test]
     fn json_snake_case_matches_go() {
-        // Phase 2 exit criterion #6: producer-state.snapshot bytes
-        // match Go. Go uses snake_case JSON tags (`producer_id`,
+        // producer-state.snapshot bytes are pinned to the v0.1 layout:
+        // snake_case JSON keys (`producer_id`,
         // `first_seq`, …); we match via serde's default field naming
         // for `pub field_name` plus the `recent` Vec.
         let snap = ProducerSnapshot {

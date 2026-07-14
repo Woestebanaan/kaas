@@ -1,6 +1,6 @@
 //! Heartbeat staleness check used by the produce hot path.
 //!
-//! Port of `archive/internal/broker/self_fence.go`. Coordinator
+//! Coordinator
 //! wires this onto the Produce path so a broker that has lost
 //! connectivity to the controller stops acking writes within
 //! `DEFAULT_HEARTBEAT_TIMEOUT`. Combined with epoch-tagged segments,

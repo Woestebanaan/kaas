@@ -12,7 +12,7 @@
 //!   `KafkaTopicReconciler`, `KafkaUserReconciler`,
 //!   `KafkaClusterReconciler`.
 //!
-//! Cleanup model mirrors Go: **no finalizers**. Reconcile-time
+//! Cleanup model: **no finalizers**. Reconcile-time
 //! best-effort cleanup on `Get → NotFound` plus a leader-elected
 //! startup sweep ([`sweep::sweep_topics`] +
 //! [`sweep::sweep_credentials`]) drop orphans the reconciler missed.

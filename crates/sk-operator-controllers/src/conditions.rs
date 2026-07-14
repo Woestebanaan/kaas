@@ -1,8 +1,7 @@
 //! Status-condition helpers.
 //!
-//! Mirrors the Go `setCondition` helper that wraps
-//! `meta.SetStatusCondition` from apimachinery. The wrapper stamps
-//! `last_transition_time` (Go: `metav1.Now()`) and dedupes by
+//! Status-condition helper. Stamps
+//! `last_transition_time` and dedupes by
 //! `type_`, preserving the existing `last_transition_time` when the
 //! incoming status matches the stored one (so a reconcile that
 //! re-applies the same condition doesn't churn the timestamp and

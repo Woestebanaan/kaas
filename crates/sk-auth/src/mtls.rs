@@ -8,8 +8,8 @@
 //!
 //! The DN rendering uses `x509_parser` — `X509Certificate::subject().to_string()`
 //! — which produces the RFC 2253 form with `,` separators (no spaces)
-//! and components in the order they appear in the cert. The Go side
-//! goes through `crypto/x509`'s `pkix.Name.String()`, which uses the
+//! and components in the order they appear in the cert. The v0.1 implementation
+//! rendered DNs via its x509 library, which uses the
 //! same RFC 2253 form. Differences in attribute name normalisation
 //! (e.g. `CN` vs `commonName`) bubble out as principal-mapping
 //! regex misses; the safe fall-back is `DEFAULT` which returns the

@@ -11,8 +11,7 @@
 //! 5. Both Coordinators pick up the new assignment; ownership
 //!    migrates cleanly.
 //!
-//! Mirrors `archive/tests/controller-failover/failover_test.go` in
-//! a kube-free form — the failover is driven by AssignmentLoop
+//! Kube-free: the failover is driven by AssignmentLoop
 //! creation/destruction + bumped LeaseEpochSource (the seam
 //! [`LocalLeaseEpoch`] would otherwise pin to 0).
 

@@ -1,7 +1,5 @@
 //! AddPartitionsToTxn handler (key 24, v0–v3).
 //!
-//! Port of `archive/internal/protocol/handlers/add_partitions_to_txn.go`.
-//!
 //! v0–v3 has no top-level `ErrorCode` field. A top-level rejection
 //! (empty txn id / wrong coordinator / store not yet wired / store
 //! error) is repeated across **every** partition in the response.

@@ -1,6 +1,6 @@
 //! Broker-side bidi `ControllerHeartbeat` client.
 //!
-//! Port of `archive/internal/broker/heartbeat_client.go`. One
+//! One
 //! client per broker process; long-lived; reconnects on disconnect
 //! with exponential backoff capped at 5 s.
 //!

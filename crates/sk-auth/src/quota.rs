@@ -1,6 +1,6 @@
 //! Per-user token-bucket quotas with debt-carry (gh #125).
 //!
-//! Mirrors `archive/internal/auth/quota.go`. The bucket is allowed
+//! The bucket is allowed
 //! to go negative; throttle is proportional to the negative balance.
 //! No clamp at zero — that's the bug gh #125 fixed (concurrent
 //! clients sharing a principal would each see an independent

@@ -1,7 +1,5 @@
 //! Cross-broker producer-epoch fence watcher (gh #108 phase 2).
 //!
-//! Port of `archive/internal/broker/fence_watcher.go`.
-//!
 //! Polls `<data_dir>/__cluster/producer_fences/` every 2 s, reads
 //! every peer broker's `from-<id>.json`, and for each
 //! `(pid, epoch)` pair that's newer than what we've already
@@ -40,7 +38,7 @@ pub trait ProducerEpochFencer: Send + Sync + 'static {
     fn fence_producer_epoch(&self, pid: i64, epoch: i16);
 }
 
-/// Default poll interval — matches Go's `2 * time.Second`.
+/// Default poll interval: 2 s.
 pub const DEFAULT_POLL: Duration = Duration::from_secs(2);
 
 /// Reads every peer broker's outbound fence file and dispatches new

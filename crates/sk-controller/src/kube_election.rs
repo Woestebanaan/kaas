@@ -22,8 +22,7 @@
 //!    `holder_identity = self_id`, stamp `renew_time = now`.
 //! 4. Otherwise sleep `retry_period` and retry.
 //!
-//! Mirrors the Go side's `archive/internal/controller/election.go`
-//! verbatim.
+//! Same election contract as earlier releases (same Lease object).
 
 // Module-gating done at the `pub mod kube_election;` declaration
 // in `lib.rs`; the duplicate `#![cfg(...)]` would trip clippy's
@@ -300,9 +299,8 @@ impl KubeLeaseElection {
     /// Returns only when `cancel` fires (best-effort releasing the
     /// Lease if held).
     ///
-    /// This is the Rust stand-in for client-go's `leaderelection`
-    /// callbacks the Go side got for free: `on_acquired` ≙
-    /// `OnStartedLeading` (spawn controller tasks bound to the
+    /// Leader-election callbacks: `on_acquired` ≙
+    /// start-of-leadership (spawn controller tasks bound to the
     /// token), `on_lost` ≙ `OnStoppedLeading` — invoked
     /// *synchronously before* any re-acquire, so state it flips
     /// (e.g. an is_controller gauge) can never trail a newer

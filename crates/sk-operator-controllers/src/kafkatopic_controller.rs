@@ -1,5 +1,3 @@
-//! Port of `archive/operator/controllers/kafkatopic_controller.go`.
-//!
 //! Reconciler that materialises a `KafkaTopic` CR into:
 //!
 //! - Partition directories at `<data_dir>/<effective_topic_name>/<0..partitions>/`.
@@ -76,7 +74,7 @@ impl KafkaTopicReconciler {
             return Ok(Action::await_change());
         }
 
-        // Partition-decrease guard (mirrors Go reconcile flow):
+        // Partition-decrease guard:
         // ConditionFalse with reason `InvalidPartitionCount` and DO NOT
         // mutate the filesystem. Caller is expected to fix the CR.
         let existing_count = topic
@@ -148,8 +146,8 @@ impl KafkaTopicReconciler {
         .await?;
 
         self.observer.bump_success();
-        // 5 min default requeue matches the Go side's
-        // controller-runtime SyncPeriod fallback; watch events are
+        // 5 min default requeue (controller-runtime-style
+        // SyncPeriod fallback); watch events are
         // the primary driver, this is the safety net.
         Ok(Action::requeue(Duration::from_secs(300)))
     }

@@ -1,5 +1,3 @@
-//! Port of `archive/operator/controllers/credentials.go`.
-//!
 //! Materialises `/data/__cluster/credentials.json` from `KafkaUser`
 //! CRs. The broker reads the same file (`sk_auth::CredentialLoader`).
 //! Same JSON shape: capitalised keys via `serde(rename_all = ...)`,
@@ -7,7 +5,7 @@
 //!
 //! ## SCRAM-SHA-512 derivation
 //!
-//! Mirrors `computeScram` in the Go side line-for-line:
+//! SCRAM computation, line-for-line stable with v0.1:
 //!
 //! 1. 16-byte random salt from the OS RNG.
 //! 2. `SaltedPassword = PBKDF2-HMAC-SHA512(password, salt, 8192, 64)`.
@@ -49,8 +47,8 @@ pub struct UserCredential {
     pub auth_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scram: Option<ScramCredential>,
-    /// CN used for mTLS principal lookup. Renamed `tlsCN` on disk to
-    /// match the Go writer.
+    /// CN used for mTLS principal lookup. Renamed `tlsCN` on disk
+    /// (v0.1 field name).
     #[serde(default, rename = "tlsCN", skip_serializing_if = "String::is_empty")]
     pub tls_cn: String,
     /// ServiceAccount reference (Phase 7 K8s-SA path).
@@ -125,7 +123,7 @@ pub fn credentials_path(data_dir: &Path) -> PathBuf {
 }
 
 /// Read `credentials.json`. Returns an empty `{version: 1, users: []}`
-/// when the file is absent (matches Go: pre-operator-write boot returns
+/// when the file is absent (pre-operator-write boot returns
 /// no error, just an empty struct so the next write upserts cleanly).
 pub fn read_credentials(data_dir: &Path) -> Result<CredentialsFile, ControllerError> {
     let path = credentials_path(data_dir);
@@ -160,7 +158,7 @@ pub fn write_credentials(data_dir: &Path, cf: &CredentialsFile) -> Result<(), Co
 /// Derive a SCRAM-SHA-512 credential from a plaintext password.
 ///
 /// Random 16-byte salt drawn from `OsRng`; the password itself is
-/// never stored. Matches Go's `computeScram` byte-for-byte for a
+/// never stored. Byte-for-byte stable with the v0.1 output for a
 /// given (password, salt) pair.
 pub fn compute_scram(password: &str) -> Result<ScramCredential, ControllerError> {
     let mut salt = [0u8; 16];
@@ -189,7 +187,7 @@ pub fn compute_scram(password: &str) -> Result<ScramCredential, ControllerError>
 /// (so the SCRAM hash stays stable across operator restarts —
 /// matches Strimzi's User Operator behaviour).
 pub fn generate_alphanum_password(len: usize) -> Result<String, ControllerError> {
-    // The Go side draws ASCII letters + digits uniformly. Mirror via
+    // Draw ASCII letters + digits uniformly via
     // rejection sampling against an OsRng byte stream rather than
     // pulling in `rand::distributions::Alphanumeric` (avoids the
     // distribution-trait surface on the SDK boundary).
@@ -259,7 +257,7 @@ mod tests {
             quotas: None,
         });
         let json = serde_json::to_string(&cf).expect("serialise");
-        // verify the on-disk field names match Go's output verbatim
+        // verify the on-disk field names match the v0.1 output verbatim
         assert!(json.contains("\"authType\":\"scram-sha-512\""));
         assert!(json.contains("\"storedKey\":\"c3RvcmVk\""));
         assert!(json.contains("\"serverKey\":\"c2VydmVy\""));

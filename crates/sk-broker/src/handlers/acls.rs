@@ -1,8 +1,7 @@
 //! ACL admin handlers — DescribeAcls (29), CreateAcls (30),
 //! DeleteAcls (31).
 //!
-//! Port of the gh #107 handlers in
-//! `archive/internal/protocol/handlers/admin.go`. The wire shape
+//! The gh #107 ACL admin handlers. The wire shape
 //! (int8 enum codes) is translated to the CR-side string shape and
 //! delegated to the installed [`AclCRWriter`], which patches
 //! `KafkaUser.spec.authorization.acls` in place; the operator's ACL

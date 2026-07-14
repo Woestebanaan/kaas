@@ -6,10 +6,8 @@
 //! a per-member `reason` on the request (KIP-800 — the response is
 //! unchanged from v4).
 //!
-//! Port of `archive/internal/protocol/codec/api/leave_group.go`,
-//! which capped at v4 — the v5 `reason` field is implemented here
-//! per Apache Kafka 3.7 (the Go port advertised 0..=4 and never
-//! carried it).
+//! The v5 `reason` field is implemented here per Apache Kafka 3.7
+//! (v0.1 advertised 0..=4 and never carried it).
 
 use bytes::BytesMut;
 

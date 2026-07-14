@@ -69,7 +69,7 @@ impl Handler for DescribeConfigsHandler {
             // config (read-only DEFAULT_CONFIG entries) so
             // kafka-configs.sh --entity-type brokers and kafbat-ui's
             // broker page work. Only BROKER_LOGGER (and anything
-            // else) stays unsupported — same as the Go broker.
+            // else) stays unsupported.
             if resource.resource_type == resource_type::BROKER {
                 results.push(DescribeConfigsResult {
                     error_code: ERR_NONE,
@@ -152,8 +152,8 @@ impl Handler for DescribeConfigsHandler {
 /// where skafka has no live knob, and skafka's architectural
 /// invariants where it does (replication factor is always 1 — the
 /// CSI layer owns durability, not Kafka-level replication). Same
-/// entry set as the Go broker's `brokerConfigs` minus `listeners`
-/// (the Rust broker doesn't thread the advertised host into the
+/// entry set as v0.1's `brokerConfigs` minus `listeners`
+/// (the broker doesn't thread the advertised host into the
 /// handler; kafbat-ui renders the rest fine without it).
 fn broker_configs(
     broker: &Broker,

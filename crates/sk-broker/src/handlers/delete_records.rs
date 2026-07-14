@@ -10,8 +10,6 @@
 //! `NOT_LEADER_OR_FOLLOWER` (6); without one (dev mode) the storage
 //! engine's own unknown-partition error covers the miss.
 //!
-//! Port of `archive/internal/protocol/handlers/delete_records.go`.
-//!
 //! [`Coordinator`]: crate::coordinator::Coordinator
 
 use std::sync::Arc;

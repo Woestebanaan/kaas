@@ -9,8 +9,6 @@
 //! kills the Java consumer's generated decoder. The Rust types model
 //! the assignment as `Bytes` (not `Option<Bytes>`); callers pass
 //! `Bytes::new()` for empty.
-//!
-//! Port of `archive/internal/protocol/codec/api/sync_group.go`.
 
 use bytes::BytesMut;
 

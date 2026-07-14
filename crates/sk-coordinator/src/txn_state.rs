@@ -1,6 +1,6 @@
 //! Transaction-coordinator persistent state store.
 //!
-//! Port of `archive/internal/coordinator/txn_state.go`. Tracks
+//! Tracks
 //! `(producer_id, epoch, state, partitions, groups, ongoing_since_ms,
 //! transaction_timeout_ms)` per `transactional.id`, sharded across
 //! 50 JSON files under `<data_dir>/__cluster/txn_state/slot-<n>.json`.
@@ -18,11 +18,10 @@
 //! coordinator failover the new owner continues from the same
 //! (PID, epoch) state without log replay.
 //!
-//! **Out of scope vs Go reference** (Phase 6 plan §B):
-//! - `migrateLegacy` (pre-#108 single-file → slot layout) — Phase 6
-//!   ships only the slot layout; deployments rolling forward from
-//!   Go upgrade through a stop-the-world cutover per
-//!   [`docs/phase-9.md`].
+//! **Known gaps**:
+//! - pre-#108 single-file → slot-layout migration is not implemented —
+//!   only the slot layout ships; ancient deployments upgrade through
+//!   a stop-the-world cutover.
 //! - `migrateLayout` (slot count re-shard) — `NUM_SLOTS` is pinned
 //!   to `DEFAULT_NUM_SLOTS = 50` for the whole cluster.
 
@@ -50,7 +49,7 @@ use crate::atomic_write::atomic_write_json;
 /// enforces this by reading `transaction.state.log.num.partitions`
 /// at first cluster start and ignoring later changes. Skafka relies
 /// on the constant staying constant; a re-shard path
-/// (Go's `migrateLayout`) is the documented follow-up on gh #174 for
+/// is the documented follow-up on gh #174 for
 /// the day the value needs to change.
 pub const DEFAULT_NUM_SLOTS: usize = 50;
 
@@ -67,7 +66,7 @@ const _: () = assert!(
 
 /// Transaction state machine. Mirrors Apache's `TransactionState`
 /// (TransactionMetadata.scala). The on-disk JSON representation
-/// uses the same human-readable strings as Go.
+/// uses stable human-readable strings (v0.1-compatible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TxnState {
     /// No transaction in progress (default).
@@ -104,7 +103,7 @@ pub struct TxnTopic {
 }
 
 /// Persistent record of one transactional producer. JSON shape is
-/// byte-identical to the Go reference so a Go-written slot file
+/// pinned so a v0.1-written slot file
 /// reads cleanly through this struct (and vice versa for the
 /// migration window).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,8 +209,8 @@ type Result<T> = std::result::Result<T, TxnStateError>;
 pub struct TxnStateStore {
     dir: PathBuf,
     num_slots: usize,
-    /// Single global mutex serialises slot reads + writes. The Go
-    /// reference uses the same shape. The store sits off the hot
+    /// Single global mutex serialises slot reads + writes
+    /// (coarse on purpose). The store sits off the hot
     /// path (txn surface fires at producer boot + per-txn commit;
     /// Produce/Fetch never touch it) so coarse locking is fine.
     mu: Mutex<()>,
@@ -681,8 +680,8 @@ fn merge_partitions(entry: &mut TxnEntry, additions: &[TxnTopic]) -> bool {
     changed
 }
 
-/// FNV-1a 32-bit. Same algorithm as `crates/sk-broker/src/group_hash.rs`
-/// and Go's `hash/fnv`; inlined here so `sk-coordinator` doesn't pull
+/// FNV-1a 32-bit. Same algorithm as `crates/sk-broker/src/group_hash.rs`;
+/// inlined here so `sk-coordinator` doesn't pull
 /// in a fnv crate just for the slot hash.
 fn fnv1a_32(bytes: &[u8]) -> u32 {
     const OFFSET: u32 = 0x811c_9dc5;

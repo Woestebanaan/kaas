@@ -1,12 +1,11 @@
 //! DeleteTopics handler (key 20).
 //!
-//! Mirrors `archive/internal/protocol/handlers/admin.go`'s
-//! `DeleteTopicsHandler`: per topic, delete the `KafkaTopic` CR via
+//! Per topic, delete the `KafkaTopic` CR via
 //! the installed [`TopicCRWriter`] (the operator's reconciler tears
 //! down the partition dirs; the topic-watcher fires Deleted on every
 //! broker so open handles close first), then drop the topic from the
 //! in-memory registry. Without a CR writer (dev mode, unit tests)
-//! only the registry removal runs — same as the Go stub path.
+//! only the registry removal runs.
 //!
 //! [`TopicCRWriter`]: crate::topic_cr_writer::TopicCRWriter
 

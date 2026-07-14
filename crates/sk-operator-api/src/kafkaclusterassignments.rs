@@ -1,8 +1,6 @@
 //! `KafkaClusterAssignments` — read-only debug mirror of
 //! `/data/__cluster/assignment.json`.
 //!
-//! Port of
-//! `archive/operator/api/v1alpha1/kafkaclusterassignments_types.go`.
 //! The controller-broker writes `Status` fire-and-forget after every
 //! `assignment.json` rewrite; brokers never read this CR. One CR per
 //! `KafkaCluster`, sharing the parent's name and namespace.

@@ -1,7 +1,6 @@
 //! `AclCRWriter` — broker → `KafkaUser.spec.authorization.acls` path.
 //!
-//! Port of `archive/internal/k8s/kafka_user_acl_writer.go` (gh #107 +
-//! gh #135). ACLs are authored inline on each principal's KafkaUser
+//! gh #107 + gh #135: ACLs are authored inline on each principal's KafkaUser
 //! CR; the wire-level CreateAcls / DeleteAcls / DescribeAcls handlers
 //! translate the AdminClient int8-enum shape into this string shape
 //! and delegate here. The operator's ACL reconcile rebuilds

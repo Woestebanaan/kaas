@@ -1,6 +1,6 @@
 //! In-memory [`StorageEngine`] backed by per-partition `Vec<Bytes>`.
 //!
-//! Port of `archive/internal/broker/stubs.go::MemoryStorage`. Used by:
+//! In-memory storage engine. Used by:
 //!
 //! - Dev mode (no `MY_POD_NAME` env): the broker boots with a
 //!   `MemoryStorage` and serves Produce/Fetch in-process without
@@ -176,7 +176,7 @@ impl StorageEngine for MemoryStorage {
         _timestamp_ms: i64,
     ) -> Result<(i64, i64), StorageError> {
         // MemoryStorage doesn't retain batch maxTimestamps. Sentinel
-        // matches the Go side's wire-correct "no matching record"
+        // is the wire-correct "no matching record"
         // answer.
         Ok((-1, -1))
     }

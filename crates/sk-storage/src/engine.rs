@@ -152,8 +152,8 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// lowest offset across all open transactional producers on this
     /// partition, or HWM when no txn is open. Default falls back to
     /// HWM (read_uncommitted-equivalent) so engines that don't track
-    /// per-partition txn state degrade gracefully — matches the
-    /// shortcut both Go and Rust have been taking until now.
+    /// per-partition txn state degrade gracefully — a
+    /// long-standing shortcut.
     fn last_stable_offset(&self, topic: &str, partition: i32) -> Result<i64, StorageError> {
         self.high_watermark(topic, partition)
     }

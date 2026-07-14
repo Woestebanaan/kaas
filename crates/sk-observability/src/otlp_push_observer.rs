@@ -1,6 +1,6 @@
 //! `PushMetricExporter` wrapper that self-observes success / failure.
 //!
-//! Port of `archive/internal/observability/otlp_push_observer.go`. The
+//! The
 //! SDK's `PeriodicReader` silently swallows Export errors — pre-gh #121
 //! PR4 the only symptom was that dashboards stopped receiving new
 //! data. Wrapping the exporter here surfaces success / failure /

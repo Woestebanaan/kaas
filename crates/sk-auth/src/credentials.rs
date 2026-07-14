@@ -1,6 +1,6 @@
 //! `credentials.json` loader + `CredentialStore` trait.
 //!
-//! Mirrors `archive/internal/auth/loader.go` 1:1. JSON shape is the
+//! JSON shape is the
 //! Strimzi-compat file the operator writes to
 //! `/data/__cluster/credentials.json`. Missing file is non-fatal
 //! (returns an empty store).
