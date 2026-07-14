@@ -94,11 +94,7 @@ impl KafkaClusterReconciler {
         *self
             .tls_routes_served
             .get_or_init(|| async {
-                let gv = format!(
-                    "{}/{}",
-                    tls_route_gvk().group,
-                    tls_route_gvk().version
-                );
+                let gv = format!("{}/{}", tls_route_gvk().group, tls_route_gvk().version);
                 Self::resource_served(&self.client, &gv, "tlsroutes").await
             })
             .await
@@ -108,11 +104,7 @@ impl KafkaClusterReconciler {
         *self
             .certificates_served
             .get_or_init(|| async {
-                let gv = format!(
-                    "{}/{}",
-                    certificate_gvk().group,
-                    certificate_gvk().version
-                );
+                let gv = format!("{}/{}", certificate_gvk().group, certificate_gvk().version);
                 Self::resource_served(&self.client, &gv, "certificates").await
             })
             .await
