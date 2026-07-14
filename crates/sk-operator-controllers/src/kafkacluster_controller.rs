@@ -46,16 +46,21 @@ pub struct KafkaClusterReconciler {
     pub client: Client,
     pub namespace: String,
     pub observer: ReconcileObserver,
-    /// API groups the apiserver serves, discovered once on first use
-    /// (gh #187). Gates every call against optional API groups
-    /// (Gateway API, cert-manager): a request against an unserved
-    /// group doesn't produce a typed NotFound — the apiserver answers
-    /// a plain-text `404 page not found` that kube-rs can't parse, so
-    /// a cluster without those CRDs paid 10+ dead API round-trips per
-    /// reconcile. Installing the CRDs later requires an operator
-    /// restart to be noticed — an acceptable trade (same caching
-    /// behaviour as controller-runtime's RESTMapper on the Go side).
-    served_groups: tokio::sync::OnceCell<std::collections::HashSet<String>>,
+    /// Whether the apiserver serves the exact optional resources this
+    /// reconciler touches, discovered once on first use (gh #187). A
+    /// request against an unserved group/version/resource doesn't
+    /// produce a typed NotFound — the apiserver answers a plain-text
+    /// `404 page not found` that kube-rs can't parse — so a cluster
+    /// without those CRDs paid 10+ dead API round-trips per
+    /// reconcile. Group-level discovery is NOT enough: k3s ships
+    /// Gateway API v1/v1beta1 while TLSRoute lives in the
+    /// experimental channel's v1alpha2, so the group exists and the
+    /// resource still 404s. Installing the CRDs later requires an
+    /// operator restart to be noticed — an acceptable trade (same
+    /// caching behaviour as controller-runtime's RESTMapper on the
+    /// Go side).
+    tls_routes_served: tokio::sync::OnceCell<bool>,
+    certificates_served: tokio::sync::OnceCell<bool>,
 }
 
 impl KafkaClusterReconciler {
@@ -64,27 +69,53 @@ impl KafkaClusterReconciler {
             client,
             namespace,
             observer: ReconcileObserver::new("KafkaCluster"),
-            served_groups: tokio::sync::OnceCell::new(),
+            tls_routes_served: tokio::sync::OnceCell::new(),
+            certificates_served: tokio::sync::OnceCell::new(),
         }
     }
 
-    /// True when the apiserver serves `group`. Fails open: if
-    /// discovery itself errors, every group is assumed served so the
-    /// per-call error paths stay authoritative.
-    async fn group_served(&self, group: &str) -> bool {
-        let groups = self
-            .served_groups
+    /// True when `plural` is served under `group_version`
+    /// (e.g. `tlsroutes` under `gateway.networking.k8s.io/v1alpha2`).
+    /// A 404 on the discovery endpoint means the group/version isn't
+    /// served at all → definitively false. Any other discovery error
+    /// fails open so the per-call error paths stay authoritative.
+    async fn resource_served(client: &Client, group_version: &str, plural: &str) -> bool {
+        match client.list_api_group_resources(group_version).await {
+            Ok(list) => list.resources.iter().any(|r| r.name == plural),
+            Err(kube::Error::Api(e)) if e.code == 404 => false,
+            Err(err) => {
+                tracing::warn!(%err, group_version, "resource discovery failed; assuming served");
+                true
+            }
+        }
+    }
+
+    async fn tls_routes_served(&self) -> bool {
+        *self
+            .tls_routes_served
             .get_or_init(|| async {
-                match self.client.list_api_groups().await {
-                    Ok(list) => list.groups.into_iter().map(|g| g.name).collect(),
-                    Err(err) => {
-                        tracing::warn!(%err, "api-group discovery failed; assuming all groups served");
-                        std::collections::HashSet::new()
-                    }
-                }
+                let gv = format!(
+                    "{}/{}",
+                    tls_route_gvk().group,
+                    tls_route_gvk().version
+                );
+                Self::resource_served(&self.client, &gv, "tlsroutes").await
             })
-            .await;
-        groups.is_empty() || groups.contains(group)
+            .await
+    }
+
+    async fn certificates_served(&self) -> bool {
+        *self
+            .certificates_served
+            .get_or_init(|| async {
+                let gv = format!(
+                    "{}/{}",
+                    certificate_gvk().group,
+                    certificate_gvk().version
+                );
+                Self::resource_served(&self.client, &gv, "certificates").await
+            })
+            .await
     }
 
     pub async fn reconcile(&self, cluster: Arc<KafkaCluster>) -> Result<Action, ControllerError> {
@@ -413,7 +444,7 @@ impl KafkaClusterReconciler {
 
         // Certificate (cert-manager). Skipped when the cluster has no
         // cert-manager install — nothing could exist there (gh #187).
-        if self.group_served("cert-manager.io").await {
+        if self.certificates_served().await {
             let cert_ar = ApiResource::from_gvk(&certificate_gvk());
             let cert_api: Api<DynamicObject> =
                 Api::namespaced_with(self.client.clone(), ns, &cert_ar);
@@ -430,7 +461,7 @@ impl KafkaClusterReconciler {
         // 404 the client had to error-parse (gh #187).
         let upper = cluster.spec.replicas.max(10);
         let svc_api: Api<Service> = Api::namespaced(self.client.clone(), ns);
-        let routes_served = self.group_served("gateway.networking.k8s.io").await;
+        let routes_served = self.tls_routes_served().await;
         let route_ar = ApiResource::from_gvk(&tls_route_gvk());
         let route_api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), ns, &route_ar);
