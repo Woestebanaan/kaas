@@ -263,6 +263,21 @@ async fn accept_loop(
             res = listener.accept() => {
                 match res {
                     Ok((stream, peer)) => {
+                        // TCP_NODELAY, matching the Go server's
+                        // SetNoDelay(true) (archive server.go:244).
+                        // Kafka responses are tiny (a produce ack is
+                        // ~50 bytes); with Nagle on, each one can sit
+                        // in the kernel for up to ~40 ms against the
+                        // client's delayed ACK, capping every
+                        // connection's pipeline at
+                        // in_flight × request_size / inflated_RTT.
+                        // Found as phase 9's −24 % Strimzi-relative
+                        // throughput gap vs the Go flavor: broker CPU
+                        // idle, in-broker latency equal-or-better,
+                        // client-observed RTT inflated (gh #188).
+                        if let Err(err) = stream.set_nodelay(true) {
+                            warn!(%peer, %err, "set_nodelay failed");
+                        }
                         let d = dispatcher.clone();
                         let c = cancel.clone();
                         let name = listener_name.clone();
