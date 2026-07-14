@@ -61,6 +61,13 @@ pub const ALL: &[ApiSpec] = &[
     crate::api::incremental_alter_configs::SPEC,
     crate::api::describe_client_quotas::SPEC,
     crate::api::alter_client_quotas::SPEC,
+    // Phase 9 workstream A — Go-parity admin surface (gh #152)
+    crate::api::delete_topics::SPEC,
+    crate::api::delete_records::SPEC,
+    crate::api::describe_acls::SPEC,
+    crate::api::create_acls::SPEC,
+    crate::api::delete_acls::SPEC,
+    crate::api::describe_log_dirs::SPEC,
 ];
 
 /// Look up the [`ApiSpec`] for a given API key, if registered.
@@ -104,15 +111,17 @@ mod tests {
         // admin surface (Describe/AlterConfigs, CreatePartitions,
         // Describe/AlterClientQuotas). Phase 8 workstream C added
         // key 19 (CreateTopics) once the scripts smoke started
-        // needing it.
-        assert_eq!(ALL.len(), 30);
+        // needing it. Phase 9 workstream A added the Go-parity
+        // admin keys 20, 21, 29, 30, 31, 35 (DeleteTopics,
+        // DeleteRecords, the ACL trio, DescribeLogDirs).
+        assert_eq!(ALL.len(), 36);
         let mut keys: Vec<i16> = ALL.iter().map(|s| s.key).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
             vec![
-                0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22, 24, 25, 26, 27, 28,
-                32, 36, 37, 42, 44, 47, 48, 49,
+                0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26,
+                27, 28, 29, 30, 31, 32, 35, 36, 37, 42, 44, 47, 48, 49,
             ]
         );
     }

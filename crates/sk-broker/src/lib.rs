@@ -7,6 +7,7 @@
 //! generated at build time by `tonic-build` from
 //! `proto/heartbeat.proto` and is Phase-5-consumer-only for now.
 
+pub mod acl_cr_writer;
 pub mod assignment;
 pub mod broker;
 pub mod cli;
@@ -25,6 +26,9 @@ pub mod topic_config_defaults;
 pub mod topic_cr_writer;
 pub mod topic_registry;
 
+#[cfg(feature = "cr-writer")]
+pub use acl_cr_writer::KubeAclCRWriter;
+pub use acl_cr_writer::{AclBinding, AclCRWriter, AclFilter, AclWriteError};
 pub use assignment::{
     Assignment, AssignmentChangeHandler, BrokerAssignment, BrokerHealth, ConsumerGroupAssignment,
     PartitionAssignment, PartitionRole,
@@ -43,9 +47,11 @@ pub use group_hash::{
 pub use group_takeover::GroupTakeoverDriver;
 pub use handlers::{
     AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
-    ApiVersionsHandler, CreatePartitionsHandler, CreateTopicsHandler, DeleteGroupsHandler,
-    DescribeClientQuotasHandler, DescribeConfigsHandler, DescribeGroupsHandler, EndTxnHandler,
-    FetchHandler, FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
+    ApiVersionsHandler, CreateAclsHandler, CreatePartitionsHandler, CreateTopicsHandler,
+    DeleteAclsHandler, DeleteGroupsHandler, DeleteRecordsHandler, DeleteTopicsHandler,
+    DescribeAclsHandler, DescribeClientQuotasHandler, DescribeConfigsHandler,
+    DescribeGroupsHandler, DescribeLogDirsHandler, EndTxnHandler, FetchHandler,
+    FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
     InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
     ListOffsetsHandler, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
     OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,

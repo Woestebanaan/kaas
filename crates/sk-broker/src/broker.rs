@@ -98,6 +98,12 @@ pub struct Broker {
     /// `CLUSTER_AUTHORIZATION_FAILED` (31) so a client gets a
     /// clean wire response instead of a panic.
     cr_writer: RwLock<Option<Arc<dyn crate::topic_cr_writer::TopicCRWriter>>>,
+    /// ACL admin path (gh #107 parity): writes back to
+    /// `KafkaUser.spec.authorization.acls` for CreateAcls (30) /
+    /// DeleteAcls (31) and reads for DescribeAcls (29). `None` in
+    /// dev mode and unit tests — the handlers degrade to the
+    /// pre-gh #107 stub behaviour (empty describe, no-op mutate).
+    acl_cr_writer: RwLock<Option<Arc<dyn crate::acl_cr_writer::AclCRWriter>>>,
     /// Concrete-typed [`QuotaEnforcer`] handle for the Phase 7
     /// admin handlers (DescribeClientQuotas / AlterClientQuotas)
     /// which need access to `set_user_quota` / `describe_user_quota`
@@ -171,6 +177,7 @@ impl Broker {
             fence_log: RwLock::new(None),
             marker_queue: RwLock::new(None),
             cr_writer: RwLock::new(None),
+            acl_cr_writer: RwLock::new(None),
             quota_enforcer: RwLock::new(None),
             broker_view: RwLock::new(None),
             // Start at 1 so 0 stays available as an "unset" sentinel
@@ -306,6 +313,22 @@ impl Broker {
     /// patch — clean wire response in dev mode.
     pub fn cr_writer(&self) -> Option<Arc<dyn crate::topic_cr_writer::TopicCRWriter>> {
         self.cr_writer.read().clone()
+    }
+
+    /// Install the ACL-path [`AclCRWriter`] (gh #107 parity). Called
+    /// once from `bins/skafka/main.rs` cluster bring-up.
+    ///
+    /// [`AclCRWriter`]: crate::acl_cr_writer::AclCRWriter
+    pub fn install_acl_cr_writer(&self, w: Arc<dyn crate::acl_cr_writer::AclCRWriter>) {
+        *self.acl_cr_writer.write() = Some(w);
+    }
+
+    /// Read the installed ACL writer. `None` ⇒ DescribeAcls answers
+    /// with an empty binding set and CreateAcls / DeleteAcls degrade
+    /// to per-entry no-ops — the pre-gh #107 stub behaviour the
+    /// kafka-compat tests rely on.
+    pub fn acl_cr_writer(&self) -> Option<Arc<dyn crate::acl_cr_writer::AclCRWriter>> {
+        self.acl_cr_writer.read().clone()
     }
 
     /// Install the concrete-typed [`QuotaEnforcer`] used by the

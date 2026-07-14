@@ -65,6 +65,21 @@ impl Handler for DescribeConfigsHandler {
         let mut results = Vec::with_capacity(req.resources.len());
 
         for resource in req.resources {
+            // gh #109 parity: BROKER resources answer the live broker
+            // config (read-only DEFAULT_CONFIG entries) so
+            // kafka-configs.sh --entity-type brokers and kafbat-ui's
+            // broker page work. Only BROKER_LOGGER (and anything
+            // else) stays unsupported — same as the Go broker.
+            if resource.resource_type == resource_type::BROKER {
+                results.push(DescribeConfigsResult {
+                    error_code: ERR_NONE,
+                    error_message: None,
+                    resource_type: resource.resource_type,
+                    resource_name: resource.resource_name.clone(),
+                    configs: broker_configs(&self.broker, &resource, version),
+                });
+                continue;
+            }
             if resource.resource_type != resource_type::TOPIC {
                 results.push(DescribeConfigsResult {
                     error_code: ERR_UNSUPPORTED_VERSION,
@@ -131,6 +146,54 @@ impl Handler for DescribeConfigsHandler {
         describe_configs::encode_response(&mut out, &resp, version)?;
         Ok(out)
     }
+}
+
+/// gh #109 broker-config table. Values match Apache 3.7's defaults
+/// where skafka has no live knob, and skafka's architectural
+/// invariants where it does (replication factor is always 1 — the
+/// CSI layer owns durability, not Kafka-level replication). Same
+/// entry set as the Go broker's `brokerConfigs` minus `listeners`
+/// (the Rust broker doesn't thread the advertised host into the
+/// handler; kafbat-ui renders the rest fine without it).
+fn broker_configs(
+    broker: &Broker,
+    resource: &sk_codec::api::describe_configs::DescribeConfigsResource,
+    version: i16,
+) -> Vec<DescribeConfigsResultConfig> {
+    let entries: &[(&str, String)] = &[
+        ("broker.id", broker.broker_id.to_string()),
+        ("auto.create.topics.enable", "true".into()),
+        ("num.partitions", "1".into()),
+        ("default.replication.factor", "1".into()),
+        ("inter.broker.protocol.version", "3.6".into()),
+        ("kafka.version", "3.6.0".into()),
+    ];
+    entries
+        .iter()
+        .filter(|(name, _)| match resource.configuration_keys.as_ref() {
+            None => true,
+            Some(keys) => keys.iter().any(|k| k == name),
+        })
+        .map(|(name, value)| DescribeConfigsResultConfig {
+            name: (*name).into(),
+            value: Some(value.clone()),
+            read_only: true,
+            is_default: true,
+            is_sensitive: false,
+            synonyms: vec![],
+            config_type: if version >= 2 {
+                config_type::STRING
+            } else {
+                config_type::UNKNOWN
+            },
+            config_source: if version >= 1 {
+                source::DEFAULT_CONFIG
+            } else {
+                source::UNKNOWN
+            },
+            documentation: None,
+        })
+        .collect()
 }
 
 fn make_config(entry: &topic_config_defaults::Entry, version: i16) -> DescribeConfigsResultConfig {

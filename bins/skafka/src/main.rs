@@ -39,14 +39,15 @@ use sk_auth::{
 };
 use sk_broker::{
     AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
-    ApiVersionsHandler, Broker, Cli, CliTlsConfig, CreatePartitionsHandler, CreateTopicsHandler,
-    DeleteGroupsHandler, DescribeClientQuotasHandler, DescribeConfigsHandler,
-    DescribeGroupsHandler, EndTxnHandler, FetchHandler, FindCoordinatorHandler, HeartbeatHandler,
-    IncrementalAlterConfigsHandler, InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler,
-    ListGroupsHandler, ListOffsetsHandler, ListenerEntry, MetadataHandler, OffsetCommitHandler,
-    OffsetDeleteHandler, OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler,
-    SaslHandshakeHandler, SyncGroupHandler, TopicRegistry, TxnOffsetCommitHandler,
-    WriteTxnMarkersHandler,
+    ApiVersionsHandler, Broker, Cli, CliTlsConfig, CreateAclsHandler, CreatePartitionsHandler,
+    CreateTopicsHandler, DeleteAclsHandler, DeleteGroupsHandler, DeleteRecordsHandler,
+    DeleteTopicsHandler, DescribeAclsHandler, DescribeClientQuotasHandler, DescribeConfigsHandler,
+    DescribeGroupsHandler, DescribeLogDirsHandler, EndTxnHandler, FetchHandler,
+    FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
+    InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
+    ListOffsetsHandler, ListenerEntry, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
+    OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
+    SyncGroupHandler, TopicRegistry, TxnOffsetCommitHandler, WriteTxnMarkersHandler,
 };
 use sk_protocol::{Dispatcher, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
 use sk_storage::{DiskStorageEngine, MemoryStorage, PartitionConfig, RealFs, StorageEngine};
@@ -235,6 +236,12 @@ async fn main() -> Result<()> {
         broker.install_cr_writer(Arc::new(writer));
         info!("installed KubeTopicCRWriter for admin handlers");
 
+        // ACL admin surface (gh #107 parity): CreateAcls / DeleteAcls
+        // / DescribeAcls mutate KafkaUser.spec.authorization.acls.
+        let acl_writer = sk_broker::acl_cr_writer::KubeAclCRWriter::new(client.clone(), ns.clone());
+        broker.install_acl_cr_writer(Arc::new(acl_writer));
+        info!("installed KubeAclCRWriter for ACL admin handlers");
+
         // Spawn the KafkaTopic CR watcher: feeds every
         // Apply/InitApply into `topics` so newly-created topics
         // become visible on the wire (Metadata), every Delete
@@ -336,7 +343,11 @@ async fn main() -> Result<()> {
         broker_id: format!("skafka-{}", cli.broker_id),
         listeners: cli.listeners.iter().map(|l| l.name.clone()).collect(),
         tls: None,
-        source: None,
+        // Live runtime fields (controller identity, partitions_led,
+        // heartbeat/assignment ages). Reads broker.coordinator() per
+        // request, so wiring order vs cluster bring-up doesn't
+        // matter — dev mode simply renders the zero-value shape.
+        source: Some(Arc::new(BrokerRuntimeState(broker.clone()))),
     };
     let health_cancel = cancel.clone();
     tokio::spawn(async move {
@@ -549,7 +560,7 @@ fn build_dispatcher(
         Arc::new(MetadataHandler::new(broker.clone(), listeners)),
     );
     // Phase 5 consumer-group surface (keys 8-16, 42, 47).
-    d.register(8, 0, 8, Arc::new(OffsetCommitHandler::new(broker.clone())));
+    d.register(8, 2, 8, Arc::new(OffsetCommitHandler::new(broker.clone())));
     d.register(9, 1, 8, Arc::new(OffsetFetchHandler::new(broker.clone())));
     d.register(
         10,
@@ -557,7 +568,7 @@ fn build_dispatcher(
         4,
         Arc::new(FindCoordinatorHandler::new(broker.clone())),
     );
-    d.register(11, 0, 9, Arc::new(JoinGroupHandler::new(broker.clone())));
+    d.register(11, 2, 9, Arc::new(JoinGroupHandler::new(broker.clone())));
     d.register(12, 0, 4, Arc::new(HeartbeatHandler::new(broker.clone())));
     d.register(13, 0, 5, Arc::new(LeaveGroupHandler::new(broker.clone())));
     d.register(14, 0, 5, Arc::new(SyncGroupHandler::new(broker.clone())));
@@ -568,6 +579,23 @@ fn build_dispatcher(
         Arc::new(DescribeGroupsHandler::new(broker.clone())),
     );
     d.register(16, 0, 4, Arc::new(ListGroupsHandler::new(broker.clone())));
+    // Phase 9 workstream A — Go-parity admin surface (gh #152).
+    d.register(20, 0, 5, Arc::new(DeleteTopicsHandler::new(broker.clone())));
+    d.register(
+        21,
+        0,
+        2,
+        Arc::new(DeleteRecordsHandler::new(broker.clone())),
+    );
+    d.register(29, 0, 3, Arc::new(DescribeAclsHandler::new(broker.clone())));
+    d.register(30, 0, 3, Arc::new(CreateAclsHandler::new(broker.clone())));
+    d.register(31, 0, 3, Arc::new(DeleteAclsHandler::new(broker.clone())));
+    d.register(
+        35,
+        0,
+        1,
+        Arc::new(DescribeLogDirsHandler::new(broker.clone())),
+    );
     d.register(17, 0, 1, Arc::new(SaslHandshakeHandler::new()));
     d.register(18, 0, 4, Arc::new(ApiVersionsHandler::new()));
     d.register(
@@ -752,4 +780,83 @@ async fn wait_for_shutdown_signal() -> Result<()> {
 #[allow(dead_code)]
 fn _silence_unused_hashmap() -> HashMap<u8, u8> {
     HashMap::new()
+}
+
+/// `/healthz` runtime-state adapter over the broker's cluster
+/// [`Coordinator`](sk_broker::Coordinator). Every accessor re-reads
+/// `broker.coordinator()` so the health server can be spawned before
+/// the cluster runtime installs one (dev mode never does — the
+/// handler then renders the documented zero-value shape, same as the
+/// Go broker in local mode).
+struct BrokerRuntimeState(Arc<Broker>);
+
+impl BrokerRuntimeState {
+    fn snapshot(&self) -> Option<std::sync::Arc<sk_broker::Assignment>> {
+        self.0.coordinator().and_then(|c| c.snapshot())
+    }
+}
+
+impl sk_observability::health::RuntimeState for BrokerRuntimeState {
+    fn is_controller(&self) -> bool {
+        let Some(c) = self.0.coordinator() else {
+            return false;
+        };
+        matches!(c.snapshot(), Some(a) if a.controller == c.self_id())
+    }
+    fn controller_id(&self) -> String {
+        self.snapshot()
+            .map(|a| a.controller.clone())
+            .unwrap_or_default()
+    }
+    fn controller_epoch(&self) -> i64 {
+        self.snapshot().map_or(0, |a| a.controller_epoch)
+    }
+    fn heartbeat_rtt_ms(&self) -> i64 {
+        // Not measured on the Rust client yet; renders as JSON null.
+        -1
+    }
+    fn heartbeat_age_ms(&self) -> i64 {
+        self.0
+            .coordinator()
+            .and_then(|c| c.last_heartbeat())
+            .map_or(-1, |t| {
+                i64::try_from(t.elapsed().as_millis()).unwrap_or(i64::MAX)
+            })
+    }
+    fn assignment_version(&self) -> u64 {
+        self.snapshot()
+            .map_or(0, |a| u64::try_from(a.assignment_version).unwrap_or(0))
+    }
+    fn assignment_age_ms(&self) -> i64 {
+        let Some(a) = self.snapshot() else { return -1 };
+        chrono::DateTime::parse_from_rfc3339(&a.generated_at)
+            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_milliseconds())
+            .unwrap_or(-1)
+    }
+    fn partitions_led(&self) -> i32 {
+        let Some(c) = self.0.coordinator() else {
+            return 0;
+        };
+        let Some(a) = c.snapshot() else { return 0 };
+        i32::try_from(
+            a.partitions
+                .iter()
+                .filter(|p| p.broker == c.self_id())
+                .count(),
+        )
+        .unwrap_or(i32::MAX)
+    }
+    fn partitions_assigned(&self) -> i32 {
+        // Single-writer-per-partition: assigned == led. The Go broker
+        // distinguishes them only while a takeover is mid-recovery.
+        self.partitions_led()
+    }
+    fn partitions_recovering(&self) -> i32 {
+        0
+    }
+    fn storage_stalled(&self) -> bool {
+        // The engine exposes stall only via per-append errors today;
+        // the gh #95 healthz surface is still a follow-up.
+        false
+    }
 }

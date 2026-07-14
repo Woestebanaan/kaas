@@ -4,6 +4,7 @@
 //! [`sk_protocol::Handler`] trait. The host (`bins/skafka/main.rs`)
 //! registers them on a [`sk_protocol::Dispatcher`].
 
+pub mod acls;
 pub mod add_offsets_to_txn;
 pub mod add_partitions_to_txn;
 pub mod alter_client_quotas;
@@ -11,9 +12,12 @@ pub mod api_versions;
 pub mod create_partitions;
 pub mod create_topics;
 pub mod delete_groups;
+pub mod delete_records;
+pub mod delete_topics;
 pub mod describe_client_quotas;
 pub mod describe_configs;
 pub mod describe_groups;
+pub mod describe_log_dirs;
 pub mod end_txn;
 pub mod fetch;
 pub mod find_coordinator;
@@ -34,6 +38,7 @@ pub mod sync_group;
 pub mod txn_offset_commit;
 pub mod write_txn_markers;
 
+pub use acls::{CreateAclsHandler, DeleteAclsHandler, DescribeAclsHandler};
 pub use add_offsets_to_txn::AddOffsetsToTxnHandler;
 pub use add_partitions_to_txn::AddPartitionsToTxnHandler;
 pub use alter_client_quotas::AlterClientQuotasHandler;
@@ -41,9 +46,12 @@ pub use api_versions::ApiVersionsHandler;
 pub use create_partitions::CreatePartitionsHandler;
 pub use create_topics::CreateTopicsHandler;
 pub use delete_groups::DeleteGroupsHandler;
+pub use delete_records::DeleteRecordsHandler;
+pub use delete_topics::DeleteTopicsHandler;
 pub use describe_client_quotas::DescribeClientQuotasHandler;
 pub use describe_configs::DescribeConfigsHandler;
 pub use describe_groups::DescribeGroupsHandler;
+pub use describe_log_dirs::DescribeLogDirsHandler;
 pub use end_txn::EndTxnHandler;
 pub use fetch::FetchHandler;
 pub use find_coordinator::FindCoordinatorHandler;

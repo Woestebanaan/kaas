@@ -138,6 +138,12 @@ pub trait TopicCRWriter: Send + Sync + 'static {
         name: &str,
         ops: &[ConfigOpWithValue],
     ) -> Result<(), TopicWriteError>;
+
+    /// Delete the `KafkaTopic` CR. Called by `DeleteTopicsHandler`
+    /// (API key 20). The operator's reconciler tears down the
+    /// partition dirs and the topic-watcher fires Deleted on every
+    /// broker so open handles close before `remove_dir_all` swings.
+    async fn delete_topic(&self, name: &str) -> Result<(), TopicWriteError>;
 }
 
 /// Op + value pair the handler passes through to the writer. Kept
@@ -196,6 +202,49 @@ pub fn config_key_to_json_field(key: &str) -> Option<&'static str> {
     }
 }
 
+/// Returns the `(metadata.name, spec.topicName)` pair for a Kafka
+/// topic name (gh #86). A valid RFC 1123 subdomain name is used as
+/// `metadata.name` directly with `spec.topicName` left empty
+/// (Strimzi's recommendation). Otherwise — uppercase Streams
+/// internals like `app-KSTREAM-AGGREGATE-...-repartition`, dotted
+/// names, >253 chars — synthesise a deterministic
+/// `skafka-topic-<16 hex of sha1[:8]>` and stash the literal Kafka
+/// name in `spec.topicName`.
+///
+/// The synthetic shape MUST stay byte-identical to the Go broker's
+/// `nameForCR` (`archive/internal/k8s/topic_cr_writer.go`): during
+/// the Phase 9 mixed-flavor window both flavors must resolve the
+/// same Kafka name to the same CR, or a flavor flip would duplicate
+/// CRs for the same topic directory.
+pub fn name_for_cr(kafka_name: &str) -> (String, String) {
+    if kafka_name.len() <= 253 && is_rfc1123_subdomain(kafka_name) {
+        return (kafka_name.to_string(), String::new());
+    }
+    use sha1::{Digest, Sha1};
+    let digest = Sha1::digest(kafka_name.as_bytes());
+    use std::fmt::Write;
+    let hex = digest[..8].iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    (format!("skafka-topic-{hex}"), kafka_name.to_string())
+}
+
+/// K8s resource-name validation: lowercase alphanumeric labels with
+/// interior hyphens, dot-separated. Mirrors the Go side's `rfc1123`
+/// regex without pulling the regex crate in.
+fn is_rfc1123_subdomain(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.').all(|label| {
+            !label.is_empty()
+                && label.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && label.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
 /// Dev-mode writer: every operation returns `Forbidden` so the
 /// handler maps to `CLUSTER_AUTHORIZATION_FAILED` (31). The
 /// `bins/skafka` main wires this when `MY_POD_NAME` is unset (no
@@ -220,6 +269,11 @@ impl TopicCRWriter for NoopTopicCRWriter {
         _name: &str,
         _ops: &[ConfigOpWithValue],
     ) -> Result<(), TopicWriteError> {
+        Err(TopicWriteError::Forbidden(
+            "broker is not running in cluster mode".into(),
+        ))
+    }
+    async fn delete_topic(&self, _name: &str) -> Result<(), TopicWriteError> {
         Err(TopicWriteError::Forbidden(
             "broker is not running in cluster mode".into(),
         ))
@@ -277,14 +331,18 @@ mod kube_impl {
             use kube::api::PostParams;
             use sk_operator_api::{KafkaTopicConfig, KafkaTopicSpec};
 
+            // gh #86: non-RFC-1123 Kafka names (Streams internals)
+            // get a deterministic synthetic CR name with the literal
+            // name carried in spec.topicName.
+            let (meta_name, topic_name) = super::name_for_cr(name);
             let cr = KafkaTopic {
                 metadata: kube::api::ObjectMeta {
-                    name: Some(name.to_string()),
+                    name: Some(meta_name),
                     namespace: Some(self.namespace.clone()),
                     ..Default::default()
                 },
                 spec: KafkaTopicSpec {
-                    topic_name: String::new(),
+                    topic_name,
                     partitions: num_partitions,
                     config: KafkaTopicConfig::default(),
                 },
@@ -305,8 +363,9 @@ mod kube_impl {
             // same rule (with the status-condition message); doing
             // it here too returns a precise wire code without
             // round-tripping the operator.
+            let (meta_name, _) = super::name_for_cr(name);
             let api = self.api();
-            match api.get(name).await {
+            match api.get(&meta_name).await {
                 Ok(t) => {
                     if t.spec.partitions > new_count {
                         return Err(TopicWriteError::InvalidPartitions(format!(
@@ -321,7 +380,7 @@ mod kube_impl {
                 Err(e) => return Err(map_kube_err(e)),
             }
             let patch = json!({ "spec": { "partitions": new_count } });
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            api.patch(&meta_name, &PatchParams::default(), &Patch::Merge(&patch))
                 .await
                 .map(|_| ())
                 .map_err(map_kube_err)
@@ -358,9 +417,26 @@ mod kube_impl {
                 }
             }
             let patch = json!({ "spec": { "config": config } });
+            let (meta_name, _) = super::name_for_cr(name);
             let api = self.api();
             match api
-                .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .patch(&meta_name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(kube::Error::Api(e)) if e.code == 404 => {
+                    Err(TopicWriteError::NotFound(name.into()))
+                }
+                Err(e) => Err(map_kube_err(e)),
+            }
+        }
+
+        async fn delete_topic(&self, name: &str) -> Result<(), TopicWriteError> {
+            use kube::api::DeleteParams;
+            let (meta_name, _) = super::name_for_cr(name);
+            match self
+                .api()
+                .delete(&meta_name, &DeleteParams::default())
                 .await
             {
                 Ok(_) => Ok(()),

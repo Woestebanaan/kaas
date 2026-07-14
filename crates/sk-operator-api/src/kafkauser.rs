@@ -103,7 +103,7 @@ pub struct ServiceAccountRef {
     pub namespace: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaUserAuthorization {
     /// `simple` today. Field is reserved for forward compat (OPA / OIDC).

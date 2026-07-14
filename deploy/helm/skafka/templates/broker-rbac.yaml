@@ -25,9 +25,11 @@ rules:
   # KafkaUser: brokers watch + patch quotas. The watch covers the
   # operator's spec.authorization → acls.json translation (brokers
   # only consume that file); update/patch cover the admin-protocol
-  # path (gh #103 phase 2) where AlterClientQuotas writes spec.quotas
-  # back to the CR so runtime mutations survive restart.
-  # gh #135: kafkaacls + kafkausergroups removed.
+  # paths: AlterClientQuotas (gh #103 phase 2) writes spec.quotas,
+  # and CreateAcls/DeleteAcls (gh #107) mutate
+  # spec.authorization.acls so kafka-acls.sh / AdminClient ACL
+  # writes land on the CR. gh #135: kafkaacls + kafkausergroups
+  # removed.
   - apiGroups: [skafka.io]
     resources: [kafkausers]
     verbs: [get, list, watch, update, patch]
