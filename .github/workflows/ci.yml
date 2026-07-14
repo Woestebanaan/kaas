@@ -205,5 +205,16 @@ jobs:
           version: 'v3.14.0'
       - name: helm lint
         run: helm lint deploy/helm/skafka
-      - name: helm template
+      - name: helm template (default flavor)
         run: helm template test-release deploy/helm/skafka > /tmp/rendered.yaml
+      # Both branches of the image.flavor helper stay lint-green
+      # (Phase 9, gh #152): default renders one flavor, this renders
+      # the other, and a bogus flavor must fail the render.
+      - name: helm template (rust flavor)
+        run: helm template test-release deploy/helm/skafka --set image.flavor=rust > /tmp/rendered-rust.yaml
+      - name: helm template (bad flavor fails)
+        run: |
+          if helm template test-release deploy/helm/skafka --set image.flavor=zig > /dev/null 2>&1; then
+            echo "expected render to fail for image.flavor=zig" >&2
+            exit 1
+          fi

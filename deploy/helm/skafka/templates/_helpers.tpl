@@ -64,8 +64,27 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end -}}
 
+{{/*
+skafka.brokerImage / skafka.operatorImage — Phase 9 flavor knob
+(gh #152). An explicit .repository always wins (renders exactly as it
+did before the knob existed). Otherwise the repository is derived from
+image.flavor (go | rust — one knob switches broker AND operator) plus
+a "-preview" suffix when the resolved tag is a pre-release (contains
+"-"), mirroring the exact rule docker-publish.yml uses to compute
+image names. Unknown flavors fail the render loudly.
+*/}}
 {{- define "skafka.brokerImage" -}}
-{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
+{{- $repo := .Values.image.repository -}}
+{{- if not $repo -}}
+  {{- if not (has .Values.image.flavor (list "go" "rust")) -}}
+    {{- fail (printf "image.flavor must be \"go\" or \"rust\", got %q" .Values.image.flavor) -}}
+  {{- end -}}
+  {{- $rs := eq .Values.image.flavor "rust" | ternary "-rs" "" -}}
+  {{- $pre := contains "-" $tag | ternary "-preview" "" -}}
+  {{- $repo = printf "ghcr.io/woestebanaan/skafka%s%s" $rs $pre -}}
+{{- end -}}
+{{ $repo }}:{{ $tag }}
 {{- end -}}
 
 {{/*
@@ -246,5 +265,15 @@ is empty (broker treats unset env as "no superUsers").
 {{- end -}}
 
 {{- define "skafka.operatorImage" -}}
-{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag | default .Chart.AppVersion }}
+{{- $tag := .Values.operator.image.tag | default .Chart.AppVersion -}}
+{{- $repo := .Values.operator.image.repository -}}
+{{- if not $repo -}}
+  {{- if not (has .Values.image.flavor (list "go" "rust")) -}}
+    {{- fail (printf "image.flavor must be \"go\" or \"rust\", got %q" .Values.image.flavor) -}}
+  {{- end -}}
+  {{- $rs := eq .Values.image.flavor "rust" | ternary "-rs" "" -}}
+  {{- $pre := contains "-" $tag | ternary "-preview" "" -}}
+  {{- $repo = printf "ghcr.io/woestebanaan/skafka-operator%s%s" $rs $pre -}}
+{{- end -}}
+{{ $repo }}:{{ $tag }}
 {{- end -}}

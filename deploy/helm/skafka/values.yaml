@@ -1,12 +1,19 @@
 image:
-  repository: ghcr.io/woestebanaan/skafka
-  tag: ""              # defaults to Chart.appVersion
+  # flavor selects the default image repositories for BOTH the broker
+  # and the operator (a mixed-flavor deployment is not a supported
+  # shape). "go" -> ghcr.io/woestebanaan/skafka[-operator], "rust" ->
+  # ghcr.io/woestebanaan/skafka[-operator]-rs. A "-preview" suffix is
+  # appended automatically when the resolved tag is a pre-release
+  # (contains "-"), mirroring the release workflow's naming rule.
+  flavor: go            # go | rust
+  repository: ""        # explicit value overrides flavor entirely
+  tag: ""               # defaults to Chart.appVersion
   pullPolicy: IfNotPresent
 
 operator:
   enabled: true
   image:
-    repository: ghcr.io/woestebanaan/skafka-operator
+    repository: ""      # explicit value overrides image.flavor entirely
     tag: ""
     pullPolicy: IfNotPresent
   resources:

@@ -1,9 +1,11 @@
 skafka {{ .Chart.AppVersion }} has been installed as {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
 Broker StatefulSet: {{ include "skafka.fullname" . }} ({{ .Values.broker.replicaCount }} replicas)
+Broker image:       {{ include "skafka.brokerImage" . }}{{ if not .Values.image.repository }} (flavor: {{ .Values.image.flavor }}){{ end }}
 Shared PVC:         {{ include "skafka.pvcName" . }} ({{ .Values.storage.size }} on {{ .Values.storage.className }})
 {{- if .Values.operator.enabled }}
 Operator:           {{ include "skafka.fullname" . }}-operator
+Operator image:     {{ include "skafka.operatorImage" . }}
 {{- end }}
 
 {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}

@@ -3,27 +3,40 @@
 Deploys the skafka broker StatefulSet and operator Deployment backed by a single
 shared ReadWriteMany PersistentVolumeClaim.
 
-> **Note (mid-rewrite).** skafka is being rewritten from Go to Rust (see
-> `../../../docs/rewrite.md`). The chart itself is language-agnostic and is
-> reused unchanged by both flavors. Phase 9 of the rewrite will add an
-> `image.flavor` value (`go` | `rust`) so a single chart version can deploy
-> either; until then the chart only points at the Go images shipped from
-> `archive/`.
->
-> **Opting into the Rust images (Phase 8).** As of Phase 8 the release
-> workflow publishes `skafka-rs` and `skafka-operator-rs` (or their
-> `-preview` variants) alongside the Go images under the same tag. To
-> deploy the Rust pair, override the image repositories at install time:
->
-> ```bash
-> helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
->   --set image.repository=ghcr.io/woestebanaan/skafka-rs-preview \
->   --set operator.image.repository=ghcr.io/woestebanaan/skafka-operator-rs-preview \
->   ...
-> ```
->
-> No other chart changes are required — env vars, listener config,
-> CRD shape, and `/data/__cluster/` layout are identical across flavors.
+## Image flavor (Go vs Rust)
+
+skafka is mid-cutover from Go to Rust (see `../../../docs/rewrite.md`); every
+release tag publishes both flavors' images. The chart selects between them with
+one knob:
+
+```yaml
+image:
+  flavor: go            # go | rust — selects broker AND operator repositories
+```
+
+`flavor: go` (the default) resolves `ghcr.io/woestebanaan/skafka` +
+`skafka-operator`; `flavor: rust` resolves `skafka-rs` + `skafka-operator-rs`.
+A `-preview` suffix is appended automatically when the resolved tag is a
+pre-release (contains a `-`), matching the release workflow's image-naming
+rule — so the chart default now points at images that actually exist for
+preview tags, with no override needed.
+
+No other chart values change with the flavor — env vars, listener config, CRD
+shape, and the `/data/__cluster/` on-disk layout are identical across flavors,
+which is what makes switching (and rolling back) image-only.
+
+**Explicit repositories still win.** Setting `image.repository` and/or
+`operator.image.repository` bypasses flavor resolution entirely for that image
+(the empty-string defaults mean "derive from flavor"). Use this for airgapped
+mirrors or a deliberately mixed-flavor deployment (not a supported shape, but
+not blocked):
+
+```bash
+helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
+  --set image.repository=registry.example.com/mirrors/skafka-rs-preview \
+  --set operator.image.repository=registry.example.com/mirrors/skafka-operator-rs-preview \
+  ...
+```
 
 ## Prerequisites
 
@@ -38,15 +51,13 @@ The chart is published as an OCI artifact to GHCR. No `helm repo add` needed.
 The chart bundles its CRDs under `crds/`, so Helm installs them automatically on
 first install. The chart is always pushed under the name `skafka` (from
 `Chart.yaml`); pre-release tags (`vX.Y.Z-*`) only rename the *images* to their
-`*-preview` variants. Only `v0.1.0-preview` has been tagged so far, so the
-install command below uses that:
+`*-preview` variants — the image helpers derive that suffix from the tag, so no
+repository override is needed:
 
 ```bash
 helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
-  --version 0.1.0-preview \
+  --version 0.2.0-preview \
   --namespace kafka --create-namespace \
-  --set image.repository=ghcr.io/woestebanaan/skafka-preview \
-  --set operator.image.repository=ghcr.io/woestebanaan/skafka-operator-preview \
   --set storage.className=ceph-filesystem \
   --set broker.replicaCount=3
 ```
@@ -54,7 +65,7 @@ helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
 See available versions:
 
 ```bash
-helm show all oci://ghcr.io/woestebanaan/charts/skafka --version 0.1.0-preview
+helm show all oci://ghcr.io/woestebanaan/charts/skafka --version 0.2.0-preview
 ```
 
 ### CRDs on upgrade
@@ -65,17 +76,16 @@ CRDs, apply them explicitly before `helm upgrade`:
 
 ```bash
 # Pull the new chart version locally, then apply the CRDs it ships:
-helm pull oci://ghcr.io/woestebanaan/charts/skafka --version 0.1.0-preview --untar
+helm pull oci://ghcr.io/woestebanaan/charts/skafka --version 0.2.0-preview --untar
 kubectl apply -f skafka/crds/
 
 # Or apply them straight from the repo at a specific ref:
-REF=v0.1.0-preview
+REF=v0.2.0-preview
 BASE=https://raw.githubusercontent.com/Woestebanaan/skafka/${REF}/deploy/crds
 for f in skafka.io_kafkaclusters.yaml \
          skafka.io_kafkatopics.yaml \
          skafka.io_kafkausers.yaml \
-         skafka.io_kafkausergroups.yaml \
-         skafka.io_kafkaacls.yaml; do
+         skafka.io_kafkaclusterassignments.yaml; do
   kubectl apply -f "${BASE}/${f}"
 done
 ```
@@ -163,6 +173,9 @@ See `values.yaml` for the full set of tunables. Common overrides:
 
 | Key | Default | Purpose |
 |---|---|---|
+| `image.flavor` | go | Image flavor (`go` \| `rust`) for broker and operator |
+| `image.repository` | `""` | Explicit broker image repo; overrides `image.flavor` |
+| `operator.image.repository` | `""` | Explicit operator image repo; overrides `image.flavor` |
 | `broker.replicaCount` | 3 | Number of broker pods |
 | `storage.className` | ceph-filesystem | RWX StorageClass |
 | `storage.size` | 500Gi | PVC capacity |
