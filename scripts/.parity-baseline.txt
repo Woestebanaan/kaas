@@ -1,63 +1,65 @@
-# skafka-scripts parity baseline against Rust broker v0.1.179-preview.
-# Captured 2026-07-11 via `/skafka-scripts` skill invocation.
+# skafka-scripts parity baseline against Rust broker v0.2.0-preview.
+# Captured 2026-07-14 (phase 9 A.1 / bake T0, gh #152) on the
+# production 3-broker shape (NFS-RWX PVC, replicaCount 3, flavor knob).
 #
 # Format: <script> <RESULT> [reason]
 # RESULT ∈ {PASS, SKIP, FAIL}. Rerun the suite via the skafka-scripts
 # skill; assert every row's RESULT matches. Any downgrade (PASS → FAIL,
 # PASS → SKIP that isn't a new documented skip) is a regression.
 #
+# 21 PASS / 20 SKIP / 0 FAIL — identical totals to the Go control run
+# (.parity-baseline-go.txt), i.e. full script-level Go parity. The 12
+# FAILs in the previous baseline (v0.1.179) plus the 8 remaining on
+# v0.1.190 are all closed by the fix set shipped in v0.2.0-preview:
+# multi-broker leader ownership (v0.1.184–190), LeaveGroup v5 KIP-800
+# reason, ACL wire trio + KafkaUser ACL writer, DeleteTopics,
+# DeleteRecords, DescribeLogDirs, DescribeConfigs BROKER resource,
+# gh #86 synthetic CR names, max.message.bytes enforcement, operator
+# status SSA TypeMeta + CRD Condition-schema regeneration.
+#
 # 20 SKIPs cover skafka's documented non-goals (KRaft, share-groups,
 # replicas, JMX, KIP-714). See per-script `_common.sh skip` reasons.
 
-kafka-acls.sh                            FAIL   # ACL provisioning via kubectl KafkaUser CR; operator reconcile gap
+kafka-acls.sh                            PASS
 kafka-broker-api-versions.sh             PASS
 kafka-client-metrics.sh                  SKIP   # KIP-714 client metrics subscriptions; broker support not yet implemented
 kafka-cluster.sh                         PASS
-kafka-configs.sh                         FAIL   # IncrementalAlterConfigs on cluster-level configs
-kafka-console-consumer.sh                FAIL   # multi-broker leader ownership across shared PVC
-kafka-console-producer.sh                FAIL   # multi-broker leader ownership across shared PVC
+kafka-configs.sh                         PASS
+kafka-console-consumer.sh                PASS
+kafka-console-producer.sh                PASS
 kafka-console-share-consumer.sh          SKIP   # KIP-932 share-group console consumer (Kafka 4.0+)
 kafka-consumer-groups.sh                 PASS
-kafka-consumer-perf-test.sh              FAIL   # perf timeout; multi-broker leader ownership
+kafka-consumer-perf-test.sh              PASS
 kafka-delegation-tokens.sh               SKIP   # delegation tokens; skafka's auth has no delegation-token plane
-kafka-delete-records.sh                  FAIL   # DeleteRecords on non-owned partition
+kafka-delete-records.sh                  PASS
 kafka-dump-log.sh                        SKIP   # requires SEGMENT= env pointing at a broker-pod-local segment
-kafka-e2e-latency.sh                     FAIL   # multi-broker leader ownership
+kafka-e2e-latency.sh                     PASS
 kafka-features.sh                        SKIP   # KRaft feature levels; non-goal
-kafka-get-offsets.sh                     FAIL   # multi-broker leader ownership
+kafka-get-offsets.sh                     PASS
 kafka-groups.sh                          SKIP   # unified groups tool (Kafka 4.0+); use kafka-consumer-groups.sh
 kafka-jmx.sh                             SKIP   # JMX; skafka emits OTLP metrics
 kafka-leader-election.sh                 SKIP   # manual leader election; skafka uses K8s Leases
-kafka-log-dirs.sh                        FAIL   # DescribeLogDirs not implemented
+kafka-log-dirs.sh                        PASS
 kafka-metadata-quorum.sh                 SKIP   # KRaft; non-goal
 kafka-metadata-shell.sh                  SKIP   # KRaft metadata log; non-goal
-kafka-producer-perf-test.sh              FAIL   # perf timeout; multi-broker leader ownership
+kafka-producer-perf-test.sh              PASS
 kafka-reassign-partitions.sh             SKIP   # manual partition reassignment; skafka balancer drives this
 kafka-replica-verification.sh            SKIP   # replicas; non-goal
 kafka-restart-resilience.sh              PASS
 kafka-run-class.sh                       SKIP   # generic JVM class runner; not broker-facing
-kafka-server-start.sh                    SKIP   # Apache broker JVM; skafka is separate binary
+kafka-server-start.sh                    SKIP   # Apache broker JVM; skafka is a separate binary
 kafka-server-stop.sh                     SKIP   # same
 kafka-share-consumer-perf-test.sh        SKIP   # KIP-932 share groups (Kafka 4.0+)
 kafka-share-groups.sh                    SKIP   # KIP-932 share groups (Kafka 4.0+)
 kafka-storage.sh                         SKIP   # KRaft metadata storage; non-goal
-kafka-streams-application-reset.sh       FAIL   # Streams-side reset; blocked on produce/consume path
+kafka-streams-application-reset.sh       PASS
 kafka-streams-groups.sh                  SKIP   # KIP-848 Streams-group admin; out of scope
-kafka-topics.sh                          FAIL   # produce/consume validation embedded; leader ownership issue
+kafka-topics.sh                          PASS
 kafka-transactions.sh                    PASS
 kafka-txn-coordinator.sh                 PASS
 kafka-txn-timeout.sh                     PASS
-kafka-verifiable-consumer.sh             FAIL   # multi-broker leader ownership
-kafka-verifiable-producer.sh             FAIL   # multi-broker leader ownership
+kafka-verifiable-consumer.sh             PASS
+kafka-verifiable-producer.sh             PASS
 kafka-verifiable-share-consumer.sh       SKIP   # KIP-932 verifiable share consumer (Kafka 4.0+)
 
-# Totals: 8 PASS, 20 SKIP, 12 FAIL (of which 4 timeouts on perf tests).
-# Every FAIL traces to one of:
-#   1. Multi-broker leader ownership: assignment.json layout on shared
-#      PVC has three brokers each writing "I lead everything" (Phase 5
-#      single-broker AssignmentLoop, docs/rewrite.md gap noted).
-#   2. Admin surface gaps: DescribeLogDirs (key 35), broker-level
-#      IncrementalAlterConfigs, ACL provisioning through operator.
-#   3. Perf-test timeouts: consumer/producer-perf-test require a
-#      functioning produce/consume path and 120s is not enough headroom
-#      when leader ownership retries eat wall clock.
+# Totals: 21 PASS, 20 SKIP, 0 FAIL.
