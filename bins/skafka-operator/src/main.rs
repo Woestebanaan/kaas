@@ -89,12 +89,40 @@ async fn main() -> Result<()> {
 
     // Probe endpoints are bound BEFORE we wait for the kube client
     // so a slow apiserver doesn't fail the chart's readinessProbe.
-    let probe_task = tokio::spawn(spawn_probe_server(
-        probe_addr.clone(),
-        healthy_flag.clone(),
-        ready_flag.clone(),
-        cancel.clone(),
-    ));
+    //
+    // Dedicated OS thread + its own single-thread runtime (gh #187):
+    // as a plain tokio::spawn the probe endpoints shared the worker
+    // pool with every reconciler, so a reconcile burst under node
+    // load starved /healthz past the liveness deadline and the
+    // kubelet SIGKILLed a healthy operator — the same control-plane
+    // starvation the broker fixed by isolating its cluster runtime
+    // (97b5d97). Liveness must stay answerable no matter what the
+    // reconcilers are doing.
+    let probe_thread = std::thread::Builder::new()
+        .name("probe-server".into())
+        .spawn({
+            let addr = probe_addr.clone();
+            let healthy = healthy_flag.clone();
+            let ready = ready_flag.clone();
+            let cancel = cancel.clone();
+            move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(err) => {
+                        // No runtime means no probe endpoints; the
+                        // kubelet will restart us, which is the right
+                        // outcome for a broken process anyway.
+                        error!(%err, "probe-server runtime failed to build");
+                        return;
+                    }
+                };
+                rt.block_on(spawn_probe_server(addr, healthy, ready, cancel));
+            }
+        })
+        .context("spawning probe-server thread")?;
     // Metrics endpoint placeholder — Phase 8 wires the OTLP push
     // path via sk_observability::bootstrap. axum gives us a free
     // 200-on-/metrics for now so a Prometheus scrape doesn't trip.
@@ -207,7 +235,10 @@ async fn main() -> Result<()> {
     info!("shutdown signal received; waiting for reconcilers");
 
     let _ = tokio::join!(topic_task, user_task, cluster_task);
-    let _ = tokio::join!(probe_task, metrics_task);
+    let _ = metrics_task.await;
+    // The probe thread exits via the axum graceful shutdown once
+    // `cancel` fires; join it off the async runtime.
+    let _ = tokio::task::spawn_blocking(move || probe_thread.join()).await;
 
     // Flush pending OTLP pushes before the process dies.
     if let Err(err) = providers.shutdown() {

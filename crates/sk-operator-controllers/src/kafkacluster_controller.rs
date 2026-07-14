@@ -46,6 +46,16 @@ pub struct KafkaClusterReconciler {
     pub client: Client,
     pub namespace: String,
     pub observer: ReconcileObserver,
+    /// API groups the apiserver serves, discovered once on first use
+    /// (gh #187). Gates every call against optional API groups
+    /// (Gateway API, cert-manager): a request against an unserved
+    /// group doesn't produce a typed NotFound — the apiserver answers
+    /// a plain-text `404 page not found` that kube-rs can't parse, so
+    /// a cluster without those CRDs paid 10+ dead API round-trips per
+    /// reconcile. Installing the CRDs later requires an operator
+    /// restart to be noticed — an acceptable trade (same caching
+    /// behaviour as controller-runtime's RESTMapper on the Go side).
+    served_groups: tokio::sync::OnceCell<std::collections::HashSet<String>>,
 }
 
 impl KafkaClusterReconciler {
@@ -54,7 +64,27 @@ impl KafkaClusterReconciler {
             client,
             namespace,
             observer: ReconcileObserver::new("KafkaCluster"),
+            served_groups: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// True when the apiserver serves `group`. Fails open: if
+    /// discovery itself errors, every group is assumed served so the
+    /// per-call error paths stay authoritative.
+    async fn group_served(&self, group: &str) -> bool {
+        let groups = self
+            .served_groups
+            .get_or_init(|| async {
+                match self.client.list_api_groups().await {
+                    Ok(list) => list.groups.into_iter().map(|g| g.name).collect(),
+                    Err(err) => {
+                        tracing::warn!(%err, "api-group discovery failed; assuming all groups served");
+                        std::collections::HashSet::new()
+                    }
+                }
+            })
+            .await;
+        groups.is_empty() || groups.contains(group)
     }
 
     pub async fn reconcile(&self, cluster: Arc<KafkaCluster>) -> Result<Action, ControllerError> {
@@ -381,18 +411,26 @@ impl KafkaClusterReconciler {
             .as_deref()
             .unwrap_or(&self.namespace);
 
-        // Certificate (cert-manager).
-        let cert_ar = ApiResource::from_gvk(&certificate_gvk());
-        let cert_api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), ns, &cert_ar);
-        let cert_name = format!("{cluster_name}-broker-tls");
-        // Delete is best-effort; NotFound is fine. Anything else
-        // bubbles so the reconciler logs and retries.
-        delete_if_present(&cert_api, &cert_name).await?;
+        // Certificate (cert-manager). Skipped when the cluster has no
+        // cert-manager install — nothing could exist there (gh #187).
+        if self.group_served("cert-manager.io").await {
+            let cert_ar = ApiResource::from_gvk(&certificate_gvk());
+            let cert_api: Api<DynamicObject> =
+                Api::namespaced_with(self.client.clone(), ns, &cert_ar);
+            let cert_name = format!("{cluster_name}-broker-tls");
+            // Delete is best-effort; NotFound is fine. Anything else
+            // bubbles so the reconciler logs and retries.
+            delete_if_present(&cert_api, &cert_name).await?;
+        }
 
         // Services + TLSRoutes per ordinal. Use the same 10-floor
         // upper bound the Go side uses to catch shrink scenarios.
+        // TLSRoutes are skipped entirely when the Gateway API isn't
+        // installed — every such delete was an unrouted plain-text
+        // 404 the client had to error-parse (gh #187).
         let upper = cluster.spec.replicas.max(10);
         let svc_api: Api<Service> = Api::namespaced(self.client.clone(), ns);
+        let routes_served = self.group_served("gateway.networking.k8s.io").await;
         let route_ar = ApiResource::from_gvk(&tls_route_gvk());
         let route_api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), ns, &route_ar);
@@ -400,7 +438,9 @@ impl KafkaClusterReconciler {
         for i in 0..upper {
             let name = format!("{cluster_name}-broker-{i}");
             delete_if_present(&svc_api, &name).await?;
-            delete_if_present(&route_api, &name).await?;
+            if routes_served {
+                delete_if_present(&route_api, &name).await?;
+            }
         }
         Ok(())
     }
