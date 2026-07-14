@@ -336,6 +336,8 @@ Detailed plan: [`phase-0.md`](./phase-0.md).
 
 ## Phase 9 — Cutover (1 week)
 
+Detailed plan: [`phase-9.md`](./phase-9.md).
+
 - Tag `v0.2.0-preview` (first Rust release). Patch-bump from there per the existing release policy.
 - Dual-publish images (`skafka:v0.1.N-preview` Go + `skafka-rs:v0.2.0-preview` Rust) for one release.
 - Helm chart adds `image.flavor: go | rust` (default `go`).
