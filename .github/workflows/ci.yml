@@ -62,6 +62,16 @@ jobs:
       - name: cargo build --release
         run: cargo build --release --workspace --bins
 
+      # Regenerates the CRDs from crates/sk-operator-api and fails on
+      # any diff against deploy/crds + deploy/helm/skafka/crds. This
+      # step was documented as existing since Phase 7 but never
+      # actually wired — which is how the committed CRDs kept a stale
+      # snake_case Condition schema while the Rust type moved to
+      # camelCase, and every operator status write 500'd against SSA
+      # validation (found live in phase 9, gh #152).
+      - name: CRD drift gate
+        run: cargo xtask check-crd-drift
+
   legacy-go:
     # The Go tree under archive/ is frozen but still ships releases until the
     # Rust port reaches Phase 9. Keep vet+test green so port-blocking bugfixes

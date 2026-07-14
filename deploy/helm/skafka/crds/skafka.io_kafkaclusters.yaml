@@ -165,40 +165,39 @@ spec:
                 items:
                   description: One status condition. Field shapes mirror apimachinery's `metav1.Condition` exactly.
                   properties:
-                    last_transition_time:
-                      description: RFC 3339 timestamp. Required.
+                    lastTransitionTime:
+                      default: ''
+                      description: RFC 3339 timestamp. Required in the CRD schema but tolerant on deserialise so an operator writing partial conditions (or a pre-existing CR from a prior operator version) doesn't break the broker's watcher.
                       type: string
                     message:
+                      default: ''
                       description: Human-readable. Required, up to 32768 chars.
                       maxLength: 32768
                       type: string
-                    observed_generation:
+                    observedGeneration:
                       description: '`metadata.generation` observed at transition. Optional; must be ≥ 0 when set.'
                       format: int64
                       minimum: 0.0
                       nullable: true
                       type: integer
                     reason:
+                      default: ''
                       description: Programmatic identifier. Required, CamelCase, 1..=1024 chars.
                       maxLength: 1024
                       minLength: 1
                       pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                       type: string
                     status:
-                      description: '`True`, `False`, or `Unknown`. Required.'
+                      default: ''
+                      description: '`True`, `False`, or `Unknown`. Required in the CRD schema; tolerant on deserialise.'
                       pattern: ^(True|False|Unknown)$
                       type: string
                     type:
-                      description: CamelCase or `foo.example.com/CamelCase`. Required.
+                      default: ''
+                      description: CamelCase or `foo.example.com/CamelCase`. Required in the CRD schema; tolerant on deserialise.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
-                  required:
-                  - last_transition_time
-                  - message
-                  - reason
-                  - status
-                  - type
                   type: object
                 type: array
             type: object
