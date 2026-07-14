@@ -26,7 +26,10 @@ use crate::primitives::{
 use crate::tagged;
 use crate::Bytes;
 
-pub const VERSIONS: (i16, i16) = (0, 9);
+// Min 2, matching the Go broker: v0 lacks `rebalance_timeout_ms`
+// (added v1) and this module decodes it unconditionally, so
+// advertising v0 offered a shape we never parsed correctly.
+pub const VERSIONS: (i16, i16) = (2, 9);
 pub const MIN_FLEXIBLE: i16 = 6;
 
 const fn header_for(version: i16) -> HeaderVersion {
@@ -326,8 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn v0_roundtrip() {
-        roundtrip(0);
+    fn v2_roundtrip() {
+        roundtrip(2);
     }
 
     #[test]

@@ -20,7 +20,12 @@ use crate::primitives::{read_i16, read_i32, read_i64, write_i16, write_i32, writ
 use crate::tagged;
 use crate::Bytes;
 
-pub const VERSIONS: (i16, i16) = (0, 8);
+// Min 2, matching the Go broker: v1's per-partition
+// `commit_timestamp` (and v2–4's `retention_time_ms`) are not
+// decoded here — same as Go — so don't advertise v0/v1 shapes
+// this module never parsed correctly. (v2–4 retention remains a
+// shared Go+Rust divergence from Apache; tracked post-cutover.)
+pub const VERSIONS: (i16, i16) = (2, 8);
 pub const MIN_FLEXIBLE: i16 = 8;
 
 const fn header_for(version: i16) -> HeaderVersion {
@@ -308,13 +313,8 @@ mod tests {
     }
 
     #[test]
-    fn v0_roundtrip() {
-        roundtrip(0);
-    }
-
-    #[test]
-    fn v1_adds_generation_and_member() {
-        roundtrip(1);
+    fn v2_roundtrip() {
+        roundtrip(2);
     }
 
     #[test]

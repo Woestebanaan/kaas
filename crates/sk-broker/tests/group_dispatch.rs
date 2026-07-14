@@ -244,6 +244,7 @@ async fn full_consumer_group_lifecycle_through_handlers() {
         members: vec![leave_group::LeaveMember {
             member_id: join_resp.member_id.clone(),
             group_instance_id: None,
+            reason: None,
         }],
     };
     let mut body = BytesMut::new();
