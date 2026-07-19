@@ -2,7 +2,14 @@
 
 Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 4).
 
-- **Status**: not started
+- **Status**: **done** (2026-07-19, commit `b06655d`). One deviation from the plan
+  below: the KIP index ships **15 implemented / 6 partial** (not 16/5) — KIP-516 moved
+  to partial after the phase-3 sweep found broker-side wire propagation unshipped
+  (all-zero topic IDs on the wire; operator-side minting is fine). Verification all
+  green: gen-api-matrix idempotent, drift gate fails on diff + on bogus source
+  citations (66 pages scanned), matrix = 36 rows + 5 gap rows, KIP index = 29 rows,
+  linkcheck green. Baseline cited is `v0.2.4-preview` 21/20/0 (the plan's 21/20/0 on
+  `v0.2.0-preview` was superseded by the post-rename recapture).
 - **Depends on**: [Phase 1](./book-phase-1-scaffolding.md) (can proceed in parallel with 2–3,
   but lands after them to keep the one-commit-per-milestone sequence clean)
 - **Delivers as**: one commit on `main`
