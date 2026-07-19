@@ -23,7 +23,7 @@
 //!   gh #62 produce self-fence), and a `KubeLeaseElection` campaign
 //!   that runs the controller stack (heartbeat gRPC server +
 //!   `AssignmentLoop` + broker-set watcher + topic-change trigger)
-//!   only while this broker holds the `skafka-controller` Lease.
+//!   only while this broker holds the `kaas-controller` Lease.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ use kaas_broker::TopicRegistry;
 
 /// Name of the singleton controller Lease — same object earlier
 /// releases elect on, so a mixed-version rollout can't split-brain.
-const CONTROLLER_LEASE_NAME: &str = "skafka-controller";
+const CONTROLLER_LEASE_NAME: &str = "kaas-controller";
 
 /// Cadence of the txn-timeout reaper. Matches Apache Kafka's
 /// `transaction.abort.timed.out.transaction.cleanup.interval.ms`
@@ -815,7 +815,7 @@ fn spawn_cluster_tasks(
         }
     }
 
-    // Readiness gate (skafka.io/PartitionsReady): flip once the
+    // Readiness gate (kaas.rs/PartitionsReady): flip once the
     // first assignment.json applies, so the pod only joins the
     // Service after it knows its partition ownership. Retries with
     // backoff — needs `patch pods/status` RBAC.
@@ -971,7 +971,7 @@ async fn control_plane(
         });
     }
 
-    // Election: while we hold the skafka-controller Lease, run the
+    // Election: while we hold the kaas-controller Lease, run the
     // controller stack; on loss the leader token tears it down and
     // we re-enter candidacy. Awaited (not spawned) so the campaign's
     // release-on-shutdown completes before this runtime drops.

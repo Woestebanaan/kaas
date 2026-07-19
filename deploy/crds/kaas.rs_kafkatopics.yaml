@@ -2,9 +2,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: kafkatopics.skafka.io
+  name: kafkatopics.kaas.rs
 spec:
-  group: skafka.io
+  group: kaas.rs
   names:
     categories: []
     kind: KafkaTopic
@@ -29,7 +29,7 @@ spec:
             properties:
               config:
                 default: {}
-                description: Per-topic configuration knobs. All optional — unset = broker default. Field shapes mirror the operator-side JSON exactly so the broker's `sk_storage::TopicConfigFile` deserialises the same `.config.json` the operator writes.
+                description: Per-topic configuration knobs. All optional — unset = broker default. Field shapes mirror the operator-side JSON exactly so the broker's `kaas_storage::TopicConfigFile` deserialises the same `.config.json` the operator writes.
                 properties:
                   cleanupPolicy:
                     description: '`delete`, `compact`, or `compact,delete`. Empty → broker default (`delete`). Validation is operator-side via the regex.'

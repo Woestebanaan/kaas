@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[kube(
-    group = "skafka.io",
+    group = "kaas.rs",
     version = "v1alpha1",
     kind = "KafkaClusterAssignments",
     plural = "kafkaclusterassignments",
@@ -32,7 +32,7 @@ pub struct KafkaClusterAssignmentsSpec {}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaClusterAssignmentsStatus {
-    /// `leaseTransitions` of the `skafka-controller` Lease at write
+    /// `leaseTransitions` of the `kaas-controller` Lease at write
     /// time. Brokers reject `assignment.json` files with stale epochs.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub controller_epoch: i64,

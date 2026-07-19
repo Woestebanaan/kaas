@@ -88,7 +88,7 @@ broker:
     fsGroup: 0
     fsGroupChangePolicy: OnRootMismatch
   readinessGate:
-    # Adds the skafka.io/PartitionsReady readinessGate to broker pods. Required
+    # Adds the kaas.rs/PartitionsReady readinessGate to broker pods. Required
     # whenever the broker's ReadinessUpdater is expected to gate Endpoints
     # membership on initial partition acquisition. Disable for bare-bones smoke
     # tests where you just want the pod Ready as soon as the listener is up.
@@ -175,7 +175,7 @@ admin:
   # or sits OutOfSync forever.
   #
   # When `enabled: true`, runtime-created CRs are stamped with:
-  #   - argocd.argoproj.io/tracking-id: <app>:skafka.io/<kind>:<ns>/<name>
+  #   - argocd.argoproj.io/tracking-id: <app>:kaas.rs/<kind>:<ns>/<name>
   #     (claims the CR as part of the named Application — visible
   #     in the UI tree alongside the git-managed CRs)
   #   - argocd.argoproj.io/compare-options: <compareOptions>

@@ -2,9 +2,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: kafkaclusters.skafka.io
+  name: kafkaclusters.kaas.rs
 spec:
-  group: skafka.io
+  group: kaas.rs
   names:
     categories: []
     kind: KafkaCluster
@@ -134,7 +134,7 @@ spec:
                     properties:
                       port:
                         default: 9092
-                        description: 'The committed CRD ships `default: 9092` (verifiable at `deploy/crds/skafka.io_kafkaclusters.yaml:127`). Apiserver defaulting fills this when the chart omits it. Schemars renders the helper via `#[schemars(default = ...)]`.'
+                        description: 'The committed CRD ships `default: 9092` (verifiable at `deploy/crds/kaas.rs_kafkaclusters.yaml:127`). Apiserver defaulting fills this when the chart omits it. Schemars renders the helper via `#[schemars(default = ...)]`.'
                         format: int32
                         type: integer
                     type: object

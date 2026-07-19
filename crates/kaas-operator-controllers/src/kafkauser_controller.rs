@@ -369,7 +369,7 @@ impl KafkaUserReconciler {
         // without them the API server answers
         // `invalid object type: /, Kind=` (400).
         let body = serde_json::json!({
-            "apiVersion": "skafka.io/v1alpha1",
+            "apiVersion": "kaas.rs/v1alpha1",
             "kind": "KafkaUser",
             "status": status,
         });
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(owner.name, "alice");
         assert_eq!(owner.uid, "abc-uuid");
         assert_eq!(owner.controller, Some(true));
-        assert_eq!(owner.api_version, "skafka.io/v1alpha1");
+        assert_eq!(owner.api_version, "kaas.rs/v1alpha1");
     }
 
     #[test]

@@ -189,7 +189,7 @@ impl KafkaTopicReconciler {
         // `invalid object type: /, Kind=` (400) and every reconcile
         // hot-loops through the error policy.
         let body = serde_json::json!({
-            "apiVersion": "skafka.io/v1alpha1",
+            "apiVersion": "kaas.rs/v1alpha1",
             "kind": "KafkaTopic",
             "status": status,
         });

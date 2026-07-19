@@ -17,7 +17,7 @@ type=internal + first type=external entry in .Values.listeners.
 */ -}}
 {{- $internal := include "skafka.firstByType" (dict "ctx" . "type" "internal") | fromYaml -}}
 {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml -}}
-apiVersion: skafka.io/v1alpha1
+apiVersion: kaas.rs/v1alpha1
 kind: KafkaCluster
 metadata:
   name: {{ include "skafka.fullname" . }}

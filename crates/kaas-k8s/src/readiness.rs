@@ -1,7 +1,7 @@
 //! Pod-readiness gate plumbing.
 //!
 //! The Helm chart
-//! declares a custom `skafka.io/PartitionsReady` `readinessGate` on
+//! declares a custom `kaas.rs/PartitionsReady` `readinessGate` on
 //! each broker pod; the broker is not added to the headless
 //! `Service`'s endpoints until that gate flips to `True`. Driven by
 //! the broker's startup: once `Coordinator::apply_if_new` has
@@ -18,7 +18,7 @@ use thiserror::Error;
 /// The `Condition.Type` value the chart's `readinessGate` waits
 /// for. Defined here so the kube-backed impl + the chart agree on
 /// the exact string.
-pub const READINESS_CONDITION: &str = "skafka.io/PartitionsReady";
+pub const READINESS_CONDITION: &str = "kaas.rs/PartitionsReady";
 
 #[derive(Debug, Error)]
 pub enum ReadinessError {

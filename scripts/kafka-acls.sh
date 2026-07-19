@@ -48,7 +48,7 @@ PRINCIPAL="User:$USER_NAME"
 cleanup() {
   local rc=$?
   set +e
-  kubectl -n "$NAMESPACE" delete kafkausers.skafka.io "$USER_NAME" --ignore-not-found --wait=false >/dev/null 2>&1
+  kubectl -n "$NAMESPACE" delete kafkausers.kaas.rs "$USER_NAME" --ignore-not-found --wait=false >/dev/null 2>&1
   # Operator-owned output Secret (gh #136 auto-generated path).
   kubectl -n "$NAMESPACE" delete secret "$USER_NAME-kafka-credentials" --ignore-not-found --wait=false >/dev/null 2>&1
   rm -rf "$TMP"
@@ -58,7 +58,7 @@ trap cleanup EXIT
 
 echo ">> Applying temporary KafkaUser $NAMESPACE/$USER_NAME"
 kubectl apply -f - <<EOF
-apiVersion: skafka.io/v1alpha1
+apiVersion: kaas.rs/v1alpha1
 kind: KafkaUser
 metadata:
   name: $USER_NAME
@@ -72,7 +72,7 @@ EOF
 # needs Get to succeed (not Ready), so apply+brief readback is enough;
 # we don't gate on Status.Conditions[Ready].
 for _ in $(seq 1 30); do
-  if kubectl -n "$NAMESPACE" get kafkausers.skafka.io "$USER_NAME" >/dev/null 2>&1; then
+  if kubectl -n "$NAMESPACE" get kafkausers.kaas.rs "$USER_NAME" >/dev/null 2>&1; then
     break
   fi
   sleep 0.5
@@ -92,7 +92,7 @@ echo ">> Scenario 3: --list shows it"
 echo ">> Verify the CR was actually patched (gh #107 contract)"
 # The wire response could have been a stub-success; the test that
 # distinguishes real persistence from a phantom is checking the CR.
-kubectl -n "$NAMESPACE" get kafkausers.skafka.io "$USER_NAME" -o jsonpath='{.spec.authorization.acls}' \
+kubectl -n "$NAMESPACE" get kafkausers.kaas.rs "$USER_NAME" -o jsonpath='{.spec.authorization.acls}' \
   | grep -q "\"name\":\"$ACL_TOPIC\"" \
   || { echo "FAIL: ACL not present on KafkaUser/$USER_NAME spec" >&2; exit 1; }
 
@@ -104,7 +104,7 @@ echo "$out" | grep -q "$PRINCIPAL" && { echo "FAIL: ACL still present" >&2; exit
 
 # CR-side parity check for delete: the entry should be gone (or the
 # operations list emptied, which the writer normalises to entry-drop).
-remaining=$(kubectl -n "$NAMESPACE" get kafkausers.skafka.io "$USER_NAME" -o jsonpath='{.spec.authorization.acls}')
+remaining=$(kubectl -n "$NAMESPACE" get kafkausers.kaas.rs "$USER_NAME" -o jsonpath='{.spec.authorization.acls}')
 echo "$remaining" | grep -q "\"name\":\"$ACL_TOPIC\"" \
   && { echo "FAIL: ACL entry still on KafkaUser/$USER_NAME spec after --remove" >&2; exit 1; }
 

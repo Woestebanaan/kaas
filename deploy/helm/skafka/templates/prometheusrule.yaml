@@ -93,7 +93,7 @@ spec:
               controller. Brokers can still serve produce/fetch on existing
               assignments, but no rebalance, topic creation, or broker
               join/leave will be processed until election succeeds.
-              Check the kube Lease object skafka-controller and the broker
+              Check the kube Lease object kaas-controller and the broker
               pods' leader election logs.
 
         - alert: SkafkaBrokerCountMismatch

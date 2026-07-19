@@ -68,10 +68,10 @@ kubectl apply -f skafka/crds/
 # Or apply them straight from the repo at a specific ref:
 REF=v0.2.0-preview
 BASE=https://raw.githubusercontent.com/Woestebanaan/skafka/${REF}/deploy/crds
-for f in skafka.io_kafkaclusters.yaml \
-         skafka.io_kafkatopics.yaml \
-         skafka.io_kafkausers.yaml \
-         skafka.io_kafkaclusterassignments.yaml; do
+for f in kaas.rs_kafkaclusters.yaml \
+         kaas.rs_kafkatopics.yaml \
+         kaas.rs_kafkausers.yaml \
+         kaas.rs_kafkaclusterassignments.yaml; do
   kubectl apply -f "${BASE}/${f}"
 done
 ```
@@ -179,7 +179,7 @@ kubectl -n kafka port-forward svc/my-skafka-skafka 9092:9092 &
 
 # Create a topic:
 cat <<EOF | kubectl apply -f -
-apiVersion: skafka.io/v1alpha1
+apiVersion: kaas.rs/v1alpha1
 kind: KafkaTopic
 metadata:
   name: test

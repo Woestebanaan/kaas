@@ -48,11 +48,11 @@ fn gen_crds() -> Result<()> {
 
     type Renderer = fn() -> Result<String>;
     let entries: &[(&str, Renderer)] = &[
-        ("skafka.io_kafkaclusters.yaml", kafkacluster_yaml),
-        ("skafka.io_kafkatopics.yaml", kafkatopic_yaml),
-        ("skafka.io_kafkausers.yaml", kafkauser_yaml),
+        ("kaas.rs_kafkaclusters.yaml", kafkacluster_yaml),
+        ("kaas.rs_kafkatopics.yaml", kafkatopic_yaml),
+        ("kaas.rs_kafkausers.yaml", kafkauser_yaml),
         (
-            "skafka.io_kafkaclusterassignments.yaml",
+            "kaas.rs_kafkaclusterassignments.yaml",
             kafkaclusterassignments_yaml,
         ),
     ];

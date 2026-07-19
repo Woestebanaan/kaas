@@ -16,7 +16,7 @@ fn kafkatopic_crd_serialises() {
     let crd = KafkaTopic::crd();
     let yaml = serde_yaml::to_string(&crd).expect("crd serialises");
     assert!(yaml.contains("kind: CustomResourceDefinition"));
-    assert!(yaml.contains("name: kafkatopics.skafka.io"));
+    assert!(yaml.contains("name: kafkatopics.kaas.rs"));
     assert!(yaml.contains("partitions"));
     assert!(yaml.contains("topicId"));
 }
@@ -25,7 +25,7 @@ fn kafkatopic_crd_serialises() {
 fn kafkauser_crd_serialises() {
     let crd = KafkaUser::crd();
     let yaml = serde_yaml::to_string(&crd).expect("crd serialises");
-    assert!(yaml.contains("name: kafkausers.skafka.io"));
+    assert!(yaml.contains("name: kafkausers.kaas.rs"));
     assert!(yaml.contains("authentication"));
     assert!(yaml.contains("authorization"));
     assert!(yaml.contains("producerMaxByteRatePerBroker"));
@@ -35,7 +35,7 @@ fn kafkauser_crd_serialises() {
 fn kafkacluster_crd_serialises() {
     let crd = KafkaCluster::crd();
     let yaml = serde_yaml::to_string(&crd).expect("crd serialises");
-    assert!(yaml.contains("name: kafkaclusters.skafka.io"));
+    assert!(yaml.contains("name: kafkaclusters.kaas.rs"));
     // The two default ports we explicitly carry through schemars.
     assert!(yaml.contains("9092"), "internal port default present");
     assert!(yaml.contains("9093"), "external port default present");
@@ -45,7 +45,7 @@ fn kafkacluster_crd_serialises() {
 fn kafkaclusterassignments_crd_serialises() {
     let crd = KafkaClusterAssignments::crd();
     let yaml = serde_yaml::to_string(&crd).expect("crd serialises");
-    assert!(yaml.contains("name: kafkaclusterassignments.skafka.io"));
+    assert!(yaml.contains("name: kafkaclusterassignments.kaas.rs"));
     // Spec is intentionally empty; Status carries the real shape.
     assert!(yaml.contains("controllerEpoch"));
     assert!(yaml.contains("assignmentVersion"));
@@ -92,9 +92,9 @@ fn kafkatopic_effective_topic_name_falls_back_to_metadata_name() {
 
 #[test]
 fn group_version_constants_match_crd_attributes() {
-    assert_eq!(kaas_operator_api::GROUP, "skafka.io");
+    assert_eq!(kaas_operator_api::GROUP, "kaas.rs");
     assert_eq!(kaas_operator_api::VERSION, "v1alpha1");
     let yaml = serde_yaml::to_string(&KafkaTopic::crd()).expect("crd serialises");
-    assert!(yaml.contains("group: skafka.io"));
+    assert!(yaml.contains("group: kaas.rs"));
     assert!(yaml.contains("name: v1alpha1"));
 }

@@ -22,7 +22,7 @@ spec:
       {{- if .Values.broker.readinessGate.enabled }}
       # Pod only joins the headless service after all partition leases are held.
       readinessGates:
-        - conditionType: "skafka.io/PartitionsReady"
+        - conditionType: "kaas.rs/PartitionsReady"
       {{- end }}
       initContainers:
         - name: partition-init

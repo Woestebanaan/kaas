@@ -46,7 +46,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// dev / tests use [`LocalLeaseEpoch`].
 pub trait LeaseEpochSource: Send + Sync + 'static {
     /// Most recent `leaseTransitions` value observed for the
-    /// `skafka-controller` Lease. Files with a smaller
+    /// `kaas-controller` Lease. Files with a smaller
     /// `controller_epoch` are rejected by [`Coordinator::apply_if_new`].
     fn current_epoch(&self) -> i64;
 }

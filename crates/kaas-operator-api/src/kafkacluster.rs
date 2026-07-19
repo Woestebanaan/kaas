@@ -7,7 +7,7 @@
 //! certificate issuer ref).
 //!
 //! **`spec.replicas` is templated by the chart, not user-authored.**
-//! `deploy/helm/skafka/templates/kafkacluster.yaml` sets it from
+//! `deploy/helm/kaas/templates/kafkacluster.yaml` sets it from
 //! `.Values.broker.replicaCount`; day-2 replica changes flow via
 //! `helm upgrade`, not `kubectl edit kafkacluster`. The reconciler
 //! reads but never writes this field.
@@ -20,7 +20,7 @@ use crate::condition::Condition;
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[kube(
-    group = "skafka.io",
+    group = "kaas.rs",
     version = "v1alpha1",
     kind = "KafkaCluster",
     plural = "kafkaclusters",
@@ -65,7 +65,7 @@ pub struct KafkaClusterListeners {
 #[serde(rename_all = "camelCase")]
 pub struct InternalListener {
     /// The committed CRD ships `default: 9092` (verifiable at
-    /// `deploy/crds/skafka.io_kafkaclusters.yaml:127`). Apiserver
+    /// `deploy/crds/kaas.rs_kafkaclusters.yaml:127`). Apiserver
     /// defaulting fills this when the chart omits it. Schemars
     /// renders the helper via `#[schemars(default = ...)]`.
     #[serde(default = "default_internal_port")]

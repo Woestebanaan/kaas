@@ -44,7 +44,7 @@ pub enum KubeWatchError {
 }
 
 /// Lease-backed [`LeaseEpochSource`] — polls the
-/// `skafka-controller` Lease on a 1 s cadence and surfaces
+/// `kaas-controller` Lease on a 1 s cadence and surfaces
 /// `spec.leaseTransitions` as the current controller epoch.
 ///
 /// Phase 5 brokers read `current_epoch` on every
@@ -94,7 +94,7 @@ impl LeaseEpochSource for KubeLeaseEpoch {
     }
 }
 
-/// Poll the `skafka-controller` Lease on a 1 s cadence and update
+/// Poll the `kaas-controller` Lease on a 1 s cadence and update
 /// the supplied [`KubeLeaseEpoch`]. Returns when `cancel` fires.
 pub async fn run_lease_watch(
     client: Client,
@@ -224,7 +224,7 @@ fn convert_slice(slice: &EndpointSlice) -> EndpointSliceData {
 }
 
 /// Patch the broker pod's `Status.Conditions` to flip the
-/// `skafka.io/PartitionsReady` readinessGate.
+/// `kaas.rs/PartitionsReady` readinessGate.
 ///
 /// Returns `Ok(())` on the first successful patch; the caller can
 /// retry on failure.

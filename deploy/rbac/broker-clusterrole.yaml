@@ -6,7 +6,7 @@ rules:
   # Lease objects.
   #   v2.6: per-partition partition-leadership Leases (skafka-{topic}-{partition})
   #         + per-consumer-group coordinator Leases.
-  #   v3:   singleton skafka-controller Lease (cluster controller election).
+  #   v3:   singleton kaas-controller Lease (cluster controller election).
   # The verb set covers both shapes; the migration to the singleton happens in
   # Phase 4 without an RBAC change.
   - apiGroups: [coordination.k8s.io]
@@ -18,17 +18,17 @@ rules:
     verbs: [get, list, watch]
   # CRD watches — read-only. gh #135: kafkaacls + kafkausergroups removed;
   # ACLs live inline on KafkaUser.spec.authorization.
-  - apiGroups: [skafka.io]
+  - apiGroups: [kaas.rs]
     resources: [kafkatopics, kafkausers]
     verbs: [get, list, watch]
   # KafkaClusterAssignments — the controller broker writes this CR as a
   # best-effort fire-and-forget debug mirror of /data/__cluster/assignment.json.
   # All brokers can read; only the elected controller actually writes. Brokers
   # never read this CR for cluster state — the file on the PVC is authoritative.
-  - apiGroups: [skafka.io]
+  - apiGroups: [kaas.rs]
     resources: [kafkaclusterassignments]
     verbs: [get, list, watch, update]
-  - apiGroups: [skafka.io]
+  - apiGroups: [kaas.rs]
     resources: [kafkaclusterassignments/status]
     verbs: [get, update, patch]
   # Credentials and TLS secrets — own namespace only (enforced via RoleBinding)

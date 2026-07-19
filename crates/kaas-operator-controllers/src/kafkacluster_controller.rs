@@ -381,7 +381,7 @@ impl KafkaClusterReconciler {
             "app.kubernetes.io/managed-by".into(),
             "kaas-operator".into(),
         );
-        labels.insert("skafka.io/cluster".into(), cluster_name);
+        labels.insert("kaas.rs/cluster".into(), cluster_name);
 
         let mut desired = DynamicObject::new(name, &ar).within(ns);
         desired.metadata.labels = Some(labels.clone());
@@ -486,7 +486,7 @@ impl KafkaClusterReconciler {
         // without them the API server answers
         // `invalid object type: /, Kind=` (400).
         let body = serde_json::json!({
-            "apiVersion": "skafka.io/v1alpha1",
+            "apiVersion": "kaas.rs/v1alpha1",
             "kind": "KafkaCluster",
             "status": status,
         });
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(owner.kind, "KafkaCluster");
         assert_eq!(owner.uid, "uid-1");
         assert_eq!(owner.controller, Some(true));
-        assert_eq!(owner.api_version, "skafka.io/v1alpha1");
+        assert_eq!(owner.api_version, "kaas.rs/v1alpha1");
     }
 
     #[test]

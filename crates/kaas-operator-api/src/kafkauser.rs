@@ -21,7 +21,7 @@ use crate::condition::Condition;
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[kube(
-    group = "skafka.io",
+    group = "kaas.rs",
     version = "v1alpha1",
     kind = "KafkaUser",
     plural = "kafkausers",
