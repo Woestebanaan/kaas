@@ -2,7 +2,30 @@
 
 Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 2).
 
-- **Status**: not started
+- **Status**: **done** (2026-07-19). All 7 conversions + 4 new diagrams landed; every
+  diagram parse-validated against the mermaid version the book ships (11.6.0, bundled by
+  mdbook-mermaid 0.16.2). **Code-vs-ASCII divergences found during conversion** (diagrams
+  drawn to code truth; ARCHITECTURE.md + CLAUDE.md still carry the stale claims — fix in
+  the phase 3 prose sweep):
+  1. The known task-6 item: EndTxn markers go through the shared-PVC marker queue, not a
+     WriteTxnMarkers RPC. Fixed as planned.
+  2. The committer fsyncs **holding the partition mutex** (re-locks inside
+     `spawn_blocking`) — the "clone the log FD, sync outside the lock" description in
+     ARCHITECTURE.md/CLAUDE.md is not what `crates/kaas-storage/src/partition.rs` ships.
+  3. Fetch has **no sendfile/splice** — `engine.read` returns materialized `Bytes`;
+     `read_segment_ref` doesn't exist. (Also: `fetch.rs`'s file docstring still claims
+     read-uncommitted-only, but the code implements the KIP-98 LSO clamp + aborted list.)
+  4. The manifest is **not** written on segment roll (only partition open and
+     close/relinquish — `persist_state_locked` has exactly one caller).
+  5. The txn timeout reaper as wired calls the **ungated** `abort_overdue` (ownership gate
+     exists in the store API, production passes `None`) — CLAUDE.md claims it gates on
+     gh #91 slot ownership. Possible multi-broker N-way race; worth a code fix or a doc fix.
+  6. The deletionTimestamp-immediate topic-delete path lives in the **un-wired**
+     `TopicWatcher`; production closes FDs via kube `Delete` event → assignment recompute →
+     relinquish, and dirs are reclaimed by the operator **startup sweep** (the reconcile-time
+     `handle_not_found` cleanup methods are not wired into the reconcile stream).
+  7. `TxnState` carries `PrepareCommit`/`PrepareAbort` variants that are never visited
+     (prepare→complete collapses into one atomic slot-file transition).
 - **Depends on**: [Phase 1](./book-phase-1-scaffolding.md) (book builds green)
 - **Delivers as**: one commit on `main`
 - **Exit state**: every Part I chapter that needs a diagram has its mermaid version, verified
