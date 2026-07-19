@@ -127,3 +127,37 @@ Topic data survives the rename; only broker-*named* transients need care:
 R1 is plain commits on `main` — revert the series. R2's repo rename is reversible in settings
 (redirects then point the other way). R3 keeps the PVC and the exported CR yamls, so the old
 chart + old CRDs restore the previous cluster; the archived GHCR packages remain pullable.
+
+## Execution log (2026-07-19)
+
+**Done:** R0–R2 complete. R1 landed as 7 commits + one fix commit on `main` (fmt import
+order + two file renames the content sweep missed: the fence-log test fixture and
+`deploy/grafana/kaas-dashboard.json`). CI green on the renamed repo (rust/docker/helm).
+Repo renamed to `Woestebanaan/kaas`, board renamed in place, `v0.2.4-preview` tagged;
+`kaas-preview` / `kaas-operator-preview` / `charts/kaas` published to GHCR by the release
+workflow on the repointed ARC runners. Deviations from plan: env-var count was 41 (not 29);
+extra surfaces swept: OTLP metric names `skafka.*` → `kaas.*`, `deploy/rbac/`, chart
+prometheusrule, `deploy/grafana/`. This file keeps the old name as the record of the
+mapping and is allowlisted in the grep gate.
+
+**R3 (in flight):** k3s-cluster cutover commit pushed (`apps/skafka` → `apps/kaas`,
+CR apiVersions → `kaas.rs/v1alpha1`, appset conditional, kafbat-ui, Grafana dashboard).
+`skafka-data` PV (`pvc-4086de79…`) patched to **Retain**; CR backups exported. The `kaas`
+Application exists but is **not synced** — blocked on the two manual items below.
+
+**Blocked / manual:**
+1. **NAS outage** — 192.168.1.51 stopped serving NFS (all `skafka`/`strimzi` pods lost
+   their mounts days before the rename). Bring the NAS back before syncing the kaas app.
+2. **GHCR package visibility** — fresh packages default to private; ArgoCD's chart pull
+   and kubelet image pulls 403 until `kaas-preview`, `kaas-operator-preview`, and
+   `charts/kaas` are made public (github.com → profile → Packages → package settings →
+   Danger Zone → change visibility), or a pull secret is configured.
+3. **Archive old packages** — keep `skafka*` GHCR packages pullable (pinned digests) but
+   mark them deprecated in their descriptions; GHCR has no archive API.
+4. Optional: register `kaas.rs` (D4); rename the NAS-side directory
+   `k8s-volumes/skafka/skafka-data` is *not* needed (the retained PV points at it).
+
+**Remaining cutover sequence** (after 1+2): rebind PV into ns `kaas` (clear
+`spec.claimRef`, pre-create PVC `kaas-data` with `volumeName` pinned), clean stale
+transients on the PVC (`__cluster/assignment.json`, `fence_log/`, `marker_queue/`),
+sync the `kaas` app, then run R4 verification.
