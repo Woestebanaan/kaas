@@ -3758,8 +3758,10 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "kaas-codec",
  "kaas-operator-api",
  "kube",
+ "regex",
  "serde",
  "serde_yaml",
 ]

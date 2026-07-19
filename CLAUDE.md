@@ -26,6 +26,9 @@ cargo xtask ci                                           # fmt + clippy + test +
 cargo xtask gen-proto                                    # force-rebuild kaas-broker so tonic-build re-runs
 cargo xtask gen-crds                                     # regenerate deploy/crds/ + deploy/helm/kaas/crds/
 cargo xtask check-crd-drift                              # CI gate: gen-crds then git diff --exit-code
+cargo xtask gen-api-matrix                               # regenerate docs/src/compat/api-matrix.md from the codec registry
+cargo xtask check-docs-drift                             # CI gate: gen-api-matrix + git diff + book source-path scan
+cargo xtask docs                                         # mdbook build docs (--serve for live preview)
 ```
 
 `rust-toolchain.toml` pins Rust 1.85 (transitive `getrandom` needs edition 2024); `rustup` auto-installs it on first invocation. `protoc` is vendored via `protoc-bin-vendored` inside `kaas-broker/build.rs` — no `apt install protobuf-compiler` needed. Generated proto code is silenced from the workspace clippy gate via a module-scope `#![allow(...)]`.
@@ -34,7 +37,7 @@ cargo xtask check-crd-drift                              # CI gate: gen-crds the
 
 `.github/workflows/ci.yml` runs three jobs in parallel:
 
-- `rust` — `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace --all-features` + `cargo build --release --workspace --bins` + `cargo xtask check-crd-drift`.
+- `rust` — `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace --all-features` + `cargo build --release --workspace --bins` + `cargo xtask check-crd-drift` + `cargo xtask check-docs-drift`.
 - `docker` — buildx of `bins/kaas/Dockerfile` and `bins/kaas-operator/Dockerfile`, no push.
 - `helm` — `helm lint deploy/helm/kaas` + `helm template`.
 

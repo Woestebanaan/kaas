@@ -72,6 +72,13 @@ jobs:
       - name: CRD drift gate
         run: cargo xtask check-crd-drift
 
+      # Regenerates docs/src/compat/api-matrix.md from the codec
+      # registry and fails on any diff, then scans every book page for
+      # crates/… bins/… source citations that don't resolve. Keeps the
+      # book's compatibility claims pinned to the actual wire surface.
+      - name: Docs drift gate
+        run: cargo xtask check-docs-drift
+
   docker:
     runs-on: arc-runner-set
     steps:

@@ -1,5 +1,5 @@
 //! Repo-wide chores: `gen-proto`, `gen-crds`, `check-crd-drift`,
-//! `fmt-check`, `ci`, `docs`.
+//! `gen-api-matrix`, `check-docs-drift`, `fmt-check`, `ci`, `docs`.
 //!
 //! `gen-crds` (Phase 7) walks the four `kube-derive` types in
 //! `kaas-operator-api`, canonicalises the generated YAML to drop the
@@ -17,18 +17,23 @@ use anyhow::{bail, Context, Result};
 use kaas_operator_api::{KafkaCluster, KafkaClusterAssignments, KafkaTopic, KafkaUser};
 use kube::CustomResourceExt;
 
+mod api_matrix;
+
 fn main() -> Result<()> {
     let task = env::args().nth(1).unwrap_or_default();
     match task.as_str() {
         "gen-proto" => gen_proto(),
         "gen-crds" => gen_crds(),
         "check-crd-drift" => check_crd_drift(),
+        "gen-api-matrix" => api_matrix::generate(&repo_root()?),
+        "check-docs-drift" => check_docs_drift(),
         "fmt-check" => run(&["cargo", "fmt", "--check"]),
         "ci" => ci(),
         "docs" => docs(),
         other => Err(anyhow::anyhow!(
             "unknown xtask: {other:?}. \
-             try: gen-proto | gen-crds | check-crd-drift | fmt-check | ci | docs [--serve]"
+             try: gen-proto | gen-crds | check-crd-drift | gen-api-matrix | \
+             check-docs-drift | fmt-check | ci | docs [--serve]"
         )),
     }
 }
@@ -78,6 +83,18 @@ fn check_crd_drift() -> Result<()> {
         "deploy/crds",
         "deploy/helm/kaas/crds",
     ])
+}
+
+fn check_docs_drift() -> Result<()> {
+    let root = repo_root()?;
+    api_matrix::generate(&root)?;
+    run(&[
+        "git",
+        "diff",
+        "--exit-code",
+        "docs/src/compat/api-matrix.md",
+    ])?;
+    api_matrix::scan_source_paths(&root)
 }
 
 fn docs() -> Result<()> {
