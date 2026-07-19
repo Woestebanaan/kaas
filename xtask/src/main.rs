@@ -2,7 +2,7 @@
 //! `fmt-check`, `ci`.
 //!
 //! `gen-crds` (Phase 7) walks the four `kube-derive` types in
-//! `sk-operator-api`, canonicalises the generated YAML to drop the
+//! `kaas-operator-api`, canonicalises the generated YAML to drop the
 //! `controller-gen.kubebuilder.io/version` annotation (kube-rs
 //! doesn't run controller-gen, so the marker is meaningless), and
 //! writes the result to both `deploy/crds/` and
@@ -15,7 +15,7 @@ use std::{env, fs};
 
 use anyhow::{bail, Context, Result};
 use kube::CustomResourceExt;
-use sk_operator_api::{KafkaCluster, KafkaClusterAssignments, KafkaTopic, KafkaUser};
+use kaas_operator_api::{KafkaCluster, KafkaClusterAssignments, KafkaTopic, KafkaUser};
 
 fn main() -> Result<()> {
     let task = env::args().nth(1).unwrap_or_default();
@@ -33,10 +33,10 @@ fn main() -> Result<()> {
 }
 
 fn gen_proto() -> Result<()> {
-    // tonic-build runs inside sk-broker's build.rs. Forcing a rebuild
+    // tonic-build runs inside kaas-broker's build.rs. Forcing a rebuild
     // here means the generated code lands in target/ regardless of
     // cargo's incremental cache.
-    run(&["cargo", "build", "-p", "sk-broker"])
+    run(&["cargo", "build", "-p", "kaas-broker"])
 }
 
 fn gen_crds() -> Result<()> {

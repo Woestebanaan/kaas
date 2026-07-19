@@ -1322,6 +1322,309 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaas"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "bytes",
+ "chrono",
+ "hmac",
+ "kaas-auth",
+ "kaas-broker",
+ "kaas-codec",
+ "kaas-controller",
+ "kaas-coordinator",
+ "kaas-k8s",
+ "kaas-observability",
+ "kaas-protocol",
+ "kaas-storage",
+ "kube",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kaas-auth"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64",
+ "bytes",
+ "dashmap",
+ "hmac",
+ "kaas-observability",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.6",
+ "rcgen",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "x509-parser",
+]
+
+[[package]]
+name = "kaas-broker"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "kaas-auth",
+ "kaas-codec",
+ "kaas-coordinator",
+ "kaas-observability",
+ "kaas-operator-api",
+ "kaas-protocol",
+ "kaas-storage",
+ "kube",
+ "notify",
+ "parking_lot",
+ "prost",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
+ "tracing",
+]
+
+[[package]]
+name = "kaas-codec"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "proptest",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+]
+
+[[package]]
+name = "kaas-controller"
+version = "0.0.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "k8s-openapi",
+ "kaas-broker",
+ "kaas-coordinator",
+ "kaas-observability",
+ "kube",
+ "parking_lot",
+ "prost",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "twox-hash",
+]
+
+[[package]]
+name = "kaas-coordinator"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "kaas-observability",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "kaas-k8s"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "k8s-openapi",
+ "kaas-broker",
+ "kaas-coordinator",
+ "kaas-observability",
+ "kaas-operator-api",
+ "kube",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "kaas-observability"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "bytes",
+ "dashmap",
+ "futures",
+ "kaas-codec",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kaas-operator"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "futures",
+ "kaas-controller",
+ "kaas-observability",
+ "kaas-operator-api",
+ "kaas-operator-controllers",
+ "kube",
+ "rustls",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kaas-operator-api"
+version = "0.0.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
+name = "kaas-operator-controllers"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "hmac",
+ "k8s-openapi",
+ "kaas-observability",
+ "kaas-operator-api",
+ "kaas-storage",
+ "kube",
+ "pbkdf2",
+ "rand 0.8.6",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "kaas-protocol"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "kaas-auth",
+ "kaas-codec",
+ "kaas-observability",
+ "kaas-storage",
+ "parking_lot",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-test",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "kaas-storage"
+version = "0.0.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "kaas-observability",
+ "parking_lot",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "kaas-test-harness"
+version = "0.0.0"
+
+[[package]]
 name = "kqueue"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2577,309 +2880,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sk-auth"
-version = "0.0.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "base64",
- "bytes",
- "dashmap",
- "hmac",
- "parking_lot",
- "proptest",
- "rand 0.8.6",
- "rcgen",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "sk-observability",
- "subtle",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tracing",
- "x509-parser",
-]
-
-[[package]]
-name = "sk-broker"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "bytes",
- "chrono",
- "kube",
- "notify",
- "parking_lot",
- "prost",
- "protoc-bin-vendored",
- "serde",
- "serde_json",
- "sha1",
- "sk-auth",
- "sk-codec",
- "sk-coordinator",
- "sk-observability",
- "sk-operator-api",
- "sk-protocol",
- "sk-storage",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tonic-build",
- "tracing",
-]
-
-[[package]]
-name = "sk-codec"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "crc32c",
- "proptest",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
-]
-
-[[package]]
-name = "sk-controller"
-version = "0.0.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "chrono",
- "k8s-openapi",
- "kube",
- "parking_lot",
- "prost",
- "serde",
- "serde_json",
- "sk-broker",
- "sk-coordinator",
- "sk-observability",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tracing",
- "twox-hash",
-]
-
-[[package]]
-name = "sk-coordinator"
-version = "0.0.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "bytes",
- "dashmap",
- "parking_lot",
- "serde",
- "serde_json",
- "sk-observability",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "sk-k8s"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "k8s-openapi",
- "kube",
- "parking_lot",
- "serde",
- "serde_json",
- "sk-broker",
- "sk-coordinator",
- "sk-observability",
- "sk-operator-api",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "sk-observability"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "async-trait",
- "axum",
- "bytes",
- "dashmap",
- "futures",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "parking_lot",
- "serde",
- "serde_json",
- "sk-codec",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "sk-operator-api"
-version = "0.0.0"
-dependencies = [
- "k8s-openapi",
- "kube",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
-]
-
-[[package]]
-name = "sk-operator-controllers"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "hmac",
- "k8s-openapi",
- "kube",
- "pbkdf2",
- "rand 0.8.6",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "sk-observability",
- "sk-operator-api",
- "sk-storage",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "sk-protocol"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "parking_lot",
- "sk-auth",
- "sk-codec",
- "sk-observability",
- "sk-storage",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-test",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "sk-storage"
-version = "0.0.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "bytes",
- "dashmap",
- "parking_lot",
- "proptest",
- "serde",
- "serde_json",
- "sk-observability",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "sk-test-harness"
-version = "0.0.0"
-
-[[package]]
-name = "skafka"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "bytes",
- "chrono",
- "hmac",
- "kube",
- "rcgen",
- "rustls",
- "rustls-pemfile",
- "sha2",
- "sk-auth",
- "sk-broker",
- "sk-codec",
- "sk-controller",
- "sk-coordinator",
- "sk-k8s",
- "sk-observability",
- "sk-protocol",
- "sk-storage",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tonic",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "skafka-operator"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "futures",
- "kube",
- "rustls",
- "sk-controller",
- "sk-observability",
- "sk-operator-api",
- "sk-operator-controllers",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3758,10 +3758,10 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "kaas-operator-api",
  "kube",
  "serde",
  "serde_yaml",
- "sk-operator-api",
 ]
 
 [[package]]

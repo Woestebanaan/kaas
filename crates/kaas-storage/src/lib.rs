@@ -1,0 +1,59 @@
+//! kaas-storage — the DiskStorageEngine.
+//!
+//! # Byte-opacity contract
+//!
+//! Record-batch bytes flow through `kaas-storage` as `bytes::Bytes` —
+//! never decoded into a `Record` struct. The only module allowed to
+//! inspect record contents is the log-compactor (workstream G,
+//! follow-up); it bumps the `kaas_codec::tripwires` counters with
+//! `site = "compactor"` so the byte-opacity integration test (which
+//! exercises Produce/Fetch only) keeps both counters at zero.
+//!
+//! # Initial slice (Phase 2 commit 1)
+//!
+//! - [`fs`] / [`atomic_write`] / [`manifest`] / [`topicconfig`] — workstream A
+//! - [`segment`] — workstream B-minimal (filename helpers + [`segment::SegmentMeta`])
+//! - [`idempotence`] / [`producer_snapshot`] — workstream C
+//!
+//! The partition core ([`partition`]), `DiskStorageEngine` ([`engine`]),
+//! recovery, cleaner, and compactor land in follow-up commits per the
+//! Phase 2 plan.
+
+pub mod atomic_write;
+pub mod cleaner;
+pub mod disk;
+pub mod engine;
+pub mod errors;
+pub mod fs;
+pub mod idempotence;
+pub mod manifest;
+pub mod memory;
+pub mod partition;
+pub mod producer_snapshot;
+pub mod segment;
+pub mod topicconfig;
+pub mod txn_index;
+
+pub use cleaner::{FixedPolicySource, PolicySource, RetentionCleaner, RetentionPolicy};
+pub use disk::DiskStorageEngine;
+pub use engine::StorageEngine;
+pub use errors::StorageError;
+pub use fs::{Fs, RealFs};
+pub use idempotence::{
+    parse_batch_producer_info, parse_batch_txn_info, BatchProducerInfo, BatchTxnInfo, Outcome,
+    ProducerEntry, ProducerStates, RecentBatch, RING_SIZE,
+};
+pub use manifest::Manifest;
+pub use memory::{MemoryStorage, MEMORY_DATA_DIR};
+pub use partition::{Partition, PartitionConfig, ReadSnapshot};
+pub use producer_snapshot::{
+    read_producer_snapshot, write_producer_snapshot, ProducerSnapshot, ProducerSnapshotEntry,
+    PRODUCER_SNAPSHOT_FILENAME, PRODUCER_SNAPSHOT_VERSION,
+};
+pub use segment::{
+    legacy_segment_log_path, list_segments, parse_batch_offsets, parse_segment_stem, read_batches,
+    scan_high_watermark, search_index, search_index_bytes, segment_index_path, segment_log_path,
+    ActiveSegment, RolledTail, SegmentMeta, INDEX_ENTRY_SIZE,
+};
+pub use topicconfig::{read_topic_config, write_topic_config, TopicConfigFile};
+pub use txn_index::{AbortedTxn, AbortedTxnIndex, OpenTxnIndex};

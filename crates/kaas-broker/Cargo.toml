@@ -1,0 +1,57 @@
+[package]
+name         = "kaas-broker"
+version      = "0.0.0"
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish      = false
+description  = "Broker glue: Coordinator (assignment.json watcher), takeover, heartbeat client."
+
+[dependencies]
+anyhow         = { workspace = true }
+arc-swap       = { workspace = true }
+async-trait    = { workspace = true }
+bytes          = { workspace = true }
+chrono         = { workspace = true }
+notify         = { workspace = true }
+parking_lot    = { workspace = true }
+prost          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+sha1           = { workspace = true }
+kube           = { workspace = true, optional = true }
+kaas-auth          = { path = "../kaas-auth" }
+kaas-codec         = { path = "../kaas-codec" }
+kaas-coordinator   = { path = "../kaas-coordinator" }
+kaas-observability = { workspace = true }
+kaas-operator-api  = { path = "../kaas-operator-api", optional = true }
+kaas-protocol      = { path = "../kaas-protocol" }
+kaas-storage       = { path = "../kaas-storage" }
+thiserror      = { workspace = true }
+tokio          = { workspace = true }
+tokio-stream   = "0.1"
+tokio-util     = { workspace = true }
+tonic          = { workspace = true }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+kaas-auth  = { path = "../kaas-auth", features = ["test-helpers"] }
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+
+[build-dependencies]
+tonic-build         = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
+[features]
+# `cr-writer` enables the kube-backed TopicCRWriter used by the
+# Phase 7 admin handlers (CreatePartitions, IncrementalAlterConfigs).
+# Off by default so the broker can be built without kube-rs in
+# environments that don't need the K8s admin write path (the
+# bins/kaas binary turns it on; tests don't).
+default   = []
+cr-writer = ["dep:kube", "dep:kaas-operator-api"]
+
+[lints]
+workspace = true

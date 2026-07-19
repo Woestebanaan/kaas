@@ -1,20 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/sk-codec",
-    "crates/sk-protocol",
-    "crates/sk-storage",
-    "crates/sk-coordinator",
-    "crates/sk-broker",
-    "crates/sk-controller",
-    "crates/sk-auth",
-    "crates/sk-k8s",
-    "crates/sk-observability",
-    "crates/sk-operator-api",
-    "crates/sk-operator-controllers",
-    "crates/sk-test-harness",
-    "bins/skafka",
-    "bins/skafka-operator",
+    "crates/kaas-codec",
+    "crates/kaas-protocol",
+    "crates/kaas-storage",
+    "crates/kaas-coordinator",
+    "crates/kaas-broker",
+    "crates/kaas-controller",
+    "crates/kaas-auth",
+    "crates/kaas-k8s",
+    "crates/kaas-observability",
+    "crates/kaas-operator-api",
+    "crates/kaas-operator-controllers",
+    "crates/kaas-test-harness",
+    "bins/kaas",
+    "bins/kaas-operator",
     "xtask",
 ]
 
@@ -93,18 +93,18 @@ tempfile       = "3.14"
 wiremock       = "0.6"
 
 # internal crates referenced by path
-sk-codec                = { path = "crates/sk-codec" }
-sk-protocol             = { path = "crates/sk-protocol" }
-sk-storage              = { path = "crates/sk-storage" }
-sk-coordinator          = { path = "crates/sk-coordinator" }
-sk-broker               = { path = "crates/sk-broker" }
-sk-controller           = { path = "crates/sk-controller" }
-sk-auth                 = { path = "crates/sk-auth" }
-sk-k8s                  = { path = "crates/sk-k8s" }
-sk-observability        = { path = "crates/sk-observability" }
-sk-operator-api         = { path = "crates/sk-operator-api" }
-sk-operator-controllers = { path = "crates/sk-operator-controllers" }
-sk-test-harness         = { path = "crates/sk-test-harness" }
+kaas-codec                = { path = "crates/kaas-codec" }
+kaas-protocol             = { path = "crates/kaas-protocol" }
+kaas-storage              = { path = "crates/kaas-storage" }
+kaas-coordinator          = { path = "crates/kaas-coordinator" }
+kaas-broker               = { path = "crates/kaas-broker" }
+kaas-controller           = { path = "crates/kaas-controller" }
+kaas-auth                 = { path = "crates/kaas-auth" }
+kaas-k8s                  = { path = "crates/kaas-k8s" }
+kaas-observability        = { path = "crates/kaas-observability" }
+kaas-operator-api         = { path = "crates/kaas-operator-api" }
+kaas-operator-controllers = { path = "crates/kaas-operator-controllers" }
+kaas-test-harness         = { path = "crates/kaas-test-harness" }
 
 [workspace.lints.clippy]
 unwrap_used              = "deny"

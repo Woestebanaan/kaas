@@ -12,7 +12,7 @@ description  = "Repo-wide chores: gen-proto, gen-crds, check-crd-drift, ci."
 anyhow          = { workspace = true }
 serde           = { workspace = true }
 serde_yaml      = "0.9"
-sk-operator-api = { workspace = true }
+kaas-operator-api = { workspace = true }
 kube            = { workspace = true }
 
 [lints]

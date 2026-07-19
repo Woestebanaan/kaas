@@ -1,0 +1,49 @@
+[package]
+name         = "kaas"
+version      = "0.0.0"
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+publish      = false
+description  = "kaas broker binary."
+
+[[bin]]
+name = "kaas"
+path = "src/main.rs"
+
+[dependencies]
+anyhow             = { workspace = true }
+async-trait        = { workspace = true }
+axum               = { workspace = true }
+bytes              = { workspace = true }
+rustls             = { workspace = true }
+rustls-pemfile     = { workspace = true }
+kaas-auth            = { path = "../../crates/kaas-auth" }
+kaas-broker          = { path = "../../crates/kaas-broker", features = ["cr-writer"] }
+kube               = { workspace = true }
+kaas-codec           = { path = "../../crates/kaas-codec" }
+kaas-controller      = { path = "../../crates/kaas-controller" }
+kaas-coordinator     = { path = "../../crates/kaas-coordinator" }
+kaas-k8s             = { path = "../../crates/kaas-k8s" }
+chrono             = { workspace = true }
+kaas-observability   = { path = "../../crates/kaas-observability" }
+kaas-protocol        = { path = "../../crates/kaas-protocol" }
+kaas-storage         = { path = "../../crates/kaas-storage" }
+tokio              = { workspace = true }
+tokio-rustls       = { workspace = true }
+tokio-util         = { workspace = true }
+tonic              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+base64     = { workspace = true }
+hmac       = { workspace = true }
+rcgen      = { workspace = true }
+sha2       = { workspace = true }
+kaas-auth    = { path = "../../crates/kaas-auth", features = ["test-helpers"] }
+tempfile   = { workspace = true }
+
+[lints]
+workspace = true
