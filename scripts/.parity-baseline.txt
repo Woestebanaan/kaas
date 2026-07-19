@@ -1,65 +1,63 @@
-# skafka-scripts parity baseline against Rust broker v0.2.0-preview.
-# Captured 2026-07-14 (phase 9 A.1 / bake T0, gh #152) on the
-# production 3-broker shape (NFS-RWX PVC, replicaCount 3, flavor knob).
+# kaas-scripts parity baseline against Rust broker v0.2.4-preview.
+# Captured 2026-07-19 (post skafka→kaas rename, R4 verification) on the
+# production 3-broker shape (NFS-RWX PVC, replicaCount 3, flavor knob),
+# against the retained pre-rename data volume.
 #
 # Format: <script> <RESULT> [reason]
-# RESULT ∈ {PASS, SKIP, FAIL}. Rerun the suite via the skafka-scripts
+# RESULT ∈ {PASS, SKIP, FAIL}. Rerun the suite via the kaas-scripts
 # skill; assert every row's RESULT matches. Any downgrade (PASS → FAIL,
 # PASS → SKIP that isn't a new documented skip) is a regression.
 #
-# 21 PASS / 20 SKIP / 0 FAIL — identical totals to the Go control run
-# (.parity-baseline-go.txt), i.e. full script-level Go parity. The 12
-# FAILs in the previous baseline (v0.1.179) plus the 8 remaining on
-# v0.1.190 are all closed by the fix set shipped in v0.2.0-preview:
-# multi-broker leader ownership (v0.1.184–190), LeaveGroup v5 KIP-800
-# reason, ACL wire trio + KafkaUser ACL writer, DeleteTopics,
-# DeleteRecords, DescribeLogDirs, DescribeConfigs BROKER resource,
-# gh #86 synthetic CR names, max.message.bytes enforcement, operator
-# status SSA TypeMeta + CRD Condition-schema regeneration.
+# 21 PASS / 20 SKIP / 0 FAIL — identical totals to the v0.2.0-preview
+# baseline: full script-level parity preserved across the rename.
+# kafka-verifiable-consumer.sh timed out once in the sweep (transient
+# NotLeaderOrFollower on a fresh topic ~2 min after broker restart,
+# assignment-propagation lag) and passed cleanly on rerun.
 #
-# 20 SKIPs cover skafka's documented non-goals (KRaft, share-groups,
-# replicas, JMX, KIP-714). See per-script `_common.sh skip` reasons.
-
+# Cutover note: retained partition manifests carry per-partition
+# assignment epochs (move counters). Deleting __cluster/assignment.json
+# resets the counters to 1, so every append to retained topics is
+# fenced as a stale-leader write. Fixed by bumping the per-partition
+# "epoch" fields in assignment.json above the retained maximum while
+# the brokers were down. See docs/rename-plan.md execution log.
 kafka-acls.sh                            PASS
 kafka-broker-api-versions.sh             PASS
-kafka-client-metrics.sh                  SKIP   # KIP-714 client metrics subscriptions; broker support not yet implemented
+kafka-client-metrics.sh                  SKIP   # manages KIP-714 client metrics subscriptions; broker support not yet implemented
 kafka-cluster.sh                         PASS
 kafka-configs.sh                         PASS
 kafka-console-consumer.sh                PASS
 kafka-console-producer.sh                PASS
-kafka-console-share-consumer.sh          SKIP   # KIP-932 share-group console consumer (Kafka 4.0+)
+kafka-console-share-consumer.sh          SKIP   # KIP-932 share-group console consumer (Kafka 4.0+); out of 3.7 parity scope
 kafka-consumer-groups.sh                 PASS
 kafka-consumer-perf-test.sh              PASS
-kafka-delegation-tokens.sh               SKIP   # delegation tokens; skafka's auth has no delegation-token plane
+kafka-delegation-tokens.sh               SKIP   # manages delegation tokens; kaas's auth has no delegation-token plane
 kafka-delete-records.sh                  PASS
-kafka-dump-log.sh                        SKIP   # requires SEGMENT= env pointing at a broker-pod-local segment
+kafka-dump-log.sh                        SKIP   # set SEGMENT=/data/<topic>/<partition>/<...>.log to a real segment file. Inside the broker pod: kubectl -n kaas exec sts/kaas -- ls /data/
 kafka-e2e-latency.sh                     PASS
-kafka-features.sh                        SKIP   # KRaft feature levels; non-goal
+kafka-features.sh                        SKIP   # manages KRaft feature levels; not applicable (non-goal)
 kafka-get-offsets.sh                     PASS
-kafka-groups.sh                          SKIP   # unified groups tool (Kafka 4.0+); use kafka-consumer-groups.sh
-kafka-jmx.sh                             SKIP   # JMX; skafka emits OTLP metrics
-kafka-leader-election.sh                 SKIP   # manual leader election; skafka uses K8s Leases
+kafka-groups.sh                          SKIP   # unified groups tool (Kafka 4.0+); use kafka-consumer-groups.sh for 3.7 parity
+kafka-jmx.sh                             SKIP   # JMX query tool; kaas emits OTLP metrics — query Prometheus directly
+kafka-leader-election.sh                 SKIP   # manual leader election for replicated partitions; kaas uses K8s Leases (non-goal)
 kafka-log-dirs.sh                        PASS
-kafka-metadata-quorum.sh                 SKIP   # KRaft; non-goal
-kafka-metadata-shell.sh                  SKIP   # KRaft metadata log; non-goal
+kafka-metadata-quorum.sh                 SKIP   # inspects KRaft quorum state; kaas uses K8s Leases instead (non-goal)
+kafka-metadata-shell.sh                  SKIP   # shells into a KRaft metadata log; kaas has no such log (non-goal)
 kafka-producer-perf-test.sh              PASS
-kafka-reassign-partitions.sh             SKIP   # manual partition reassignment; skafka balancer drives this
-kafka-replica-verification.sh            SKIP   # replicas; non-goal
+kafka-reassign-partitions.sh             SKIP   # manual partition reassignment; kaas's controller balancer drives this automatically
+kafka-replica-verification.sh            SKIP   # verifies follower-replica consistency; kaas has no replicas (non-goal)
 kafka-restart-resilience.sh              PASS
-kafka-run-class.sh                       SKIP   # generic JVM class runner; not broker-facing
-kafka-server-start.sh                    SKIP   # Apache broker JVM; skafka is a separate binary
-kafka-server-stop.sh                     SKIP   # same
-kafka-share-consumer-perf-test.sh        SKIP   # KIP-932 share groups (Kafka 4.0+)
-kafka-share-groups.sh                    SKIP   # KIP-932 share groups (Kafka 4.0+)
-kafka-storage.sh                         SKIP   # KRaft metadata storage; non-goal
+kafka-run-class.sh                       SKIP   # generic JVM class runner; not a broker-facing tool
+kafka-server-start.sh                    SKIP   # starts the Apache Kafka broker JVM; kaas is a separate process managed by StatefulSet
+kafka-server-stop.sh                     SKIP   # stops the Apache Kafka broker JVM; not applicable to the kaas binary
+kafka-share-consumer-perf-test.sh        SKIP   # KIP-932 share groups (Kafka 4.0+); out of 3.7 parity scope
+kafka-share-groups.sh                    SKIP   # KIP-932 share groups (Kafka 4.0+); out of 3.7 parity scope
+kafka-storage.sh                         SKIP   # formats KRaft metadata storage; kaas does not use KRaft (non-goal)
 kafka-streams-application-reset.sh       PASS
-kafka-streams-groups.sh                  SKIP   # KIP-848 Streams-group admin; out of scope
+kafka-streams-groups.sh                  SKIP   # Streams-group admin (post-3.7 / KIP-848 ecosystem); out of scope
 kafka-topics.sh                          PASS
 kafka-transactions.sh                    PASS
 kafka-txn-coordinator.sh                 PASS
 kafka-txn-timeout.sh                     PASS
 kafka-verifiable-consumer.sh             PASS
 kafka-verifiable-producer.sh             PASS
-kafka-verifiable-share-consumer.sh       SKIP   # KIP-932 verifiable share consumer (Kafka 4.0+)
-
-# Totals: 21 PASS, 20 SKIP, 0 FAIL.
+kafka-verifiable-share-consumer.sh       SKIP   # KIP-932 verifiable share consumer (Kafka 4.0+); out of 3.7 parity scope

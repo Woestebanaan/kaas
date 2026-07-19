@@ -161,3 +161,33 @@ Application exists but is **not synced** — blocked on the two manual items bel
 `spec.claimRef`, pre-create PVC `kaas-data` with `volumeName` pinned), clean stale
 transients on the PVC (`__cluster/assignment.json`, `fence_log/`, `marker_queue/`),
 sync the `kaas` app, then run R4 verification.
+
+## R3/R4 completion (2026-07-19, later)
+
+NAS restored; cutover completed: PV rebound as `kaas-data` in ns `kaas` (volumeName
+pinned in the kustomize overlay — gh k3s-cluster commit), old CRDs/namespace removed,
+`kaas` app synced, 3/3 brokers Ready on the retained data.
+
+**Post-cutover incident**: R3.4's "delete assignment.json" was wrong in a way this doc's
+own model missed — per-partition assignment epochs are *move counters* (`prev+1`, reset
+to 1 with no prev file), and retained manifests remembered counters up to 71, so every
+append to a retained topic was fenced (`epoch mismatch` → client NotLeaderOrFollower).
+Recovered by bumping the per-partition `"epoch"` fields to 200 in assignment.json with
+brokers scaled to 0. Filed as gh#197 (with the empty assignments-CR-mirror observation).
+
+**R4 results**:
+- CI green on the renamed repo (ARC runners repointed, tag-driven release published).
+- Parity sweep: **21 PASS / 20 SKIP / 0 FAIL** — totals identical to v0.2.0-preview;
+  `scripts/.parity-baseline.txt` regenerated. One transient timeout
+  (kafka-verifiable-consumer, fresh-topic assignment lag ~2 min after restart) passed
+  on rerun.
+- Producer bench: ~101 MB/s aggregate (5×~20 MB/s) vs the 46 MB/s band — well above;
+  NAS was otherwise idle (strimzi still down post-outage).
+- EOS smoke: **failed, pre-existing** — live multi-broker transactional produce dies
+  with fatal OutOfOrderSequence at the 2nd–3rd txn boundary even on a fresh
+  single-partition topic (gh#195); PID counter reset-on-boot also collides with
+  retained producer snapshots (gh#196). Never rename-related: live EOS had never been
+  exercised (streams jobs run at_least_once; eos_v2.rs is in-process and passes).
+- Final grep gate clean (allowlist: perf-results, both parity baselines, this file).
+
+The book (phase 1) is unblocked.
