@@ -121,3 +121,46 @@ jobs:
         run: helm lint deploy/helm/kaas
       - name: helm template
         run: helm template test-release deploy/helm/kaas > /tmp/rendered.yaml
+
+  docs:
+    runs-on: arc-runner-set
+    env:
+      # mdbook stays on 0.4.x: mdbook-linkcheck 0.7.7 and
+      # mdbook-mermaid >= 0.17.0 target different mdbook major lines
+      # (0.17.0 is built against the mdbook 0.5 preprocessor protocol
+      # and fails against 0.4 — verified 2026-07-19), so 0.16.2 is the
+      # newest mermaid preprocessor that works here. Bump all three
+      # together when moving to mdbook 0.5.
+      MDBOOK_VERSION: v0.4.52
+      MDBOOK_MERMAID_VERSION: v0.16.2
+      MDBOOK_LINKCHECK_VERSION: v0.7.7
+    steps:
+      - name: Install curl + unzip (minimal runner image)
+        # Same caveat as the `rust` job: the ARC runner image is bare.
+        # Pinned release binaries via curl beat `cargo install` by
+        # minutes on a cold runner.
+        run: |
+          if command -v apt-get >/dev/null; then
+            if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+            $SUDO apt-get update
+            $SUDO apt-get install -y --no-install-recommends \
+              curl ca-certificates unzip
+          fi
+
+      - uses: actions/checkout@v6
+
+      - name: Install mdbook + mdbook-mermaid + mdbook-linkcheck (pinned)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/mdbook-${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          curl -sSL "https://github.com/badboy/mdbook-mermaid/releases/download/${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          curl -sSL -o /tmp/mdbook-linkcheck.zip \
+            "https://github.com/Michael-F-Bryan/mdbook-linkcheck/releases/download/${MDBOOK_LINKCHECK_VERSION}/mdbook-linkcheck.x86_64-unknown-linux-gnu.zip"
+          unzip -o -d "$HOME/.local/bin" /tmp/mdbook-linkcheck.zip mdbook-linkcheck
+          chmod +x "$HOME/.local/bin/mdbook-linkcheck"
+
+      - name: mdbook build (html + linkcheck backends)
+        run: mdbook build docs

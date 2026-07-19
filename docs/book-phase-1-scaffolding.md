@@ -2,7 +2,10 @@
 
 Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 1).
 
-- **Status**: not started
+- **Status**: **done** (2026-07-19). Pins landed as mdbook v0.4.52 + mdbook-mermaid
+  **v0.16.2** + mdbook-linkcheck v0.7.7 — the 0.17.0 mermaid pin below turned out to be
+  built against the mdbook 0.5 preprocessor protocol (fails against 0.4.x with "Unable to
+  parse the input"); 0.16.2 is the newest 0.4-compatible release.
 - **Depends on**: nothing
 - **Delivers as**: one commit on `main`
 - **Exit state**: the book builds green end-to-end, locally and in CI, with stub content.

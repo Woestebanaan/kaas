@@ -2,6 +2,9 @@
 /target/
 **/*.rs.bk
 
+# mdbook build output
+docs/book/
+
 # Editor / OS
 .DS_Store
 .idea/

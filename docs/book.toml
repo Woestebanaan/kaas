@@ -1,0 +1,24 @@
+[book]
+title = "kaas — a Kafka-compatible broker for Kubernetes"
+authors = ["Benjamin Smeding"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/Woestebanaan/kaas"
+edit-url-template = "https://github.com/Woestebanaan/kaas/edit/main/docs/{path}"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.search]
+enable = true
+
+[output.html.fold]
+enable = true
+
+[output.linkcheck]
+follow-web-links = false
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

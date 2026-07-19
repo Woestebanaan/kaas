@@ -1,5 +1,5 @@
 //! Repo-wide chores: `gen-proto`, `gen-crds`, `check-crd-drift`,
-//! `fmt-check`, `ci`.
+//! `fmt-check`, `ci`, `docs`.
 //!
 //! `gen-crds` (Phase 7) walks the four `kube-derive` types in
 //! `kaas-operator-api`, canonicalises the generated YAML to drop the
@@ -25,9 +25,10 @@ fn main() -> Result<()> {
         "check-crd-drift" => check_crd_drift(),
         "fmt-check" => run(&["cargo", "fmt", "--check"]),
         "ci" => ci(),
+        "docs" => docs(),
         other => Err(anyhow::anyhow!(
             "unknown xtask: {other:?}. \
-             try: gen-proto | gen-crds | check-crd-drift | fmt-check | ci"
+             try: gen-proto | gen-crds | check-crd-drift | fmt-check | ci | docs [--serve]"
         )),
     }
 }
@@ -77,6 +78,16 @@ fn check_crd_drift() -> Result<()> {
         "deploy/crds",
         "deploy/helm/kaas/crds",
     ])
+}
+
+fn docs() -> Result<()> {
+    // Needs mdbook + mdbook-mermaid + mdbook-linkcheck on PATH; CI
+    // pins the versions in the `docs` job of ci.yml.
+    if env::args().nth(2).as_deref() == Some("--serve") {
+        run(&["mdbook", "serve", "docs"])
+    } else {
+        run(&["mdbook", "build", "docs"])
+    }
 }
 
 fn ci() -> Result<()> {
