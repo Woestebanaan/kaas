@@ -1,8 +1,8 @@
 //! Cross-broker COMMIT / ABORT marker dispatch via the shared PVC.
 //!
-//! Skafka's answer to Apache's `WriteTxnMarkers` RPC (gh #175). Where
+//! Kaas's answer to Apache's `WriteTxnMarkers` RPC (gh #175). Where
 //! Apache uses a Kafka-wire RPC from the txn coordinator broker to
-//! each partition's leader, skafka writes one JSON file per
+//! each partition's leader, kaas writes one JSON file per
 //! `(pid, epoch, target_broker)` under
 //! `<data_dir>/__cluster/marker_queue/to-<target>/`. Every broker
 //! polls its own `to-<self>/` directory via `MarkerWatcher` and
@@ -20,7 +20,7 @@
 //!
 //! Cross-broker latency is bounded by the watcher's poll interval
 //! (2 s default). `commitTransaction()` on a Java producer waits
-//! seconds anyway; skafka returns success from `EndTxn` as soon as
+//! seconds anyway; kaas returns success from `EndTxn` as soon as
 //! the queue entry is written, not when the marker lands.
 
 use std::fs;
@@ -148,8 +148,8 @@ mod tests {
     fn enqueue_then_list_roundtrips() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        q.enqueue("skafka-1", &sample_entry()).unwrap();
-        let pending = q.list("skafka-1").unwrap();
+        q.enqueue("kaas-1", &sample_entry()).unwrap();
+        let pending = q.list("kaas-1").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, "42-3.json");
         assert_eq!(pending[0].1, sample_entry());
@@ -159,21 +159,21 @@ mod tests {
     fn enqueue_is_idempotent_on_same_pid_epoch() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        q.enqueue("skafka-1", &sample_entry()).unwrap();
+        q.enqueue("kaas-1", &sample_entry()).unwrap();
         // Second enqueue with the same (pid, epoch) overwrites —
         // not a second file.
-        q.enqueue("skafka-1", &sample_entry()).unwrap();
-        assert_eq!(q.list("skafka-1").unwrap().len(), 1);
+        q.enqueue("kaas-1", &sample_entry()).unwrap();
+        assert_eq!(q.list("kaas-1").unwrap().len(), 1);
     }
 
     #[test]
     fn different_targets_get_separate_inboxes() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        q.enqueue("skafka-1", &sample_entry()).unwrap();
-        q.enqueue("skafka-2", &sample_entry()).unwrap();
-        assert_eq!(q.list("skafka-1").unwrap().len(), 1);
-        assert_eq!(q.list("skafka-2").unwrap().len(), 1);
+        q.enqueue("kaas-1", &sample_entry()).unwrap();
+        q.enqueue("kaas-2", &sample_entry()).unwrap();
+        assert_eq!(q.list("kaas-1").unwrap().len(), 1);
+        assert_eq!(q.list("kaas-2").unwrap().len(), 1);
     }
 
     #[test]
@@ -188,15 +188,15 @@ mod tests {
     fn list_on_missing_inbox_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        assert!(q.list("skafka-nobody").unwrap().is_empty());
+        assert!(q.list("kaas-nobody").unwrap().is_empty());
     }
 
     #[test]
     fn inbox_path_uses_to_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        let inbox = q.inbox("skafka-3");
-        assert_eq!(inbox.file_name().unwrap(), "to-skafka-3");
+        let inbox = q.inbox("kaas-3");
+        assert_eq!(inbox.file_name().unwrap(), "to-kaas-3");
     }
 
     #[test]

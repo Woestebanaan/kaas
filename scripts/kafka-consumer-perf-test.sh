@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-consumer-perf-test.sh against skafka.
+# Test kafka-consumer-perf-test.sh against kaas.
 #
 # Scenarios:
 #   1. Seed 10k records, then run consumer-perf-test for that count
@@ -7,20 +7,20 @@
 #      the kperf-0 split-brain regression, gh #75)
 
 # Override TOPIC default to a pre-provisioned KafkaTopic CR so we don't
-# trigger CreateTopics v7 (broken encoder in skafka — BufferUnderflowException
+# trigger CreateTopics v7 (broken encoder in kaas — BufferUnderflowException
 # on the client, gh #73). The CR lives in
-# k3s-cluster/apps/skafka/kafka-topics/kperf.yaml.
+# k3s-cluster/apps/kaas/kafka-topics/kperf.yaml.
 TOPIC="${TOPIC:-kperf}"
 
 . "$(dirname "$0")/_common.sh"
 
 # Verify the pre-provisioned topic exists (Metadata RPC, which works). We
 # cannot use kafka-topics.sh --create here because the modern Java admin
-# client calls CreateTopics unconditionally and skafka encodes its v7
+# client calls CreateTopics unconditionally and kaas encodes its v7
 # response incorrectly (see comment above). The topic is managed by the
 # KafkaTopic CR, so just assert visibility.
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --list | grep -qx "$TOPIC" \
-  || { echo "FAIL: topic $TOPIC missing — apply k3s-cluster/apps/skafka/kafka-topics/kperf.yaml" >&2; exit 1; }
+  || { echo "FAIL: topic $TOPIC missing — apply k3s-cluster/apps/kaas/kafka-topics/kperf.yaml" >&2; exit 1; }
 
 echo ">> capturing pre-produce per-partition offsets"
 before=$("$KAFKA_BIN/kafka-get-offsets.sh" --bootstrap-server "$BOOTSTRAP" --topic "$TOPIC" --time -1)

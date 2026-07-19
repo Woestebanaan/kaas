@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-broker-api-versions.sh against skafka.
+# Test kafka-broker-api-versions.sh against kaas.
 #
 # Scenarios:
 #   1. ApiVersions response lists at minimum the core APIs the broker advertises

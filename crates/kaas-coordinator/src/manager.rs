@@ -27,7 +27,7 @@ use crate::group::{
 use crate::offset_store::{FetchSpec, OffsetStore};
 
 /// Broker-id type: a string, the StatefulSet pod
-/// name (`skafka-0`, `skafka-1`, …).
+/// name (`kaas-0`, `kaas-1`, …).
 pub type BrokerId = String;
 
 /// Resolve a broker ID → (node_id, host, port) triple for the
@@ -541,10 +541,10 @@ mod tests {
     fn manager(dir: &std::path::Path) -> Arc<Manager> {
         let offsets = Arc::new(OffsetStore::new(dir));
         Manager::new(
-            "skafka-0",
+            "kaas-0",
             offsets,
-            lookup_self("skafka-0", 9092),
-            LocalGroupSource::new("skafka-0"),
+            lookup_self("kaas-0", 9092),
+            LocalGroupSource::new("kaas-0"),
         )
     }
 
@@ -571,7 +571,7 @@ mod tests {
         let m = manager(tmp.path());
         let r = m.find_coordinator("g1", 0);
         assert_eq!(r.error_code, 0);
-        assert_eq!(r.host, "skafka-0.example.com");
+        assert_eq!(r.host, "kaas-0.example.com");
         assert_eq!(r.port, 9092);
     }
 
@@ -595,10 +595,10 @@ mod tests {
     fn find_coordinator_txn_with_source_resolves() {
         let tmp = tempfile::tempdir().unwrap();
         let m = manager(tmp.path());
-        m.set_txn_assignment_source(LocalTxnSource::new("skafka-0"));
+        m.set_txn_assignment_source(LocalTxnSource::new("kaas-0"));
         let r = m.find_coordinator("tx1", 1);
         assert_eq!(r.error_code, 0);
-        assert_eq!(r.host, "skafka-0.example.com");
+        assert_eq!(r.host, "kaas-0.example.com");
     }
 
     #[test]

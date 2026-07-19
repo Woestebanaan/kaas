@@ -6,7 +6,7 @@
 //! the (topic, partition) tuples so EndTxn can dispatch markers to
 //! every leader that received writes.
 //!
-//! v4 introduces multi-transaction batching (`Transactions[]`); skafka
+//! v4 introduces multi-transaction batching (`Transactions[]`); kaas
 //! ships v0–v3 only — the single-txn shape is what every Java/Go/Rust
 //! client actually sends.
 

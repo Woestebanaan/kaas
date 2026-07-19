@@ -135,7 +135,7 @@ impl AuthEngine for RealAuthEngine {
     }
 }
 
-/// Bump `skafka.auth.success` / `skafka.auth.failure` on any
+/// Bump `kaas.auth.success` / `kaas.auth.failure` on any
 /// authentication attempt. Used by the SASL exchanges and mTLS
 /// path — one call site per completed authentication decision.
 pub(crate) fn record_auth_outcome(mechanism: &str, ok: bool) {

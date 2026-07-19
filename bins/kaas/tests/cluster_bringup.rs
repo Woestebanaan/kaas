@@ -94,7 +94,7 @@ async fn single_broker_disk_mode_wires_coordinator_end_to_end() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let snap = coord.snapshot().expect("snapshot after first apply");
-    assert_eq!(snap.controller, "skafka-0");
+    assert_eq!(snap.controller, "kaas-0");
     assert_eq!(snap.brokers.len(), 1);
     assert_eq!(snap.partitions.len(), 3);
 

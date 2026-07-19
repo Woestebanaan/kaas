@@ -1,10 +1,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: skafka-broker
+  name: kaas-broker
 rules:
   # Lease objects.
-  #   v2.6: per-partition partition-leadership Leases (skafka-{topic}-{partition})
+  #   v2.6: per-partition partition-leadership Leases (kaas-{topic}-{partition})
   #         + per-consumer-group coordinator Leases.
   #   v3:   singleton kaas-controller Lease (cluster controller election).
   # The verb set covers both shapes; the migration to the singleton happens in

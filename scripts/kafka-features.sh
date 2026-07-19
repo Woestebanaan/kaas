@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Non-applicable for skafka (today).
+# Non-applicable for kaas (today).
 #
 # kafka-features.sh manages KRaft feature flags / metadata.version upgrades.
-# skafka has no equivalent feature-flag plane (KRaft non-goal). If an
+# kaas has no equivalent feature-flag plane (KRaft non-goal). If an
 # external client probes ApiVersions for tagged feature info, that's
 # covered by kafka-broker-api-versions.sh instead.
 

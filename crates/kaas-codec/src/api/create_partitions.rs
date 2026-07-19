@@ -6,7 +6,7 @@
 //! (decreases are rejected by the operator-side reconciler).
 //!
 //! Per-topic optional `assignments` field carries explicit replica
-//! assignments for the new partitions. skafka uses single-writer-per-
+//! assignments for the new partitions. kaas uses single-writer-per-
 //! partition (no replication), so the field is parsed for protocol
 //! fidelity but unused at the handler.
 

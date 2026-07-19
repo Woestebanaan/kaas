@@ -47,7 +47,7 @@ impl std::fmt::Debug for MtlsConfig {
 pub struct ListenerConfig {
     /// Free-form tag stamped onto every accepted connection's
     /// [`ConnState::listener_name`]. The Helm chart picks the strings
-    /// (`internal`, `external`, `authed`, …); skafka has no
+    /// (`internal`, `external`, `authed`, …); kaas has no
     /// predefined set.
     pub name: String,
     pub addr: SocketAddr,

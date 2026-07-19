@@ -283,7 +283,7 @@ fn error_partition(partition_index: i32, error_code: i16) -> fetch::PartitionRes
     }
 }
 
-/// `error_partition` + a `skafka.fetch.errors` bump labelled by
+/// `error_partition` + a `kaas.fetch.errors` bump labelled by
 /// topic + error_code. Every partition-level Fetch failure routes
 /// through here so on-call sees the failure rate even when the
 /// success counter has gone flat.

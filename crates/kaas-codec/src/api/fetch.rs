@@ -6,7 +6,7 @@
 //!
 //! # Stateless session contract (gh #4)
 //!
-//! Skafka does not implement KIP-227 incremental fetch sessions. The
+//! Kaas does not implement KIP-227 incremental fetch sessions. The
 //! Fetch handler always returns `session_id = 0` regardless of what
 //! the client sent; clients then issue full Fetch requests every
 //! poll. The codec preserves the wire bytes faithfully — the
@@ -72,7 +72,7 @@ pub const SPEC: ApiSpec = ApiSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     /// `-1` for clients (any non-negative id is a broker replica
-    /// fetcher — skafka has no replication so this is always `-1`).
+    /// fetcher — kaas has no replication so this is always `-1`).
     pub replica_id: i32,
     pub max_wait_ms: i32,
     pub min_bytes: i32,
@@ -86,10 +86,10 @@ pub struct Request {
     /// v7+.
     pub session_epoch: i32,
     pub topics: Vec<Topic>,
-    /// v7+. KIP-227 forgotten-topics-data. Skafka decodes but ignores
+    /// v7+. KIP-227 forgotten-topics-data. Kaas decodes but ignores
     /// — the stateless contract makes this a no-op.
     pub forgotten_topics: Vec<ForgottenTopic>,
-    /// v11+. Rack hint for follower fetching; skafka ignores it.
+    /// v11+. Rack hint for follower fetching; kaas ignores it.
     pub rack_id: String,
 }
 
@@ -124,7 +124,7 @@ pub struct Response {
     pub throttle_time_ms: i32,
     /// v7+. Top-level error (e.g. INVALID_FETCH_SESSION_EPOCH).
     pub error_code: i16,
-    /// v7+. Skafka always returns `0` per gh #4.
+    /// v7+. Kaas always returns `0` per gh #4.
     pub session_id: i32,
     pub responses: Vec<TopicResponse>,
 }

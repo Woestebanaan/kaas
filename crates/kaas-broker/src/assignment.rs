@@ -30,7 +30,7 @@ pub enum BrokerHealth {
     Dead,
 }
 
-/// Role a broker plays for a partition. Skafka is single-writer-per-
+/// Role a broker plays for a partition. Kaas is single-writer-per-
 /// partition so the only role today is `Leader`; the field is kept
 /// for forward compatibility with a v2 replicated extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,22 +128,22 @@ mod tests {
             controller_epoch: 1,
             assignment_version: 7,
             generated_at: "2025-01-02T03:04:05.123456789Z".to_owned(),
-            controller: "skafka-0".to_owned(),
+            controller: "kaas-0".to_owned(),
             brokers: vec![BrokerAssignment {
-                id: "skafka-0".to_owned(),
+                id: "kaas-0".to_owned(),
                 health: BrokerHealth::Alive,
                 last_seen: "2025-01-02T03:04:05.123456789Z".to_owned(),
             }],
             partitions: vec![PartitionAssignment {
                 topic: "t1".to_owned(),
                 partition: 0,
-                broker: "skafka-0".to_owned(),
+                broker: "kaas-0".to_owned(),
                 epoch: 1,
                 role: PartitionRole::Leader,
             }],
             consumer_groups: vec![ConsumerGroupAssignment {
                 group_id: "g1".to_owned(),
-                broker: "skafka-0".to_owned(),
+                broker: "kaas-0".to_owned(),
                 epoch: 1,
             }],
         };
@@ -163,7 +163,7 @@ mod tests {
             controller_epoch: 1,
             assignment_version: 1,
             generated_at: "x".to_owned(),
-            controller: "skafka-0".to_owned(),
+            controller: "kaas-0".to_owned(),
             brokers: vec![],
             partitions: vec![],
             consumer_groups: vec![],
@@ -181,20 +181,20 @@ mod tests {
             controller_epoch: 1,
             assignment_version: 1,
             generated_at: "x".to_owned(),
-            controller: "skafka-0".to_owned(),
+            controller: "kaas-0".to_owned(),
             brokers: vec![
                 BrokerAssignment {
-                    id: "skafka-0".to_owned(),
+                    id: "kaas-0".to_owned(),
                     health: BrokerHealth::Alive,
                     last_seen: "x".to_owned(),
                 },
                 BrokerAssignment {
-                    id: "skafka-1".to_owned(),
+                    id: "kaas-1".to_owned(),
                     health: BrokerHealth::Draining,
                     last_seen: "x".to_owned(),
                 },
                 BrokerAssignment {
-                    id: "skafka-2".to_owned(),
+                    id: "kaas-2".to_owned(),
                     health: BrokerHealth::Dead,
                     last_seen: "x".to_owned(),
                 },
@@ -203,9 +203,9 @@ mod tests {
             consumer_groups: vec![],
         };
         let (brokers, alive) = a.broker_sets();
-        assert_eq!(brokers, vec!["skafka-0", "skafka-1", "skafka-2"]);
-        assert!(alive["skafka-0"]);
-        assert!(!alive["skafka-1"]);
-        assert!(!alive["skafka-2"]);
+        assert_eq!(brokers, vec!["kaas-0", "kaas-1", "kaas-2"]);
+        assert!(alive["kaas-0"]);
+        assert!(!alive["kaas-1"]);
+        assert!(!alive["kaas-2"]);
     }
 }

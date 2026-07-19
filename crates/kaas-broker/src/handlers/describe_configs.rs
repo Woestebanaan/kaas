@@ -149,7 +149,7 @@ impl Handler for DescribeConfigsHandler {
 }
 
 /// gh #109 broker-config table. Values match Apache 3.7's defaults
-/// where skafka has no live knob, and skafka's architectural
+/// where kaas has no live knob, and kaas's architectural
 /// invariants where it does (replication factor is always 1 — the
 /// CSI layer owns durability, not Kafka-level replication). Same
 /// entry set as v0.1's `brokerConfigs` minus `listeners`

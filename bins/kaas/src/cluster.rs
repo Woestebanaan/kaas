@@ -108,7 +108,7 @@ pub fn install(
     client_port: i32,
     topic_notify: Arc<TopicChangeNotifier>,
 ) -> Result<ClusterRuntime> {
-    let self_id = format!("skafka-{broker_id}");
+    let self_id = format!("kaas-{broker_id}");
 
     // Kube-backed multi-broker wiring (election, endpoint registry,
     // heartbeats) exists only when the pod identity, a kube client,
@@ -125,7 +125,7 @@ pub fn install(
 
     let offset_dir = data_dir
         .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/skafka-offsets-mem"));
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kaas-offsets-mem"));
 
     let offsets = Arc::new(OffsetStore::new(&offset_dir));
     let lookup: Arc<dyn BrokerLookup> = match &wiring {
@@ -164,7 +164,7 @@ pub fn install(
     let cluster_dir = data_dir
         .clone()
         .map(|d| d.join("__cluster"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/skafka-cluster-mem"));
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kaas-cluster-mem"));
     std::fs::create_dir_all(&cluster_dir)?;
     let txn_state = Arc::new(TxnStateStore::open(&cluster_dir, 0)?);
     broker.install_txn_state(txn_state.clone());
@@ -713,7 +713,7 @@ impl kaas_controller::BrokerSource for ClusterBrokerSource {
             .all()
             .into_iter()
             .filter(|b| b.ready)
-            .map(|b| format!("skafka-{}", b.node_id))
+            .map(|b| format!("kaas-{}", b.node_id))
             .collect();
         let connected: std::collections::HashSet<String> =
             self.heart.connected_brokers().into_iter().collect();
@@ -779,7 +779,7 @@ fn spawn_cluster_tasks(
         let coordinator_pump = coordinator.clone();
         let cancel = cancel.clone();
         let spawn_res = std::thread::Builder::new()
-            .name("skafka-control".to_owned())
+            .name("kaas-control".to_owned())
             .spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()

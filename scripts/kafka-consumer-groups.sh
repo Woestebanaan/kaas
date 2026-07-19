@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-consumer-groups.sh against skafka.
+# Test kafka-consumer-groups.sh against kaas.
 #
 # Scenarios:
 #   1. --list (initially the test group is absent)
@@ -11,7 +11,7 @@
 
 . "$(dirname "$0")/_common.sh"
 
-GROUP="skafka-test-cg-$$"
+GROUP="kaas-test-cg-$$"
 
 "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" \
   --create --topic "$TOPIC" --partitions 2 --replication-factor 1

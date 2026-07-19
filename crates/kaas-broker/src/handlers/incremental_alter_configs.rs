@@ -7,7 +7,7 @@
 //! Each op gets translated by the installed [`TopicCRWriter`] into
 //! a JSON-merge PATCH on `KafkaTopic.spec.config`. `Set` writes
 //! the parsed value, `Delete` writes null, `Append` / `Subtract`
-//! surface as `UNSUPPORTED_VERSION` (skafka's topic configs are
+//! surface as `UNSUPPORTED_VERSION` (kaas's topic configs are
 //! scalar — list-valued ops don't apply).
 //!
 //! Authorization: `Operation::AlterConfigs` on the topic resource.

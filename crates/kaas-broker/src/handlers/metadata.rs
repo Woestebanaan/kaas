@@ -72,7 +72,7 @@ fn self_broker_row(node_id: i32, advert: &ListenerAdvert) -> metadata::Broker {
     }
 }
 
-/// `"skafka-2"` → `2`. Broker identity strings carry the ordinal as
+/// `"kaas-2"` → `2`. Broker identity strings carry the ordinal as
 /// the trailing hyphen segment (StatefulSet pod-name shape); a
 /// malformed id yields `None` and the caller falls back to self.
 fn trailing_ordinal(id: &str) -> Option<i32> {

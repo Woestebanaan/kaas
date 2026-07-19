@@ -61,14 +61,14 @@ fn entry(pid: i64, commit: bool, topic: &str, partitions: Vec<i32>) -> MarkerEnt
 async fn end_to_end_cross_broker_dispatch() {
     let tmp = tempfile::tempdir().unwrap();
     let queue = MarkerQueue::open(tmp.path()).unwrap();
-    let (watcher_b, applied_b) = build_watcher(&queue, "skafka-b");
+    let (watcher_b, applied_b) = build_watcher(&queue, "kaas-b");
 
     // Txn coordinator on A enqueues a commit marker targeted at B
     // because B leads the participating partition.
     queue
-        .enqueue("skafka-b", &entry(42, true, "t", vec![0, 1, 2]))
+        .enqueue("kaas-b", &entry(42, true, "t", vec![0, 1, 2]))
         .unwrap();
-    assert_eq!(queue.list("skafka-b").unwrap().len(), 1);
+    assert_eq!(queue.list("kaas-b").unwrap().len(), 1);
 
     watcher_b.tick().await;
     let got = applied_b.drain();
@@ -76,7 +76,7 @@ async fn end_to_end_cross_broker_dispatch() {
     assert_eq!(got[0].producer_id, 42);
     assert!(got[0].commit);
     assert!(
-        queue.list("skafka-b").unwrap().is_empty(),
+        queue.list("kaas-b").unwrap().is_empty(),
         "applied file must be deleted"
     );
 }
@@ -87,14 +87,14 @@ async fn end_to_end_cross_broker_dispatch() {
 async fn inbox_routing_keeps_per_target_isolation() {
     let tmp = tempfile::tempdir().unwrap();
     let queue = MarkerQueue::open(tmp.path()).unwrap();
-    let (watcher_b, applied_b) = build_watcher(&queue, "skafka-b");
-    let (watcher_c, applied_c) = build_watcher(&queue, "skafka-c");
+    let (watcher_b, applied_b) = build_watcher(&queue, "kaas-b");
+    let (watcher_c, applied_c) = build_watcher(&queue, "kaas-c");
 
     queue
-        .enqueue("skafka-b", &entry(1, true, "t", vec![0]))
+        .enqueue("kaas-b", &entry(1, true, "t", vec![0]))
         .unwrap();
     queue
-        .enqueue("skafka-c", &entry(2, false, "t", vec![1]))
+        .enqueue("kaas-c", &entry(2, false, "t", vec![1]))
         .unwrap();
 
     watcher_b.tick().await;
@@ -118,10 +118,10 @@ async fn inbox_routing_keeps_per_target_isolation() {
 async fn retry_after_apply_reapplies_idempotent_at_consumer_level() {
     let tmp = tempfile::tempdir().unwrap();
     let queue = MarkerQueue::open(tmp.path()).unwrap();
-    let (watcher_b, applied_b) = build_watcher(&queue, "skafka-b");
+    let (watcher_b, applied_b) = build_watcher(&queue, "kaas-b");
 
     queue
-        .enqueue("skafka-b", &entry(42, true, "t", vec![0]))
+        .enqueue("kaas-b", &entry(42, true, "t", vec![0]))
         .unwrap();
     watcher_b.tick().await;
     assert_eq!(applied_b.drain().len(), 1);
@@ -130,7 +130,7 @@ async fn retry_after_apply_reapplies_idempotent_at_consumer_level() {
     // identical bytes (since the file was deleted, this is a fresh
     // create). Watcher applies it again.
     queue
-        .enqueue("skafka-b", &entry(42, true, "t", vec![0]))
+        .enqueue("kaas-b", &entry(42, true, "t", vec![0]))
         .unwrap();
     watcher_b.tick().await;
     assert_eq!(applied_b.drain().len(), 1);
@@ -142,11 +142,11 @@ async fn retry_after_apply_reapplies_idempotent_at_consumer_level() {
 async fn multi_partition_in_single_marker() {
     let tmp = tempfile::tempdir().unwrap();
     let queue = MarkerQueue::open(tmp.path()).unwrap();
-    let (watcher_b, applied_b) = build_watcher(&queue, "skafka-b");
+    let (watcher_b, applied_b) = build_watcher(&queue, "kaas-b");
 
     queue
         .enqueue(
-            "skafka-b",
+            "kaas-b",
             &MarkerEntry {
                 transactional_id: "tx-1".to_owned(),
                 producer_id: 7,
@@ -182,18 +182,18 @@ async fn list_matches_watcher_view() {
     let tmp = tempfile::tempdir().unwrap();
     let queue = MarkerQueue::open(tmp.path()).unwrap();
     queue
-        .enqueue("skafka-b", &entry(42, true, "t", vec![0]))
+        .enqueue("kaas-b", &entry(42, true, "t", vec![0]))
         .unwrap();
     queue
-        .enqueue("skafka-b", &entry(99, false, "t", vec![1]))
+        .enqueue("kaas-b", &entry(99, false, "t", vec![1]))
         .unwrap();
 
-    let listed = queue.list("skafka-b").unwrap();
+    let listed = queue.list("kaas-b").unwrap();
     assert_eq!(listed.len(), 2);
     let listed_pids: std::collections::HashSet<i64> =
         listed.iter().map(|(_, e)| e.producer_id).collect();
 
-    let (watcher_b, applied_b) = build_watcher(&queue, "skafka-b");
+    let (watcher_b, applied_b) = build_watcher(&queue, "kaas-b");
     watcher_b.tick().await;
     let applied_pids: std::collections::HashSet<i64> = applied_b
         .drain()

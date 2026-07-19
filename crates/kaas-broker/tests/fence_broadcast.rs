@@ -61,11 +61,11 @@ fn build_watcher(
 fn two_brokers_share_fences_through_the_pvc() {
     let tmp = tempfile::tempdir().unwrap();
     let cluster = tmp.path();
-    let log_a = FenceLog::open(&fence_log_dir(cluster), "skafka-a").unwrap();
-    let log_b = FenceLog::open(&fence_log_dir(cluster), "skafka-b").unwrap();
+    let log_a = FenceLog::open(&fence_log_dir(cluster), "kaas-a").unwrap();
+    let log_b = FenceLog::open(&fence_log_dir(cluster), "kaas-b").unwrap();
 
-    let (watcher_a, fenced_a) = build_watcher(cluster, "skafka-a");
-    let (watcher_b, fenced_b) = build_watcher(cluster, "skafka-b");
+    let (watcher_a, fenced_a) = build_watcher(cluster, "kaas-a");
+    let (watcher_b, fenced_b) = build_watcher(cluster, "kaas-b");
 
     // A bumps PID 42 → epoch 3. B should observe.
     log_a.append(42, 3).unwrap();
@@ -93,8 +93,8 @@ fn two_brokers_share_fences_through_the_pvc() {
 fn duplicate_appends_dont_refire() {
     let tmp = tempfile::tempdir().unwrap();
     let cluster = tmp.path();
-    let log_a = FenceLog::open(&fence_log_dir(cluster), "skafka-a").unwrap();
-    let (watcher_b, fenced_b) = build_watcher(cluster, "skafka-b");
+    let log_a = FenceLog::open(&fence_log_dir(cluster), "kaas-a").unwrap();
+    let (watcher_b, fenced_b) = build_watcher(cluster, "kaas-b");
 
     log_a.append(42, 3).unwrap();
     watcher_b.tick();
@@ -110,8 +110,8 @@ fn duplicate_appends_dont_refire() {
 fn higher_epoch_after_first_apply_fires_again() {
     let tmp = tempfile::tempdir().unwrap();
     let cluster = tmp.path();
-    let log_a = FenceLog::open(&fence_log_dir(cluster), "skafka-a").unwrap();
-    let (watcher_b, fenced_b) = build_watcher(cluster, "skafka-b");
+    let log_a = FenceLog::open(&fence_log_dir(cluster), "kaas-a").unwrap();
+    let (watcher_b, fenced_b) = build_watcher(cluster, "kaas-b");
 
     log_a.append(42, 3).unwrap();
     watcher_b.tick();
@@ -126,9 +126,9 @@ fn higher_epoch_after_first_apply_fires_again() {
 fn multiple_peers_multiple_pids_one_tick() {
     let tmp = tempfile::tempdir().unwrap();
     let cluster = tmp.path();
-    let log_a = FenceLog::open(&fence_log_dir(cluster), "skafka-a").unwrap();
-    let log_c = FenceLog::open(&fence_log_dir(cluster), "skafka-c").unwrap();
-    let (watcher_b, fenced_b) = build_watcher(cluster, "skafka-b");
+    let log_a = FenceLog::open(&fence_log_dir(cluster), "kaas-a").unwrap();
+    let log_c = FenceLog::open(&fence_log_dir(cluster), "kaas-c").unwrap();
+    let (watcher_b, fenced_b) = build_watcher(cluster, "kaas-b");
 
     log_a.append(1, 7).unwrap();
     log_a.append(2, 1).unwrap();
@@ -146,7 +146,7 @@ fn multiple_peers_multiple_pids_one_tick() {
 fn snapshot_round_trips_to_peer_watcher() {
     let tmp = tempfile::tempdir().unwrap();
     let cluster = tmp.path();
-    let log_a = FenceLog::open(&fence_log_dir(cluster), "skafka-a").unwrap();
+    let log_a = FenceLog::open(&fence_log_dir(cluster), "kaas-a").unwrap();
     log_a.append(42, 3).unwrap();
     log_a.append(99, 7).unwrap();
     let snap = log_a.snapshot();
@@ -154,7 +154,7 @@ fn snapshot_round_trips_to_peer_watcher() {
     assert_eq!(snap, expected);
 
     // And a peer reads exactly that set off disk.
-    let (watcher_b, fenced_b) = build_watcher(cluster, "skafka-b");
+    let (watcher_b, fenced_b) = build_watcher(cluster, "kaas-b");
     watcher_b.tick();
     let got: HashMap<i64, i16> = fenced_b.drain().into_iter().collect();
     assert_eq!(got, expected);

@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn health_json_shape_omits_unmeasured_fields() {
         let cfg = HealthConfig {
-            broker_id: "skafka-0".to_string(),
+            broker_id: "kaas-0".to_string(),
             listeners: vec!["plain".to_string()],
             tls: None,
             source: None,
@@ -266,7 +266,7 @@ mod tests {
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["status"], "ok");
-        assert_eq!(json["broker_id"], "skafka-0");
+        assert_eq!(json["broker_id"], "kaas-0");
         assert_eq!(json["listeners"][0], "plain");
         assert!(json.get("heartbeat_rtt_ms").is_none());
         assert!(json.get("controller_epoch").is_none());

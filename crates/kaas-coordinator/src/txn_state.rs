@@ -6,7 +6,7 @@
 //! 50 JSON files under `<data_dir>/__cluster/txn_state/slot-<n>.json`.
 //!
 //! Mirrors Apache Kafka's `__transaction_state` internal topic:
-//! partition = slot, log replay = JSON file read. Skafka skips the
+//! partition = slot, log replay = JSON file read. Kaas skips the
 //! log-replay step because the file *is* the materialised map the
 //! Apache coordinator builds from compacted log records.
 //!
@@ -47,7 +47,7 @@ use crate::atomic_write::atomic_write_json;
 /// the next `get_or_allocate` for an existing `txn_id` reads an
 /// empty slot — silently breaking the gh #22 rejoin contract. Apache
 /// enforces this by reading `transaction.state.log.num.partitions`
-/// at first cluster start and ignoring later changes. Skafka relies
+/// at first cluster start and ignoring later changes. Kaas relies
 /// on the constant staying constant; a re-shard path
 /// is the documented follow-up on gh #174 for
 /// the day the value needs to change.
@@ -169,7 +169,7 @@ pub struct EndTxnOutcome {
 ///
 /// In Apache, this signal travels via `WriteTxnMarkers` to the
 /// `__consumer_offsets[partitionFor(group_id)]` partition's leader.
-/// Skafka stages it as a local hook — when txn coord and group
+/// Kaas stages it as a local hook — when txn coord and group
 /// coord live on the same broker it fires directly; cross-broker
 /// dispatch lands with gh #114.
 pub trait TxnOffsetHook: Send + Sync + 'static {
@@ -447,7 +447,7 @@ impl TxnStateStore {
     /// Prepare*                        → Concurrent
     /// ```
     ///
-    /// Skafka collapses `Prepare → Complete` into a single atomic
+    /// Kaas collapses `Prepare → Complete` into a single atomic
     /// transition because the marker-write phase (gh #114) hasn't
     /// landed; the Prepare* arms exist for forward compat.
     pub fn end_txn(

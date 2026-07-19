@@ -57,13 +57,13 @@ pub struct AclFilter {
 #[derive(Debug, Error)]
 pub enum AclWriteError {
     /// The binding's principal doesn't correspond to an existing
-    /// KafkaUser CR — skafka does not auto-create CRs on a runtime
+    /// KafkaUser CR — kaas does not auto-create CRs on a runtime
     /// ACL write. Wire: `INVALID_REQUEST` (42).
     #[error("no KafkaUser CR for principal {0}")]
     UnknownPrincipal(String),
 
     /// Principal isn't of the form `User:<name>`. Apache admits
-    /// `Group:` and service-account principals too; skafka maps only
+    /// `Group:` and service-account principals too; kaas maps only
     /// to KafkaUser today. Wire: `INVALID_REQUEST` (42).
     #[error("principal must be of the form User:<name>, got {0:?}")]
     InvalidPrincipal(String),

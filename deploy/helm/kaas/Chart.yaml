@@ -1,5 +1,5 @@
 apiVersion: v2
-name: skafka
+name: kaas
 description: Kafka-protocol-compatible broker on shared storage with Kubernetes-native coordination
 type: application
 version: 0.1.0
@@ -9,6 +9,6 @@ keywords:
   - kafka
   - streaming
   - messaging
-home: https://github.com/woestebanaan/skafka
+home: https://github.com/woestebanaan/kaas
 sources:
-  - https://github.com/woestebanaan/skafka
+  - https://github.com/woestebanaan/kaas

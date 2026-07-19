@@ -5,7 +5,7 @@ use kaas_broker::heartbeatpb::{partition_status::State, BrokerStatus, PartitionS
 #[test]
 fn broker_status_is_constructible() {
     let status = BrokerStatus {
-        broker_id: "skafka-0".to_string(),
+        broker_id: "kaas-0".to_string(),
         timestamp_ms: 1,
         last_seen_assignment_version: 0,
         partitions: vec![PartitionStatus {
@@ -17,6 +17,6 @@ fn broker_status_is_constructible() {
         }],
         active_groups: vec![],
     };
-    assert_eq!(status.broker_id, "skafka-0");
+    assert_eq!(status.broker_id, "kaas-0");
     assert_eq!(status.partitions.len(), 1);
 }

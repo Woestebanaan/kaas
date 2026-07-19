@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Non-applicable for skafka.
+# Non-applicable for kaas.
 #
 # kafka-run-class.sh is a generic JVM launcher used internally by the
 # other kafka-*.sh scripts. It does not talk to a broker and is not a

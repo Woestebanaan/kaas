@@ -25,8 +25,8 @@ pub enum ConfigError {
 /// JSON entry in `KAAS_LISTENERS`. Mirrors the Helm chart's
 /// listener array shape (gh #126). Two shapes are accepted:
 ///
-/// * **Chart shape** (Strimzi-style; what `skafka.listenersJSON`
-///   in `deploy/helm/skafka/templates/_helpers.tpl` emits):
+/// * **Chart shape** (Strimzi-style; what `kaas.listenersJSON`
+///   in `deploy/helm/kaas/templates/_helpers.tpl` emits):
 ///   `{"name":"plain","port":9092,"type":"internal","tls":false,
 ///     "authentication":{"type":"none"}}`. The `port` is expanded
 ///   into `0.0.0.0:<port>`; `tls: true` is upgraded to a
@@ -217,10 +217,10 @@ impl Cli {
             .unwrap_or(1);
 
         let cluster_id =
-            env::var("KAAS_CLUSTER_ID").unwrap_or_else(|_| "skafka-rust-dev".to_owned());
+            env::var("KAAS_CLUSTER_ID").unwrap_or_else(|_| "kaas-rust-dev".to_owned());
 
         // Explicit KAAS_BROKER_ID wins; otherwise derive the
-        // StatefulSet ordinal from MY_POD_NAME ("skafka-2" → 2).
+        // StatefulSet ordinal from MY_POD_NAME ("kaas-2" → 2).
         // A StatefulSet can't template
         // per-pod env, so without this every replica boots as
         // broker 0 and the whole cluster elects/renews under one
@@ -320,8 +320,8 @@ mod tests {
 
     #[test]
     fn chart_shape_parses() {
-        // Exact JSON the Helm chart's skafka.listenersJSON helper
-        // emits (deploy/helm/skafka/templates/_helpers.tpl).
+        // Exact JSON the Helm chart's kaas.listenersJSON helper
+        // emits (deploy/helm/kaas/templates/_helpers.tpl).
         let v: Vec<ListenerEntry> = serde_json::from_str(
             r#"[
                 {"name":"plain","port":9092,"type":"internal","tls":false,"authentication":{"type":"none"}},
@@ -363,16 +363,16 @@ mod tests {
                 "name": "authed",
                 "addr": "0.0.0.0:9095",
                 "tls": {
-                    "certPath": "/etc/skafka/tls.crt",
-                    "keyPath":  "/etc/skafka/tls.key",
-                    "clientCaPath": "/etc/skafka/ca.crt"
+                    "certPath": "/etc/kaas/tls.crt",
+                    "keyPath":  "/etc/kaas/tls.key",
+                    "clientCaPath": "/etc/kaas/ca.crt"
                 },
                 "authenticationType": "mtls"
             }]"#,
         )
         .unwrap();
         let tls = v[0].tls.as_ref().unwrap();
-        assert_eq!(tls.cert_path, PathBuf::from("/etc/skafka/tls.crt"));
+        assert_eq!(tls.cert_path, PathBuf::from("/etc/kaas/tls.crt"));
         assert!(tls.client_ca_path.is_some());
         assert_eq!(v[0].authentication_type.as_deref(), Some("mtls"));
     }

@@ -79,7 +79,7 @@ fn build_test_broker(topic: &str, partitions: i32) -> Arc<Broker> {
         partition_count: partitions,
         topic_id: [0; 16],
     });
-    Arc::new(Broker::new(engine, topics, "skafka-smoke", 0))
+    Arc::new(Broker::new(engine, topics, "kaas-smoke", 0))
 }
 
 /// Frame and send a request, read the response frame body. Returns

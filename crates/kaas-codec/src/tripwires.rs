@@ -18,8 +18,8 @@
 //!
 //! In Phase 1 these are atomic counters. Phase 8 swaps them for OTLP
 //! metric instruments behind the same function signature so production
-//! alerts can fire on `skafka_codec_record_decode_total{site=...}` and
-//! `skafka_codec_batch_reencode_total{site=...}`.
+//! alerts can fire on `kaas_codec_record_decode_total{site=...}` and
+//! `kaas_codec_batch_reencode_total{site=...}`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -31,7 +31,7 @@ static BATCH_REENCODE: AtomicU64 = AtomicU64::new(0);
 /// When `Some`, every [`bump_codec_record_decode`] /
 /// [`bump_codec_batch_reencode`] call fires the OTel counters too
 /// (via `kaas_observability::byteopacity::bump_codec_*`) so the
-/// `SkafkaByteOpacityViolated` alert can trip on tripwires firing
+/// `KaasByteOpacityViolated` alert can trip on tripwires firing
 /// in production — not just in the local process-atomic counter.
 ///
 /// Kept as `Fn` pointers rather than a full trait object so the
@@ -95,7 +95,7 @@ mod tests {
     use super::*;
 
     /// Meta-test: prove the bump function does increment the counter, so
-    /// alerts wired against `skafka_codec_record_decode_total` will fire.
+    /// alerts wired against `kaas_codec_record_decode_total` will fire.
     /// This is the only test that calls `bump_*` by design — production
     /// code must never call it.
     #[test]

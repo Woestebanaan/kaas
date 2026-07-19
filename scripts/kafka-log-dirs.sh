@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-log-dirs.sh against skafka.
+# Test kafka-log-dirs.sh against kaas.
 #
 # Scenarios:
 #   1. --describe with no --topic-list returns all log dirs

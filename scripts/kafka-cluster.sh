@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-cluster.sh against skafka.
+# Test kafka-cluster.sh against kaas.
 #
 # Scenarios:
 #   1. cluster-id returns a non-empty cluster ID
@@ -15,7 +15,7 @@ echo "cluster-id=$id"
 [ -n "$id" ] || { echo "FAIL: empty cluster-id" >&2; exit 1; }
 
 echo ">> Scenario 2: AdminClient.describeCluster() round-trip via kafka-broker-api-versions"
-# DescribeCluster (API 60) shipped in skafka v0.1.93; pre-v0.1.96
+# DescribeCluster (API 60) shipped in kaas v0.1.93; pre-v0.1.96
 # the request decoded incorrectly because of a missing flexible-
 # header entry. kafka-broker-api-versions internally calls
 # DescribeCluster on modern clients; a successful run here means

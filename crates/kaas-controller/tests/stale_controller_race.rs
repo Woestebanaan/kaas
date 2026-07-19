@@ -57,23 +57,23 @@ async fn stale_epoch_write_is_rejected_by_coordinator() {
     // the Lease would have transitioned to).
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(2)));
     let coord = Coordinator::new(
-        "skafka-0",
+        "kaas-0",
         tmp.path().to_path_buf(),
         lease.clone(),
         Arc::new(LocalHeartbeat),
     );
 
     // A real controller at epoch 2 writes.
-    let real_sources = sources("skafka-0");
-    let real = build_loop(tmp.path().to_path_buf(), "skafka-0", real_sources.clone());
+    let real_sources = sources("kaas-0");
+    let real = build_loop(tmp.path().to_path_buf(), "kaas-0", real_sources.clone());
     real.start(2).await.unwrap();
     assert!(coord.apply_if_new(), "first apply at epoch 2 accepted");
     assert!(coord.owns("t1", 0));
 
     // The stale ex-controller still thinks it owns the cluster at
     // epoch 1 and writes. Same directory, same file, lower epoch.
-    let stale_sources = sources("skafka-9");
-    let stale = build_loop(tmp.path().to_path_buf(), "skafka-9", stale_sources.clone());
+    let stale_sources = sources("kaas-9");
+    let stale = build_loop(tmp.path().to_path_buf(), "kaas-9", stale_sources.clone());
     stale.start(1).await.unwrap();
     // It would have overwritten the file — Coordinator must
     // reject the read so brokers don't lose ownership.
@@ -83,7 +83,7 @@ async fn stale_epoch_write_is_rejected_by_coordinator() {
     );
     // Snapshot still reflects the real controller.
     let snap = coord.snapshot().expect("snapshot present");
-    assert_eq!(snap.controller, "skafka-0");
+    assert_eq!(snap.controller, "kaas-0");
     assert_eq!(snap.controller_epoch, 2);
     // Ownership is unchanged.
     assert!(
@@ -100,14 +100,14 @@ async fn higher_version_at_same_epoch_overrides_lower_version() {
     let tmp = tempfile::tempdir().unwrap();
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(1)));
     let coord = Coordinator::new(
-        "skafka-0",
+        "kaas-0",
         tmp.path().to_path_buf(),
         lease.clone(),
         Arc::new(LocalHeartbeat),
     );
 
-    let s = sources("skafka-0");
-    let loop_a = build_loop(tmp.path().to_path_buf(), "skafka-0", s.clone());
+    let s = sources("kaas-0");
+    let loop_a = build_loop(tmp.path().to_path_buf(), "kaas-0", s.clone());
     loop_a.start(1).await.unwrap();
     assert!(coord.apply_if_new(), "v1 accepted");
 
@@ -135,15 +135,15 @@ async fn epoch_bump_unfences_the_new_controller() {
     let tmp = tempfile::tempdir().unwrap();
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(1)));
     let coord = Coordinator::new(
-        "skafka-0",
+        "kaas-0",
         tmp.path().to_path_buf(),
         lease.clone(),
         Arc::new(LocalHeartbeat),
     );
 
     // Old controller at epoch 1 publishes.
-    let old_sources = sources("skafka-0");
-    let old = build_loop(tmp.path().to_path_buf(), "skafka-0", old_sources.clone());
+    let old_sources = sources("kaas-0");
+    let old = build_loop(tmp.path().to_path_buf(), "kaas-0", old_sources.clone());
     old.start(1).await.unwrap();
     assert!(coord.apply_if_new());
     let snap = coord.snapshot().expect("snapshot present");
@@ -153,20 +153,20 @@ async fn epoch_bump_unfences_the_new_controller() {
     lease.0.store(2, Ordering::Relaxed);
 
     // New controller publishes at epoch 2.
-    let new_sources = sources("skafka-1");
-    let new = build_loop(tmp.path().to_path_buf(), "skafka-1", new_sources.clone());
+    let new_sources = sources("kaas-1");
+    let new = build_loop(tmp.path().to_path_buf(), "kaas-1", new_sources.clone());
     new.start(2).await.unwrap();
     assert!(
         coord.apply_if_new(),
         "post-bump write at epoch 2 must be accepted"
     );
     let snap = coord.snapshot().expect("snapshot present");
-    assert_eq!(snap.controller, "skafka-1");
+    assert_eq!(snap.controller, "kaas-1");
     assert_eq!(snap.controller_epoch, 2);
 
     // From this point forward, an old-epoch write (epoch 1) must
     // be fenced.
-    let zombie = build_loop(tmp.path().to_path_buf(), "skafka-0", old_sources.clone());
+    let zombie = build_loop(tmp.path().to_path_buf(), "kaas-0", old_sources.clone());
     zombie.start(1).await.unwrap();
     assert!(
         !coord.apply_if_new(),

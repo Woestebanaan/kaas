@@ -22,7 +22,7 @@
 //!
 //! [`ConfigOp`] mirrors Apache's IncrementalAlterConfigs op enum:
 //! `Set` and `Delete` map onto JSON-merge patches; `Append` and
-//! `Subtract` are list-valued ops that skafka's topic configs
+//! `Subtract` are list-valued ops that kaas's topic configs
 //! don't support — the writer returns [`TopicWriteError::UnsupportedOp`]
 //! and the handler surfaces it as `UNSUPPORTED_VERSION` (35).
 
@@ -49,7 +49,7 @@ pub enum ConfigOpKind {
     Set,
     /// Remove the key — patch as JSON null.
     Delete,
-    /// Append to a list-valued config. skafka's keys are all
+    /// Append to a list-valued config. kaas's keys are all
     /// scalar — returns `UnsupportedOp` at the writer.
     Append,
     /// Subtract from a list-valued config. Same as Append.
@@ -207,7 +207,7 @@ pub fn config_key_to_json_field(key: &str) -> Option<&'static str> {
 /// (Strimzi's recommendation). Otherwise — uppercase Streams
 /// internals like `app-KSTREAM-AGGREGATE-...-repartition`, dotted
 /// names, >253 chars — synthesise a deterministic
-/// `skafka-topic-<16 hex of sha1[:8]>` and stash the literal Kafka
+/// `kaas-topic-<16 hex of sha1[:8]>` and stash the literal Kafka
 /// name in `spec.topicName`.
 ///
 /// The synthetic shape MUST stay byte-identical to the v0.1 broker's
@@ -225,7 +225,7 @@ pub fn name_for_cr(kafka_name: &str) -> (String, String) {
         let _ = write!(acc, "{b:02x}");
         acc
     });
-    (format!("skafka-topic-{hex}"), kafka_name.to_string())
+    (format!("kaas-topic-{hex}"), kafka_name.to_string())
 }
 
 /// K8s resource-name validation: lowercase alphanumeric labels with

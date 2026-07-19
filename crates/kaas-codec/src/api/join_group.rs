@@ -82,7 +82,7 @@ pub struct Response {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub generation_id: i32,
-    /// v7+. Nullable per Apache; skafka encodes non-nullable (empty
+    /// v7+. Nullable per Apache; kaas encodes non-nullable (empty
     /// = absent).
     pub protocol_type: String,
     pub protocol_name: String,

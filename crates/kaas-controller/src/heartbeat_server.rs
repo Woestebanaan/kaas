@@ -307,7 +307,7 @@ mod tests {
         let s = HeartbeatServer::new();
         assert!(s.connected_brokers().is_empty());
         assert!(s.active_groups().is_empty());
-        assert_eq!(s.broker_last_seen("skafka-0"), None);
+        assert_eq!(s.broker_last_seen("kaas-0"), None);
     }
 
     #[test]

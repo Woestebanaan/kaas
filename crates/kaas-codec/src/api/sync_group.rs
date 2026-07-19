@@ -80,7 +80,7 @@ pub struct Response {
     /// v1+. `0` when unset.
     pub throttle_time_ms: i32,
     pub error_code: i16,
-    /// v5+. Apache marks this nullable but skafka encodes
+    /// v5+. Apache marks this nullable but kaas encodes
     /// non-nullable (gh #96) — empty string is the "absent" form.
     pub protocol_type: String,
     /// v5+. Same non-nullable convention.

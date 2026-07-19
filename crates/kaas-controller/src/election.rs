@@ -27,7 +27,7 @@ pub trait LeaseElection: Send + Sync + 'static {
     async fn acquire(&self) -> i64;
 
     /// Identity stamped into `assignment.json.controller`. Mirrors
-    /// the StatefulSet pod-name shape (`"skafka-0"`).
+    /// the StatefulSet pod-name shape (`"kaas-0"`).
     fn identity(&self) -> String;
 }
 

@@ -2,16 +2,16 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "skafka.operatorSAName" . }}
-  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+  name: {{ include "kaas.operatorSAName" . }}
+  labels: {{- include "kaas.operatorLabels" . | nindent 4 }}
 {{- end }}
 {{- if .Values.operator.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "skafka.fullname" . }}-operator
-  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-operator
+  labels: {{- include "kaas.operatorLabels" . | nindent 4 }}
 rules:
   # gh #135: kafkaacls + kafkausergroups CRs removed. ACLs now live
   # inline on KafkaUser.spec.authorization (Strimzi-style).
@@ -48,23 +48,23 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "skafka.fullname" . }}-operator
-  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-operator
+  labels: {{- include "kaas.operatorLabels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "skafka.fullname" . }}-operator
+  name: {{ include "kaas.fullname" . }}-operator
 subjects:
   - kind: ServiceAccount
-    name: {{ include "skafka.operatorSAName" . }}
+    name: {{ include "kaas.operatorSAName" . }}
     namespace: {{ .Release.Namespace }}
 ---
 # Own-namespace Role: Secrets CRUD for output credentials.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "skafka.fullname" . }}-operator
-  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-operator
+  labels: {{- include "kaas.operatorLabels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: [secrets]
@@ -73,14 +73,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "skafka.fullname" . }}-operator
-  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-operator
+  labels: {{- include "kaas.operatorLabels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "skafka.fullname" . }}-operator
+  name: {{ include "kaas.fullname" . }}-operator
 subjects:
   - kind: ServiceAccount
-    name: {{ include "skafka.operatorSAName" . }}
+    name: {{ include "kaas.operatorSAName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

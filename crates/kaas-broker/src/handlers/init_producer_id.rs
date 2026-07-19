@@ -292,7 +292,7 @@ mod tests {
         use kaas_coordinator::FenceLog;
         let (_t, b) = broker_with_txn();
         let fence_dir = tempfile::tempdir().unwrap();
-        let log = Arc::new(FenceLog::open(fence_dir.path(), "skafka-0").unwrap());
+        let log = Arc::new(FenceLog::open(fence_dir.path(), "kaas-0").unwrap());
         b.install_fence_log(log.clone());
 
         let h = InitProducerIdHandler::new(b);

@@ -367,7 +367,7 @@ impl TxnAssignmentSource for Coordinator {
     }
 }
 
-/// Bump `skafka.assignment.polls` after every mtime tick. The
+/// Bump `kaas.assignment.polls` after every mtime tick. The
 /// `change_detected` label lets dashboards
 /// can distinguish "watcher is running but nothing changed" from
 /// "watcher is running and just applied a fresh assignment".
@@ -410,15 +410,15 @@ mod tests {
             controller_epoch: epoch,
             assignment_version: version,
             generated_at: "2025-01-01T00:00:00Z".to_owned(),
-            controller: "skafka-0".to_owned(),
+            controller: "kaas-0".to_owned(),
             brokers: vec![
                 BrokerAssignment {
-                    id: "skafka-0".to_owned(),
+                    id: "kaas-0".to_owned(),
                     health: BrokerHealth::Alive,
                     last_seen: "x".to_owned(),
                 },
                 BrokerAssignment {
-                    id: "skafka-1".to_owned(),
+                    id: "kaas-1".to_owned(),
                     health: BrokerHealth::Alive,
                     last_seen: "x".to_owned(),
                 },
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn snapshot_empty_before_first_apply() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
+        let c = coordinator("kaas-0", tmp.path());
         assert!(c.snapshot().is_none());
         assert!(!c.owns("t1", 0));
     }
@@ -458,25 +458,25 @@ mod tests {
     #[test]
     fn apply_reads_assignment_and_populates_ownership() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
-        write_assignment(tmp.path(), &sample(1, 1, "skafka-0", "skafka-0"));
+        let c = coordinator("kaas-0", tmp.path());
+        write_assignment(tmp.path(), &sample(1, 1, "kaas-0", "kaas-0"));
         assert!(c.apply_if_new());
         assert!(c.owns("t1", 0));
         assert_eq!(c.current_epoch("t1", 0), Some(1));
-        assert_eq!(c.leader_for("t1", 0).as_deref(), Some("skafka-0"));
+        assert_eq!(c.leader_for("t1", 0).as_deref(), Some("kaas-0"));
         assert!(c.owns_group("g1"));
-        assert_eq!(c.group_coordinator("g1").as_deref(), Some("skafka-0"));
+        assert_eq!(c.group_coordinator("g1").as_deref(), Some("kaas-0"));
     }
 
     #[test]
     fn apply_ignores_same_version_replay() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
-        write_assignment(tmp.path(), &sample(1, 1, "skafka-0", "skafka-0"));
+        let c = coordinator("kaas-0", tmp.path());
+        write_assignment(tmp.path(), &sample(1, 1, "kaas-0", "kaas-0"));
         assert!(c.apply_if_new());
         assert!(!c.apply_if_new(), "same version → no-op");
         // Bumping the version triggers another apply.
-        write_assignment(tmp.path(), &sample(2, 1, "skafka-0", "skafka-0"));
+        write_assignment(tmp.path(), &sample(2, 1, "kaas-0", "kaas-0"));
         assert!(c.apply_if_new());
     }
 
@@ -490,14 +490,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let c = Coordinator::new(
-            "skafka-0",
+            "kaas-0",
             tmp.path(),
             Arc::new(E5),
             Arc::new(LocalHeartbeat),
         );
-        write_assignment(tmp.path(), &sample(1, 3, "skafka-0", "skafka-0"));
+        write_assignment(tmp.path(), &sample(1, 3, "kaas-0", "kaas-0"));
         assert!(!c.apply_if_new(), "epoch 3 < lease 5 → rejected");
-        write_assignment(tmp.path(), &sample(1, 5, "skafka-0", "skafka-0"));
+        write_assignment(tmp.path(), &sample(1, 5, "kaas-0", "kaas-0"));
         assert!(c.apply_if_new(), "epoch 5 == lease 5 → accepted");
     }
 
@@ -505,7 +505,7 @@ mod tests {
     fn assignment_change_handler_fires_with_prev_and_next() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
+        let c = coordinator("kaas-0", tmp.path());
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_c = calls.clone();
         c.on_assignment_change(Arc::new(move |prev, next| {
@@ -518,9 +518,9 @@ mod tests {
                 assert_eq!(next.assignment_version, 2);
             }
         }));
-        write_assignment(tmp.path(), &sample(1, 1, "skafka-0", "skafka-0"));
+        write_assignment(tmp.path(), &sample(1, 1, "kaas-0", "kaas-0"));
         c.apply_if_new();
-        write_assignment(tmp.path(), &sample(2, 1, "skafka-0", "skafka-0"));
+        write_assignment(tmp.path(), &sample(2, 1, "kaas-0", "kaas-0"));
         c.apply_if_new();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
@@ -528,11 +528,11 @@ mod tests {
     #[test]
     fn owns_group_two_tier_explicit_override_wins() {
         let tmp = tempfile::tempdir().unwrap();
-        let c0 = coordinator("skafka-0", tmp.path());
-        let c1 = coordinator("skafka-1", tmp.path());
-        // Explicit override pins g1 to skafka-1 even if hash routes
-        // it to skafka-0.
-        write_assignment(tmp.path(), &sample(1, 1, "skafka-0", "skafka-1"));
+        let c0 = coordinator("kaas-0", tmp.path());
+        let c1 = coordinator("kaas-1", tmp.path());
+        // Explicit override pins g1 to kaas-1 even if hash routes
+        // it to kaas-0.
+        write_assignment(tmp.path(), &sample(1, 1, "kaas-0", "kaas-1"));
         c0.apply_if_new();
         c1.apply_if_new();
         assert!(c1.owns_group("g1"));
@@ -542,14 +542,14 @@ mod tests {
     #[test]
     fn group_coordinator_falls_back_to_hash_when_no_explicit_entry() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
-        let mut a = sample(1, 1, "skafka-0", "skafka-0");
+        let c = coordinator("kaas-0", tmp.path());
+        let mut a = sample(1, 1, "kaas-0", "kaas-0");
         // Drop the explicit consumer-groups entry — hash routes the
         // group through the broker set.
         a.consumer_groups.clear();
         write_assignment(tmp.path(), &a);
         c.apply_if_new();
-        // Hash returns *some* broker from {skafka-0, skafka-1};
+        // Hash returns *some* broker from {kaas-0, kaas-1};
         // either way the resolve succeeds.
         assert!(c.group_coordinator("g-fresh").is_some());
     }
@@ -557,8 +557,8 @@ mod tests {
     #[test]
     fn txn_assignment_source_uses_hash() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
-        write_assignment(tmp.path(), &sample(1, 1, "skafka-0", "skafka-0"));
+        let c = coordinator("kaas-0", tmp.path());
+        write_assignment(tmp.path(), &sample(1, 1, "kaas-0", "kaas-0"));
         c.apply_if_new();
         assert!(c.txn_coordinator("tx-1").is_some());
     }
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn missing_assignment_file_is_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
+        let c = coordinator("kaas-0", tmp.path());
         assert!(!c.apply_if_new());
         assert!(c.snapshot().is_none());
     }
@@ -574,11 +574,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn spawn_watcher_picks_up_new_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = coordinator("skafka-0", tmp.path());
+        let c = coordinator("kaas-0", tmp.path());
         let handle = c.spawn_watcher();
         // Yield once for the initial apply (file missing → no-op).
         tokio::task::yield_now().await;
-        write_assignment(tmp.path(), &sample(1, 1, "skafka-0", "skafka-0"));
+        write_assignment(tmp.path(), &sample(1, 1, "kaas-0", "kaas-0"));
         // Advance past the 1 s poll interval; the watcher should
         // pick up the file.
         tokio::time::advance(POLL_INTERVAL + Duration::from_millis(100)).await;

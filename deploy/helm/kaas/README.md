@@ -1,12 +1,12 @@
-# skafka Helm chart
+# kaas Helm chart
 
-Deploys the skafka broker StatefulSet and operator Deployment backed by a single
+Deploys the kaas broker StatefulSet and operator Deployment backed by a single
 shared ReadWriteMany PersistentVolumeClaim.
 
 ## Images
 
 The chart derives the broker and operator image repositories from the resolved
-tag: `ghcr.io/woestebanaan/skafka` + `skafka-operator`, with a `-preview`
+tag: `ghcr.io/woestebanaan/kaas` + `kaas-operator`, with a `-preview`
 suffix appended automatically when the tag is a pre-release (contains a `-`),
 matching the release workflow's image-naming rule — so the chart default
 points at images that actually exist for preview tags, with no override
@@ -18,9 +18,9 @@ needed.
 mirrors:
 
 ```bash
-helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
-  --set image.repository=registry.example.com/mirrors/skafka-preview \
-  --set operator.image.repository=registry.example.com/mirrors/skafka-operator-preview \
+helm install my-kaas oci://ghcr.io/woestebanaan/charts/kaas \
+  --set image.repository=registry.example.com/mirrors/kaas-preview \
+  --set operator.image.repository=registry.example.com/mirrors/kaas-operator-preview \
   ...
 ```
 
@@ -35,13 +35,13 @@ helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
 The chart is published as an OCI artifact to GHCR. No `helm repo add` needed.
 
 The chart bundles its CRDs under `crds/`, so Helm installs them automatically on
-first install. The chart is always pushed under the name `skafka` (from
+first install. The chart is always pushed under the name `kaas` (from
 `Chart.yaml`); pre-release tags (`vX.Y.Z-*`) only rename the *images* to their
 `*-preview` variants — the image helpers derive that suffix from the tag, so no
 repository override is needed:
 
 ```bash
-helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
+helm install my-kaas oci://ghcr.io/woestebanaan/charts/kaas \
   --version 0.2.0-preview \
   --namespace kafka --create-namespace \
   --set storage.className=ceph-filesystem \
@@ -51,7 +51,7 @@ helm install my-skafka oci://ghcr.io/woestebanaan/charts/skafka \
 See available versions:
 
 ```bash
-helm show all oci://ghcr.io/woestebanaan/charts/skafka --version 0.2.0-preview
+helm show all oci://ghcr.io/woestebanaan/charts/kaas --version 0.2.0-preview
 ```
 
 ### CRDs on upgrade
@@ -62,12 +62,12 @@ CRDs, apply them explicitly before `helm upgrade`:
 
 ```bash
 # Pull the new chart version locally, then apply the CRDs it ships:
-helm pull oci://ghcr.io/woestebanaan/charts/skafka --version 0.2.0-preview --untar
-kubectl apply -f skafka/crds/
+helm pull oci://ghcr.io/woestebanaan/charts/kaas --version 0.2.0-preview --untar
+kubectl apply -f kaas/crds/
 
 # Or apply them straight from the repo at a specific ref:
 REF=v0.2.0-preview
-BASE=https://raw.githubusercontent.com/Woestebanaan/skafka/${REF}/deploy/crds
+BASE=https://raw.githubusercontent.com/Woestebanaan/kaas/${REF}/deploy/crds
 for f in kaas.rs_kafkaclusters.yaml \
          kaas.rs_kafkatopics.yaml \
          kaas.rs_kafkausers.yaml \
@@ -78,7 +78,7 @@ done
 
 ## StorageClass guidance
 
-skafka stores all partition data on a single shared PVC. The StorageClass must
+kaas stores all partition data on a single shared PVC. The StorageClass must
 support `ReadWriteMany` and provide NFSv4-class semantics: atomic same-directory
 rename, fsync durability, and close-to-open consistency.
 
@@ -106,7 +106,7 @@ attach time. Example:
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: skafka-nfs
+  name: kaas-nfs
 provisioner: nfs.csi.k8s.io
 mountOptions:
   - nfsvers=4.1
@@ -115,7 +115,7 @@ mountOptions:
   - hard              # block on server unavailability instead of returning EIO
 parameters:
   server: nfs.example.com
-  share: /export/skafka
+  share: /export/kaas
 ```
 
 The `acregmax=1` setting matters most: the broker polls assignment.json's
@@ -174,8 +174,8 @@ See `values.yaml` for the full set of tunables. Common overrides:
 ## Smoke test
 
 ```bash
-# Port-forward to the client Service (release name + "-skafka"):
-kubectl -n kafka port-forward svc/my-skafka-skafka 9092:9092 &
+# Port-forward to the client Service (release name + "-kaas"):
+kubectl -n kafka port-forward svc/my-kaas-kaas 9092:9092 &
 
 # Create a topic:
 cat <<EOF | kubectl apply -f -
@@ -196,14 +196,14 @@ kcat -b localhost:9092 -t test -C -o beginning -e
 ## Uninstall
 
 ```bash
-helm uninstall my-skafka -n kafka
+helm uninstall my-kaas -n kafka
 ```
 
 **Note:** the PVC is NOT deleted on uninstall (`helm.sh/resource-policy: keep`
 annotation). Delete it manually if you want to reclaim the storage:
 
 ```bash
-kubectl -n kafka delete pvc my-skafka-skafka-data
+kubectl -n kafka delete pvc my-kaas-kaas-data
 ```
 
 **Note:** the `KafkaCluster` CR has a finalizer that the operator must
@@ -214,6 +214,6 @@ finalizer fires, leaving the CR stuck in `Terminating`. Delete the CR
 explicitly first:
 
 ```bash
-kubectl -n kafka delete kafkacluster my-skafka --wait
-helm uninstall my-skafka -n kafka
+kubectl -n kafka delete kafkacluster my-kaas --wait
+helm uninstall my-kaas -n kafka
 ```

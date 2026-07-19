@@ -1,21 +1,21 @@
-skafka {{ .Chart.AppVersion }} has been installed as {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+kaas {{ .Chart.AppVersion }} has been installed as {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
-Broker StatefulSet: {{ include "skafka.fullname" . }} ({{ .Values.broker.replicaCount }} replicas)
-Broker image:       {{ include "skafka.brokerImage" . }}
-Shared PVC:         {{ include "skafka.pvcName" . }} ({{ .Values.storage.size }} on {{ .Values.storage.className }})
+Broker StatefulSet: {{ include "kaas.fullname" . }} ({{ .Values.broker.replicaCount }} replicas)
+Broker image:       {{ include "kaas.brokerImage" . }}
+Shared PVC:         {{ include "kaas.pvcName" . }} ({{ .Values.storage.size }} on {{ .Values.storage.className }})
 {{- if .Values.operator.enabled }}
-Operator:           {{ include "skafka.fullname" . }}-operator
-Operator image:     {{ include "skafka.operatorImage" . }}
+Operator:           {{ include "kaas.fullname" . }}-operator
+Operator image:     {{ include "kaas.operatorImage" . }}
 {{- end }}
 
-{{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
-{{- $internal := include "skafka.firstByType" (dict "ctx" . "type" "internal") | fromYaml }}
+{{- $external := include "kaas.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
+{{- $internal := include "kaas.firstByType" (dict "ctx" . "type" "internal") | fromYaml }}
 {{- if $external }}
 
 External access is enabled with end-to-end TLS.
 Wait for the cert-manager Certificate to be ready:
 
-  kubectl get certificate {{ include "skafka.fullname" . }}-broker-tls -n {{ .Release.Namespace }}
+  kubectl get certificate {{ include "kaas.fullname" . }}-broker-tls -n {{ .Release.Namespace }}
 
 {{- with $external.bootstrapHostname }}
 Configure your Kafka clients with the bootstrap address:
@@ -39,7 +39,7 @@ changes — no special client configuration needed.
 
 External access is disabled. In-cluster clients connect directly to:
   {{- range $i, $e := until (int .Values.broker.replicaCount) }}
-  {{ include "skafka.fullname" $ }}-{{ $i }}.{{ include "skafka.headlessName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $internal.port }}
+  {{ include "kaas.fullname" $ }}-{{ $i }}.{{ include "kaas.headlessName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $internal.port }}
   {{- end }}
 
 To enable external access, add a listener with `type: external` to .Values.listeners
@@ -59,7 +59,7 @@ To create a topic:
 
 To inspect cluster state (Phase 6 mirror, refreshed within ~1s of every
 assignment change):
-  kubectl get kafkaclusterassignments {{ include "skafka.fullname" . }} -n {{ .Release.Namespace }} -o yaml
+  kubectl get kafkaclusterassignments {{ include "kaas.fullname" . }} -n {{ .Release.Namespace }} -o yaml
 
 Storage requirements
   ReadWriteMany volume with NFSv4-class semantics:

@@ -1,7 +1,7 @@
 //! DescribeClientQuotas handler — API key 48 (KIP-546).
 //!
 //! Thin wrapper over [`QuotaEnforcer::describe_user_quota`] /
-//! [`QuotaEnforcer::list_user_quotas`]. skafka only supports the
+//! [`QuotaEnforcer::list_user_quotas`]. kaas only supports the
 //! `user` entity axis — `client-id` / `ip` filters return an empty
 //! response (the wire schema doesn't carry a per-axis error code).
 //!
@@ -104,7 +104,7 @@ enum UserFilter {
 }
 
 fn resolve_user_filter(components: &[ComponentData]) -> UserFilter {
-    // skafka supports a single `user` axis. Anything else → Unsupported.
+    // kaas supports a single `user` axis. Anything else → Unsupported.
     if components.is_empty() {
         return UserFilter::Any;
     }
@@ -127,7 +127,7 @@ fn resolve_user_filter(components: &[ComponentData]) -> UserFilter {
             None => UserFilter::Unsupported,
         },
         match_type::ANY => UserFilter::Any,
-        // DEFAULT (1) means "the <default> user entity"; skafka has
+        // DEFAULT (1) means "the <default> user entity"; kaas has
         // no such notion (users are CR-instantiated). Return empty.
         _ => UserFilter::Unsupported,
     }

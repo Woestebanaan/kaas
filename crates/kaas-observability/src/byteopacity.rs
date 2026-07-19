@@ -5,9 +5,9 @@
 //! mover, not a byte interpreter": no code path should decode
 //! individual records or re-encode a `RecordBatch`. These counters
 //! MUST stay at zero in steady state — every increment is a bug and
-//! the `SkafkaByteOpacityViolated` alert fires on non-zero.
+//! the `KaasByteOpacityViolated` alert fires on non-zero.
 //!
-//! As of v1 no skafka code path calls these. If you find yourself
+//! As of v1 no kaas code path calls these. If you find yourself
 //! adding the first call, stop: a use case that genuinely requires
 //! record-level inspection needs a separate design discussion before
 //! it lands. See [`crate::metrics::Metrics::codec_record_decode`].

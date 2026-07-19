@@ -8,7 +8,7 @@
 //!
 //! v3+ adds `(producer_id, producer_epoch)` request fields per KIP-360
 //! so a producer can ask for renewal of an existing PID after a fatal
-//! error. Skafka accepts but currently ignores these — every
+//! error. Kaas accepts but currently ignores these — every
 //! `InitProducerId` returns a fresh PID with `epoch = 0`. The Phase 6
 //! transaction work wires the gh #22 rejoin contract that respects the
 //! request fields.

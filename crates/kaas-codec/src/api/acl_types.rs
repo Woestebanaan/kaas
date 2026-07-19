@@ -57,7 +57,7 @@ pub mod permission {
 
 /// Wire → CR string for resource types. `None` for UNKNOWN/ANY (filter
 /// wildcards; CreateAcls callers must pass a concrete type) and for
-/// DELEGATION_TOKEN / USER (accepted on the wire but skafka has no
+/// DELEGATION_TOKEN / USER (accepted on the wire but kaas has no
 /// CR-side enum — the handler surfaces INVALID_REQUEST rather than
 /// silently dropping).
 pub fn resource_type_to_cr(t: i8) -> Option<&'static str> {

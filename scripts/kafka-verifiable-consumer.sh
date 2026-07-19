@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-verifiable-consumer.sh against skafka.
+# Test kafka-verifiable-consumer.sh against kaas.
 #
 # Scenarios:
 #   1. Seed 1000 records; consumer reports records_consumed >= 1000

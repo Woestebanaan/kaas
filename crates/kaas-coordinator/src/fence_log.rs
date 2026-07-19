@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn append_then_snapshot_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
-        let log = FenceLog::open(tmp.path(), "skafka-0").unwrap();
+        let log = FenceLog::open(tmp.path(), "kaas-0").unwrap();
         log.append(42, 3).unwrap();
         log.append(99, 1).unwrap();
         let snap = log.snapshot();
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn append_lower_or_equal_epoch_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
-        let log = FenceLog::open(tmp.path(), "skafka-0").unwrap();
+        let log = FenceLog::open(tmp.path(), "kaas-0").unwrap();
         log.append(42, 5).unwrap();
         log.append(42, 5).unwrap(); // equal — no-op
         log.append(42, 3).unwrap(); // lower — no-op
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn append_higher_epoch_overwrites() {
         let tmp = tempfile::tempdir().unwrap();
-        let log = FenceLog::open(tmp.path(), "skafka-0").unwrap();
+        let log = FenceLog::open(tmp.path(), "kaas-0").unwrap();
         log.append(42, 3).unwrap();
         log.append(42, 7).unwrap();
         assert_eq!(log.snapshot().get(&42), Some(&7));
@@ -170,14 +170,14 @@ mod tests {
     #[test]
     fn file_name_matches_broker_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let log = FenceLog::open(tmp.path(), "skafka-3").unwrap();
-        assert_eq!(log.path().file_name().unwrap(), "from-skafka-3.json");
+        let log = FenceLog::open(tmp.path(), "kaas-3").unwrap();
+        assert_eq!(log.path().file_name().unwrap(), "from-kaas-3.json");
     }
 
     #[test]
     fn snapshot_on_missing_file_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let log = FenceLog::open(tmp.path(), "skafka-0").unwrap();
+        let log = FenceLog::open(tmp.path(), "kaas-0").unwrap();
         // No append — snapshot should be empty, not error.
         assert!(log.snapshot().is_empty());
     }

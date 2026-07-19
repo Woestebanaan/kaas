@@ -5,7 +5,7 @@
 //! leaves either the old file or the new one — never a torn JSON
 //! payload.
 //!
-//! All three persisted JSON files in skafka go through here:
+//! All three persisted JSON files in kaas go through here:
 //! `manifest.json`, `producer-state.snapshot`, and the operator-
 //! written `.config.json`.
 

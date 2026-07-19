@@ -2,15 +2,15 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "skafka.brokerSAName" . }}
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.brokerSAName" . }}
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "skafka.fullname" . }}-broker
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-broker
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 rules:
   # Controller election + epoch watch via Leases. The broker
   # acquires/renews the kaas-controller Lease with server-side
@@ -62,23 +62,23 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "skafka.fullname" . }}-broker
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-broker
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "skafka.fullname" . }}-broker
+  name: {{ include "kaas.fullname" . }}-broker
 subjects:
   - kind: ServiceAccount
-    name: {{ include "skafka.brokerSAName" . }}
+    name: {{ include "kaas.brokerSAName" . }}
     namespace: {{ .Release.Namespace }}
 ---
 # Own-namespace Role: Secrets + pods/status.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "skafka.fullname" . }}-broker
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-broker
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: [secrets]
@@ -91,13 +91,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "skafka.fullname" . }}-broker
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-broker
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "skafka.fullname" . }}-broker
+  name: {{ include "kaas.fullname" . }}-broker
 subjects:
   - kind: ServiceAccount
-    name: {{ include "skafka.brokerSAName" . }}
+    name: {{ include "kaas.brokerSAName" . }}
     namespace: {{ .Release.Namespace }}

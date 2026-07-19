@@ -1,6 +1,6 @@
 //! Per-listener `AuthEngine` lookup.
 //!
-//! A skafka broker can host several listeners with different auth
+//! A kaas broker can host several listeners with different auth
 //! policies side by side (anonymous + SCRAM, mTLS-external + SCRAM-
 //! internal, …). The selector keeps that decision out of the
 //! handlers — they just call

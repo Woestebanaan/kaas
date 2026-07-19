@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Test kafka-streams-application-reset.sh against skafka.
+# Test kafka-streams-application-reset.sh against kaas.
 #
 # The reset tool deletes Streams internal topics and resets a consumer group's
 # offsets. It exercises the admin protocol (DeleteTopics + reset offsets)
 # rather than Streams runtime, so it can run today even though Streams
-# itself is not yet supported by skafka — the underlying APIs need to work.
+# itself is not yet supported by kaas — the underlying APIs need to work.
 #
 # Scenarios:
 #   1. Set up a fake "Streams" application:
@@ -17,7 +17,7 @@
 
 . "$(dirname "$0")/_common.sh"
 
-APP="skafka-reset-$$"
+APP="kaas-reset-$$"
 INPUT="$APP-input"
 REPART="$APP-KSTREAM-AGGREGATE-STATE-STORE-0000000003-repartition"
 CHANGELOG="$APP-KSTREAM-AGGREGATE-STATE-STORE-0000000003-changelog"

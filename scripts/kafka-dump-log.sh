@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-dump-log.sh against a skafka segment file.
+# Test kafka-dump-log.sh against a kaas segment file.
 #
 # kafka-dump-log inspects local segment files; it does not talk to a broker.
 # Run it inside a broker pod (or on a node with broker /data mounted) and pass
@@ -13,7 +13,7 @@
 SEGMENT="${SEGMENT:-}"
 
 if [ -z "$SEGMENT" ] || [ ! -f "$SEGMENT" ]; then
-  skip "set SEGMENT=/data/<topic>/<partition>/<...>.log to a real segment file. Inside the broker pod: kubectl -n skafka exec sts/skafka -- ls /data/"
+  skip "set SEGMENT=/data/<topic>/<partition>/<...>.log to a real segment file. Inside the broker pod: kubectl -n kaas exec sts/kaas -- ls /data/"
 fi
 
 echo ">> Scenario 1: --print-data-log $SEGMENT"

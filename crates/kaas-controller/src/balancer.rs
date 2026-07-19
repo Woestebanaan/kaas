@@ -21,7 +21,7 @@
 //! one for the same input (upgrade requirement). The previous
 //! FNV-1a 64 had pathological avalanche on broker IDs differing by
 //! one byte and drove a 50/25/25 skew on 3-broker clusters
-//! (skafka#112).
+//! (kaas#112).
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
@@ -296,7 +296,7 @@ mod tests {
     use super::*;
 
     fn brokers(n: usize) -> Vec<String> {
-        (0..n).map(|i| format!("skafka-{i}")).collect()
+        (0..n).map(|i| format!("kaas-{i}")).collect()
     }
 
     #[test]
@@ -390,11 +390,11 @@ mod tests {
             partition_count: 9,
         }];
         let first = balance(None, &three, &topics);
-        // skafka-2 goes down.
-        let two = vec!["skafka-0".to_owned(), "skafka-1".to_owned()];
+        // kaas-2 goes down.
+        let two = vec!["kaas-0".to_owned(), "kaas-1".to_owned()];
         let second = balance(Some(&first), &two, &topics);
         for p in &first {
-            if p.broker != "skafka-2" {
+            if p.broker != "kaas-2" {
                 // Stable partition keeps epoch 1.
                 let matching = second
                     .iter()
@@ -407,7 +407,7 @@ mod tests {
         }
         // Every partition assigned to an alive broker.
         for p in &second {
-            assert!(p.broker == "skafka-0" || p.broker == "skafka-1");
+            assert!(p.broker == "kaas-0" || p.broker == "kaas-1");
         }
     }
 
@@ -442,10 +442,10 @@ mod tests {
             },
         ];
         let first = balance_groups(None, &three, &groups);
-        let two = vec!["skafka-0".to_owned(), "skafka-1".to_owned()];
+        let two = vec!["kaas-0".to_owned(), "kaas-1".to_owned()];
         let second = balance_groups(Some(&first), &two, &groups);
         for g in &second {
-            assert!(g.broker == "skafka-0" || g.broker == "skafka-1");
+            assert!(g.broker == "kaas-0" || g.broker == "kaas-1");
         }
     }
 
@@ -454,8 +454,8 @@ mod tests {
         // Pin a known input → output mapping so a future change to
         // the byte construction (delimiters, order) surfaces here
         // rather than as a silent cutover divergence.
-        let h = rendezvous_hash("t1", 0, "skafka-0");
-        let h_swap = rendezvous_hash("t1", 1, "skafka-0");
+        let h = rendezvous_hash("t1", 0, "kaas-0");
+        let h_swap = rendezvous_hash("t1", 1, "kaas-0");
         assert_ne!(h, h_swap, "different partition must yield different hash");
     }
 }

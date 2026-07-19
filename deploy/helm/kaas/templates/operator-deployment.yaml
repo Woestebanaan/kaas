@@ -2,24 +2,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "skafka.fullname" . }}-operator
-  labels: {{- include "skafka.operatorLabels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-operator
+  labels: {{- include "kaas.operatorLabels" . | nindent 4 }}
 spec:
   replicas: 1
   selector:
-    matchLabels: {{- include "skafka.operatorSelectorLabels" . | nindent 6 }}
+    matchLabels: {{- include "kaas.operatorSelectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "skafka.operatorSelectorLabels" . | nindent 8 }}
+      labels: {{- include "kaas.operatorSelectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "skafka.operatorSAName" . }}
+      serviceAccountName: {{ include "kaas.operatorSAName" . }}
       {{- with .Values.operator.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: operator
-          image: {{ include "skafka.operatorImage" . }}
+          image: {{ include "kaas.operatorImage" . }}
           imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
           env:
             - name: KAAS_DATA_DIR
@@ -67,5 +67,5 @@ spec:
         # Operator mounts the SAME PVC as the brokers.
         - name: data
           persistentVolumeClaim:
-            claimName: {{ include "skafka.pvcName" . }}
+            claimName: {{ include "kaas.pvcName" . }}
 {{- end }}

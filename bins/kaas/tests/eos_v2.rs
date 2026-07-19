@@ -90,7 +90,7 @@ fn build_test_broker(topic: &str, partitions: i32, data_dir: &std::path::Path) -
     Arc::new(Broker::with_auth(
         engine,
         topics,
-        "skafka-eos",
+        "kaas-eos",
         0,
         authorizer,
         quotas,
@@ -121,12 +121,12 @@ fn install_phase6_surface(broker: &Arc<Broker>) -> (tempfile::TempDir, Arc<Manag
     let offsets = Arc::new(OffsetStore::new(tmp.path()));
     let lookup = Arc::new(FnLookup::new(|_| None));
     let manager = Manager::new(
-        "skafka-eos",
+        "kaas-eos",
         offsets,
         lookup,
-        LocalGroupSource::new("skafka-eos"),
+        LocalGroupSource::new("kaas-eos"),
     );
-    manager.set_txn_assignment_source(LocalTxnSource::new("skafka-eos"));
+    manager.set_txn_assignment_source(LocalTxnSource::new("kaas-eos"));
     broker.install_coord_manager(manager.clone());
 
     // Transactional state store + offset hook.

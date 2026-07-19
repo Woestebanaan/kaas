@@ -225,7 +225,7 @@ fn error_partition(index: i32, error_code: i16) -> produce::PartitionResponse {
 }
 
 /// Same shape as `error_partition` but also bumps
-/// `skafka.produce.errors` labelled by topic + error_code. Callers
+/// `kaas.produce.errors` labelled by topic + error_code. Callers
 /// that don't know the topic (unlikely) can still reach for
 /// `error_partition` directly.
 fn error_partition_bumped(topic: &str, index: i32, error_code: i16) -> produce::PartitionResponse {

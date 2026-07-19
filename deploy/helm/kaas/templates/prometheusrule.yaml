@@ -1,6 +1,6 @@
 {{- if .Values.observability.alerts.enabled }}
 {{- /*
-Phase 10 Gap #7: PrometheusRule for skafka's load-bearing failure
+Phase 10 Gap #7: PrometheusRule for kaas's load-bearing failure
 modes. Off by default — opt in via observability.alerts.enabled.
 
 Each rule's "summary" + "description" annotations are written so an
@@ -12,19 +12,19 @@ they sustain.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ include "skafka.fullname" . }}
+  name: {{ include "kaas.fullname" . }}
   labels:
-    {{- include "skafka.labels" . | nindent 4 }}
+    {{- include "kaas.labels" . | nindent 4 }}
     {{- with .Values.observability.alerts.additionalLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   groups:
-    - name: skafka.byteopacity
+    - name: kaas.byteopacity
       interval: 30s
       rules:
-        - alert: SkafkaByteOpacityViolated
-          expr: increase(skafka_codec_record_decode_total[5m]) > 0 or increase(skafka_codec_batch_reencode_total[5m]) > 0
+        - alert: KaasByteOpacityViolated
+          expr: increase(kaas_codec_record_decode_total[5m]) > 0 or increase(kaas_codec_batch_reencode_total[5m]) > 0
           for: 0s
           labels:
             severity: critical
@@ -34,17 +34,17 @@ spec:
           annotations:
             summary: "Byte-opacity invariant violated on {{`{{ $labels.broker_id }}`}}"
             description: |
-              skafka_codec_record_decode_total or skafka_codec_batch_reencode_total
+              kaas_codec_record_decode_total or kaas_codec_batch_reencode_total
               incremented. The v3.3 plan is explicit: the broker is a byte mover,
               not a byte interpreter. A non-zero increment means some code path
               decoded an individual record or re-encoded a RecordBatch — page on
               this. Check the slog warnings around the increment for the call site.
 
-    - name: skafka.coordination
+    - name: kaas.coordination
       interval: 30s
       rules:
-        - alert: SkafkaSelfFencing
-          expr: sum by (broker_id) (rate(skafka_self_fence_events_total[1m])) * 60 > {{ .Values.observability.alerts.thresholds.selfFencePerMinute }}
+        - alert: KaasSelfFencing
+          expr: sum by (broker_id) (rate(kaas_self_fence_events_total[1m])) * 60 > {{ .Values.observability.alerts.thresholds.selfFencePerMinute }}
           for: 2m
           labels:
             severity: warning
@@ -54,15 +54,15 @@ spec:
           annotations:
             summary: "Broker {{`{{ $labels.broker_id }}`}} is self-fencing on stale heartbeats"
             description: |
-              skafka_self_fence_events_total exceeded {{ .Values.observability.alerts.thresholds.selfFencePerMinute }}/min for 2 minutes.
+              kaas_self_fence_events_total exceeded {{ .Values.observability.alerts.thresholds.selfFencePerMinute }}/min for 2 minutes.
               The broker has lost connectivity to the controller; produces are
               being rejected with NOT_LEADER_FOR_PARTITION. Check
-              skafka_heartbeat_rtt_seconds and the controller's
-              skafka_assignment_pushes_total — likely a network partition or
+              kaas_heartbeat_rtt_seconds and the controller's
+              kaas_assignment_pushes_total — likely a network partition or
               controller pod issue.
 
-        - alert: SkafkaStaleControllerWriting
-          expr: sum by (broker_id) (rate(skafka_stale_assignments_rejected_total[1m])) * 60 > {{ .Values.observability.alerts.thresholds.staleAssignmentsPerMinute }}
+        - alert: KaasStaleControllerWriting
+          expr: sum by (broker_id) (rate(kaas_stale_assignments_rejected_total[1m])) * 60 > {{ .Values.observability.alerts.thresholds.staleAssignmentsPerMinute }}
           for: 5m
           labels:
             severity: critical
@@ -78,8 +78,8 @@ spec:
               to stop the noise. Check Lease holder identity vs the broker that's
               still calling FileStore.Write.
 
-        - alert: SkafkaNoCurrentController
-          expr: sum(skafka_is_controller) == 0
+        - alert: KaasNoCurrentController
+          expr: sum(kaas_is_controller) == 0
           for: 30s
           labels:
             severity: critical
@@ -89,15 +89,15 @@ spec:
           annotations:
             summary: "No broker holds the cluster controller lease"
             description: |
-              sum(skafka_is_controller) == 0 — the cluster has no active
+              sum(kaas_is_controller) == 0 — the cluster has no active
               controller. Brokers can still serve produce/fetch on existing
               assignments, but no rebalance, topic creation, or broker
               join/leave will be processed until election succeeds.
               Check the kube Lease object kaas-controller and the broker
               pods' leader election logs.
 
-        - alert: SkafkaBrokerCountMismatch
-          expr: max(skafka_broker_count_alive) - max(skafka_broker_count_assigned) > 0
+        - alert: KaasBrokerCountMismatch
+          expr: max(kaas_broker_count_alive) - max(kaas_broker_count_assigned) > 0
           for: 5m
           labels:
             severity: warning
@@ -111,13 +111,13 @@ spec:
               5 minutes. Possible causes: the broker isn't streaming
               heartbeats (check ConnectedBrokers in the controller's
               AssignmentLoop), or the assignment loop is stuck (check
-              skafka_assignment_changes_total).
+              kaas_assignment_changes_total).
 
-    - name: skafka.assignment_loop
+    - name: kaas.assignment_loop
       interval: 30s
       rules:
-        - alert: SkafkaAssignmentFileWriteFailing
-          expr: rate(skafka_assignment_file_writes_total{result="error"}[5m]) > 0
+        - alert: KaasAssignmentFileWriteFailing
+          expr: rate(kaas_assignment_file_writes_total{result="error"}[5m]) > 0
           for: 2m
           labels:
             severity: critical
@@ -133,8 +133,8 @@ spec:
               and the broker pod's filesystem permissions on
               /data/__cluster.
 
-        - alert: SkafkaAssignmentFileSizeApproachingCap
-          expr: max(skafka_assignment_file_size_bytes) > {{ .Values.observability.alerts.thresholds.assignmentFileSizeWarnBytes }}
+        - alert: KaasAssignmentFileSizeApproachingCap
+          expr: max(kaas_assignment_file_size_bytes) > {{ .Values.observability.alerts.thresholds.assignmentFileSizeWarnBytes }}
           for: 10m
           labels:
             severity: warning
@@ -149,8 +149,8 @@ spec:
               this fires around 5000-8000 partitions. The authoritative file
               on the PVC is unaffected; only the kubectl-debug view truncates.
 
-        - alert: SkafkaCRMirrorErrorSustained
-          expr: rate(skafka_assignment_cr_mirror_writes_total{result="error"}[5m]) > 0
+        - alert: KaasCRMirrorErrorSustained
+          expr: rate(kaas_assignment_cr_mirror_writes_total{result="error"}[5m]) > 0
           for: 15m
           labels:
             severity: warning
@@ -166,11 +166,11 @@ spec:
               shows stale state. Check operator RBAC (kafkaclusterassignments,
               kafkaclusterassignments/status) and CRD installation.
 
-    - name: skafka.heartbeat
+    - name: kaas.heartbeat
       interval: 30s
       rules:
-        - alert: SkafkaHeartbeatRTTHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(skafka_heartbeat_rtt_seconds_bucket[5m]))) > {{ .Values.observability.alerts.thresholds.heartbeatRttP99Seconds }}
+        - alert: KaasHeartbeatRTTHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(kaas_heartbeat_rtt_seconds_bucket[5m]))) > {{ .Values.observability.alerts.thresholds.heartbeatRttP99Seconds }}
           for: 5m
           labels:
             severity: warning

@@ -12,41 +12,41 @@ broker certs that cert-manager emits carry their own subject as both
 the leaf and the trust anchor for clients — clients mount the
 Secret's tls.crt as their PEM truststore.
 */ -}}
-{{- if include "skafka.hasInternalTLSListener" . }}
+{{- if include "kaas.hasInternalTLSListener" . }}
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
-  name: {{ include "skafka.fullname" . }}-selfsigned
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-selfsigned
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 spec:
   selfSigned: {}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ include "skafka.fullname" . }}-broker-internal-tls
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}-broker-internal-tls
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 spec:
-  secretName: {{ include "skafka.internalTLSSecretName" . }}
+  secretName: {{ include "kaas.internalTLSSecretName" . }}
   issuerRef:
-    name: {{ include "skafka.fullname" . }}-selfsigned
+    name: {{ include "kaas.fullname" . }}-selfsigned
     kind: Issuer
-  commonName: {{ include "skafka.fullname" . }}
+  commonName: {{ include "kaas.fullname" . }}
   dnsNames:
     # ClusterIP service — used by clients that don't care which broker
     # they hit first and round-robin through endpoints (typical bench
     # producer / kafbat-ui).
-    - {{ include "skafka.fullname" . }}
-    - {{ include "skafka.fullname" . }}.{{ .Release.Namespace }}
-    - {{ include "skafka.fullname" . }}.{{ .Release.Namespace }}.svc
-    - {{ include "skafka.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}
+    - {{ include "kaas.fullname" . }}
+    - {{ include "kaas.fullname" . }}.{{ .Release.Namespace }}
+    - {{ include "kaas.fullname" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "kaas.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain | default "cluster.local" }}
     # Per-broker headless DNS — Kafka clients use Metadata to learn
     # which broker leads each partition and then dial that broker
     # directly. SAN-list has to cover every replica.
-    {{- $headless := include "skafka.headlessName" . }}
+    {{- $headless := include "kaas.headlessName" . }}
     {{- $ns := .Release.Namespace }}
     {{- $domain := .Values.clusterDomain | default "cluster.local" }}
-    {{- $name := include "skafka.fullname" . }}
+    {{- $name := include "kaas.fullname" . }}
     {{- range $i, $e := until (int .Values.broker.replicaCount) }}
     - {{ $name }}-{{ $i }}.{{ $headless }}.{{ $ns }}.svc.{{ $domain }}
     {{- end }}

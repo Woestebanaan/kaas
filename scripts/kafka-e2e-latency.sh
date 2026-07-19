@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-e2e-latency.sh against skafka.
+# Test kafka-e2e-latency.sh against kaas.
 #
 # Scenarios:
 #   1. 1000 round-trips, 100-byte payloads, acks=1

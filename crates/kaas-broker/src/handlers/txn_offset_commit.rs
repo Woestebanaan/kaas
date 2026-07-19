@@ -137,10 +137,10 @@ mod tests {
         let offsets = Arc::new(OffsetStore::new(tmp.path()));
         let lookup = Arc::new(FnLookup::new(|_| None));
         let mgr = Manager::new(
-            "skafka-0",
+            "kaas-0",
             offsets,
             lookup,
-            LocalGroupSource::new("skafka-0"),
+            LocalGroupSource::new("kaas-0"),
         );
         b.install_coord_manager(mgr.clone());
         (tmp, b, mgr)

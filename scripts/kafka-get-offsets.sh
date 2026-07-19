@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-get-offsets.sh against skafka.
+# Test kafka-get-offsets.sh against kaas.
 #
 # Scenarios:
 #   1. --time -2 (earliest) on a fresh topic = 0

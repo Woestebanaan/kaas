@@ -54,10 +54,10 @@ fn broker_with_manager(tmpdir: &std::path::Path) -> Arc<Broker> {
     ));
     let offsets = Arc::new(OffsetStore::new(tmpdir));
     let lookup: Arc<dyn BrokerLookup> = Arc::new(FnLookup::new(|id: &str| {
-        if id == "skafka-0" {
+        if id == "kaas-0" {
             Some(BrokerEndpoint {
                 node_id: 0,
-                host: "skafka-0.local".to_owned(),
+                host: "kaas-0.local".to_owned(),
                 port: 9092,
             })
         } else {
@@ -65,10 +65,10 @@ fn broker_with_manager(tmpdir: &std::path::Path) -> Arc<Broker> {
         }
     }));
     let mgr = Manager::new(
-        "skafka-0",
+        "kaas-0",
         offsets,
         lookup,
-        LocalGroupSource::new("skafka-0"),
+        LocalGroupSource::new("kaas-0"),
     );
     broker.install_coord_manager(mgr);
     broker
@@ -103,7 +103,7 @@ async fn full_consumer_group_lifecycle_through_handlers() {
     let mut r = resp_bytes.freeze();
     let resp = find_coordinator::decode_response(&mut r, 3).unwrap();
     assert_eq!(resp.error_code, 0, "FindCoordinator must resolve self");
-    assert_eq!(resp.host, "skafka-0.local");
+    assert_eq!(resp.host, "kaas-0.local");
     assert_eq!(resp.port, 9092);
 
     // ----- JoinGroup (key 11) ---------------------------------------

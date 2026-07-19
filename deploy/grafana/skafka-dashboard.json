@@ -1,9 +1,9 @@
 {
-  "title": "skafka",
-  "uid": "skafka-overview",
+  "title": "kaas",
+  "uid": "kaas-overview",
   "schemaVersion": 38,
   "version": 1,
-  "tags": ["kafka", "skafka"],
+  "tags": ["kafka", "kaas"],
   "timezone": "browser",
   "time": {"from": "now-1h", "to": "now"},
   "refresh": "30s",
@@ -14,7 +14,7 @@
         "label": "Cluster",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "query": "label_values(skafka_produce_records_total, cluster)",
+        "query": "label_values(kaas_produce_records_total, cluster)",
         "refresh": 1
       }
     ]
@@ -27,7 +27,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum by (topic) (rate(skafka_produce_bytes_total[5m]))", "legendFormat": "{{topic}}"}
+        {"expr": "sum by (topic) (rate(kaas_produce_bytes_total[5m]))", "legendFormat": "{{topic}}"}
       ],
       "fieldConfig": {"defaults": {"unit": "Bps"}}
     },
@@ -38,7 +38,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum by (topic) (rate(skafka_fetch_bytes_total[5m]))", "legendFormat": "{{topic}}"}
+        {"expr": "sum by (topic) (rate(kaas_fetch_bytes_total[5m]))", "legendFormat": "{{topic}}"}
       ],
       "fieldConfig": {"defaults": {"unit": "Bps"}}
     },
@@ -49,7 +49,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "histogram_quantile(0.99, sum by (api_key, le) (rate(skafka_request_latency_seconds_bucket[5m])))", "legendFormat": "api_key={{api_key}}"}
+        {"expr": "histogram_quantile(0.99, sum by (api_key, le) (rate(kaas_request_latency_seconds_bucket[5m])))", "legendFormat": "api_key={{api_key}}"}
       ],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
@@ -60,8 +60,8 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_storage_write_latency_seconds_bucket[5m])))", "legendFormat": "p50"},
-        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_storage_write_latency_seconds_bucket[5m])))", "legendFormat": "p99"}
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(kaas_storage_write_latency_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(kaas_storage_write_latency_seconds_bucket[5m])))", "legendFormat": "p99"}
       ],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
@@ -72,7 +72,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 0, "y": 16},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum(rate(skafka_tls_handshakes_total{result=\"ok\"}[5m])) / sum(rate(skafka_tls_handshakes_total[5m]))"}
+        {"expr": "sum(rate(kaas_tls_handshakes_total{result=\"ok\"}[5m])) / sum(rate(kaas_tls_handshakes_total[5m]))"}
       ],
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}}
     },
@@ -83,7 +83,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 8, "y": 16},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum(rate(skafka_auth_failure_total[5m]))"}
+        {"expr": "sum(rate(kaas_auth_failure_total[5m]))"}
       ]
     },
     {
@@ -93,7 +93,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 16, "y": 16},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum(rate(skafka_acl_deny_total[5m]))"}
+        {"expr": "sum(rate(kaas_acl_deny_total[5m]))"}
       ]
     },
     {
@@ -103,8 +103,8 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum(increase(skafka_controller_failovers_total[1m]))", "legendFormat": "cluster"},
-        {"expr": "sum by (broker_id) (increase(skafka_controller_failovers_total[1m]))", "legendFormat": "{{broker_id}}"}
+        {"expr": "sum(increase(kaas_controller_failovers_total[1m]))", "legendFormat": "cluster"},
+        {"expr": "sum by (broker_id) (increase(kaas_controller_failovers_total[1m]))", "legendFormat": "{{broker_id}}"}
       ]
     },
     {
@@ -114,8 +114,8 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_controller_failover_duration_seconds_bucket[5m])))", "legendFormat": "p99"},
-        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_controller_failover_duration_seconds_bucket[5m])))", "legendFormat": "p50"}
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(kaas_controller_failover_duration_seconds_bucket[5m])))", "legendFormat": "p99"},
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(kaas_controller_failover_duration_seconds_bucket[5m])))", "legendFormat": "p50"}
       ],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
@@ -127,7 +127,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 0, "y": 30},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "skafka_is_controller", "legendFormat": "{{broker_id}}"}
+        {"expr": "kaas_is_controller", "legendFormat": "{{broker_id}}"}
       ],
       "fieldConfig": {"defaults": {"min": 0, "max": 1}}
     },
@@ -139,8 +139,8 @@
       "gridPos": {"h": 6, "w": 8, "x": 8, "y": 30},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "max(skafka_broker_count_alive)", "legendFormat": "alive"},
-        {"expr": "max(skafka_broker_count_assigned)", "legendFormat": "assigned"}
+        {"expr": "max(kaas_broker_count_alive)", "legendFormat": "alive"},
+        {"expr": "max(kaas_broker_count_assigned)", "legendFormat": "assigned"}
       ]
     },
     {
@@ -151,7 +151,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 16, "y": 30},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "max(skafka_assignment_file_size_bytes)"}
+        {"expr": "max(kaas_assignment_file_size_bytes)"}
       ],
       "fieldConfig": {
         "defaults": {
@@ -172,7 +172,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "skafka_assignment_version", "legendFormat": "{{broker_id}}"}
+        {"expr": "kaas_assignment_version", "legendFormat": "{{broker_id}}"}
       ]
     },
     {
@@ -182,8 +182,8 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_assignment_file_write_latency_seconds_bucket[5m])))", "legendFormat": "p50"},
-        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_assignment_file_write_latency_seconds_bucket[5m])))", "legendFormat": "p99"}
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(kaas_assignment_file_write_latency_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(kaas_assignment_file_write_latency_seconds_bucket[5m])))", "legendFormat": "p99"}
       ],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
@@ -194,8 +194,8 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum by (le) (rate(skafka_heartbeat_rtt_seconds_bucket[5m])))", "legendFormat": "p50"},
-        {"expr": "histogram_quantile(0.99, sum by (le) (rate(skafka_heartbeat_rtt_seconds_bucket[5m])))", "legendFormat": "p99"}
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(kaas_heartbeat_rtt_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(kaas_heartbeat_rtt_seconds_bucket[5m])))", "legendFormat": "p99"}
       ],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
@@ -207,8 +207,8 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum by (broker_id) (increase(skafka_self_fence_events_total[1m]))", "legendFormat": "self_fence {{broker_id}}"},
-        {"expr": "sum by (broker_id) (increase(skafka_heartbeat_misses_total[1m]))", "legendFormat": "miss {{broker_id}}"}
+        {"expr": "sum by (broker_id) (increase(kaas_self_fence_events_total[1m]))", "legendFormat": "self_fence {{broker_id}}"},
+        {"expr": "sum by (broker_id) (increase(kaas_heartbeat_misses_total[1m]))", "legendFormat": "miss {{broker_id}}"}
       ]
     },
     {
@@ -219,7 +219,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 0, "y": 52},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum by (broker_id) (increase(skafka_stale_assignments_rejected_total[1m]))", "legendFormat": "{{broker_id}}"}
+        {"expr": "sum by (broker_id) (increase(kaas_stale_assignments_rejected_total[1m]))", "legendFormat": "{{broker_id}}"}
       ]
     },
     {
@@ -230,7 +230,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 8, "y": 52},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum by (change_detected) (increase(skafka_assignment_polls_total[1m]))", "legendFormat": "change_detected={{change_detected}}"}
+        {"expr": "sum by (change_detected) (increase(kaas_assignment_polls_total[1m]))", "legendFormat": "change_detected={{change_detected}}"}
       ]
     },
     {
@@ -241,7 +241,7 @@
       "gridPos": {"h": 6, "w": 8, "x": 16, "y": 52},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum by (result) (increase(skafka_assignment_cr_mirror_writes_total[1m]))", "legendFormat": "{{result}}"}
+        {"expr": "sum by (result) (increase(kaas_assignment_cr_mirror_writes_total[1m]))", "legendFormat": "{{result}}"}
       ]
     },
     {
@@ -252,8 +252,8 @@
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 58},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum(skafka_codec_record_decode_total)", "legendFormat": "record_decode"},
-        {"expr": "sum(skafka_codec_batch_reencode_total)", "legendFormat": "batch_reencode"}
+        {"expr": "sum(kaas_codec_record_decode_total)", "legendFormat": "record_decode"},
+        {"expr": "sum(kaas_codec_batch_reencode_total)", "legendFormat": "batch_reencode"}
       ],
       "fieldConfig": {
         "defaults": {
@@ -272,18 +272,18 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 66},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum by (topic) (max by (topic, partition) (skafka_partition_high_watermark))", "legendFormat": "{{topic}}"}
+        {"expr": "sum by (topic) (max by (topic, partition) (kaas_partition_high_watermark))", "legendFormat": "{{topic}}"}
       ]
     },
     {
       "id": 22,
       "type": "timeseries",
       "title": "Partition leader churn",
-      "description": "When skafka_partition_leader changes for a (topic, partition), this counter ticks. Steady = stable assignment; bursts = rebalance / failover.",
+      "description": "When kaas_partition_leader changes for a (topic, partition), this counter ticks. Steady = stable assignment; bursts = rebalance / failover.",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 66},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
-        {"expr": "sum(changes(skafka_partition_leader[5m]))", "legendFormat": "leader changes (5m)"}
+        {"expr": "sum(changes(kaas_partition_leader[5m]))", "legendFormat": "leader changes (5m)"}
       ]
     }
   ],

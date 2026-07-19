@@ -85,7 +85,7 @@ pub struct Response {
     /// v3+.
     pub throttle_time_ms: i32,
     pub brokers: Vec<Broker>,
-    /// v2+. `None` ↔ wire null. Skafka emits its cluster id (never
+    /// v2+. `None` ↔ wire null. Kaas emits its cluster id (never
     /// null) so `Some(String)` is the steady-state shape.
     pub cluster_id: Option<String>,
     /// v1+. `-1` when no controller (single-broker dev mode).
@@ -426,7 +426,7 @@ mod tests {
                 },
             }],
             cluster_id: if version >= 2 {
-                Some("skafka-rust-dev".to_owned())
+                Some("kaas-rust-dev".to_owned())
             } else {
                 None
             },

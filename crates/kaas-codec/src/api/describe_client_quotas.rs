@@ -1,7 +1,7 @@
 //! DescribeClientQuotas — API key 48.
 //!
 //! Versions 0..=1. Flexible (KIP-482) from v1. KIP-546 admin surface
-//! for inspecting client quotas (user, client-id, ip — skafka only
+//! for inspecting client quotas (user, client-id, ip — kaas only
 //! supports `user`).
 //!
 //! The request carries a filter `components[]` — each component
@@ -241,7 +241,7 @@ pub mod match_type {
     pub const ANY: i8 = 2;
 }
 
-/// `entity_type` axis names. skafka only supports `USER`; other
+/// `entity_type` axis names. kaas only supports `USER`; other
 /// values surface `INVALID_REQUEST` at the handler.
 pub mod entity_type {
     pub const USER: &str = "user";

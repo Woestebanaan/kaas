@@ -21,7 +21,7 @@ use crate::topic_traffic::{register_topic_traffic_instruments, TopicTrafficMeter
 /// `metrics.go:51`.
 ///
 /// Without these, OTel falls back to its default HTTP-latency-oriented
-/// boundaries (5..10000) and every skafka observation (sub-second to
+/// boundaries (5..10000) and every kaas observation (sub-second to
 /// mid-second) collapses into the [0, 5] bucket; histogram_quantile
 /// then interpolates every percentile to fixed values regardless of
 /// load (gh #79). Range: 100 µs (in-process hot path) → 30 s
@@ -394,7 +394,7 @@ fn global_slot() -> &'static ArcSwap<Metrics> {
         // a Noop meter — every instrument built on it silently drops
         // observations. That's the right behaviour for tests + pre-boot
         // call sites, so we don't need a special "noop" path.
-        let noop = opentelemetry::global::meter("skafka-noop");
+        let noop = opentelemetry::global::meter("kaas-noop");
         ArcSwap::from_pointee(new_metrics(&noop))
     })
 }

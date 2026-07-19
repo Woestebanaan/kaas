@@ -19,15 +19,15 @@
 #   4. Cross-check by reading the partition's high watermark — should
 #      be exactly 50000 (no losses, no duplicates).
 #
-# Required env: kubectl with access to the skafka namespace. Skips
+# Required env: kubectl with access to the kaas namespace. Skips
 # cleanly when kubectl is missing or returns no pods.
 
 . "$(dirname "$0")/_common.sh"
 
 need kubectl
 
-NAMESPACE="${NAMESPACE:-skafka}"
-STS="${STS:-skafka}"
+NAMESPACE="${NAMESPACE:-kaas}"
+STS="${STS:-kaas}"
 RECORDS="${RECORDS:-50000}"
 
 # Sanity: we need at least one StatefulSet pod in the target ns.

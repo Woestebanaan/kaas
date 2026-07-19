@@ -6,7 +6,7 @@
 //! `controller-gen.kubebuilder.io/version` annotation (kube-rs
 //! doesn't run controller-gen, so the marker is meaningless), and
 //! writes the result to both `deploy/crds/` and
-//! `deploy/helm/skafka/crds/`. `check-crd-drift` runs the same and
+//! `deploy/helm/kaas/crds/`. `check-crd-drift` runs the same and
 //! errors if the two trees diverge from `HEAD`.
 
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ fn gen_proto() -> Result<()> {
 fn gen_crds() -> Result<()> {
     let root = repo_root()?;
     let crds_root = root.join("deploy").join("crds");
-    let chart_crds = root.join("deploy").join("helm").join("skafka").join("crds");
+    let chart_crds = root.join("deploy").join("helm").join("kaas").join("crds");
     fs::create_dir_all(&crds_root)?;
     fs::create_dir_all(&chart_crds)?;
 
@@ -75,7 +75,7 @@ fn check_crd_drift() -> Result<()> {
         "diff",
         "--exit-code",
         "deploy/crds",
-        "deploy/helm/skafka/crds",
+        "deploy/helm/kaas/crds",
     ])
 }
 

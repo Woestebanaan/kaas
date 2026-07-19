@@ -13,9 +13,9 @@
 
 set -euo pipefail
 
-BOOTSTRAP="${BOOTSTRAP:-skafka.skafka.svc.cluster.local:9092}"
+BOOTSTRAP="${BOOTSTRAP:-kaas.kaas.svc.cluster.local:9092}"
 KAFKA_BIN="${KAFKA_BIN:-/opt/kafka/bin}"
-TOPIC="${TOPIC:-skafka-test-$$-$(date +%s)}"
+TOPIC="${TOPIC:-kaas-test-$$-$(date +%s)}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

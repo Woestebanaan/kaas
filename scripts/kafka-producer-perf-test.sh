@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-producer-perf-test.sh against skafka.
+# Test kafka-producer-perf-test.sh against kaas.
 #
 # Scenarios:
 #   1. 10k records, 1KB payload, acks=1
@@ -16,7 +16,7 @@ echo ">> Scenario 1: 10k records / 1KB / acks=1"
   --producer-props bootstrap.servers="$BOOTSTRAP" acks=1
 
 echo ">> Scenario 2 (gh #13): produce 1k records under each compression codec"
-# Apache producers can pick gzip / snappy / lz4 / zstd. Skafka stores
+# Apache producers can pick gzip / snappy / lz4 / zstd. Kaas stores
 # the compressed RecordBatch verbatim — it never decompresses — so
 # this test confirms each codec round-trips through Produce without
 # the broker tripping on the codec-bit combination. A consumer would
@@ -32,7 +32,7 @@ for codec in gzip snappy lz4 zstd; do
 done
 
 echo ">> Scenario 3 (gh #14): oversized record (>1MB) must be rejected"
-# Apache broker default max.message.bytes=1048588. Skafka mirrors that
+# Apache broker default max.message.bytes=1048588. Kaas mirrors that
 # via KAAS_MAX_MESSAGE_BYTES (chart-default 1048588). Push one
 # 2 MiB record with max.request.size lifted client-side so the
 # rejection comes from the broker, not the client's own pre-flight.

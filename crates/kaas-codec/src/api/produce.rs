@@ -103,14 +103,14 @@ pub struct PartitionResponse {
     pub index: i32,
     pub error_code: i16,
     pub base_offset: i64,
-    /// v2+. `-1` when not available (skafka never sets log-append
+    /// v2+. `-1` when not available (kaas never sets log-append
     /// time, so this is always `-1` on the wire).
     pub log_append_time_ms: i64,
     /// v5+. The partition's current `log_start_offset` so the client
     /// can detect retention catch-up.
     pub log_start_offset: i64,
     /// v8+. Per-record errors when `error_code != 0` carries record
-    /// granularity. Skafka does not emit these (always empty).
+    /// granularity. Kaas does not emit these (always empty).
     pub record_errors: Vec<RecordError>,
     /// v8+. Human-readable detail for `error_code`. `None` ↔ wire null.
     pub error_message: Option<String>,

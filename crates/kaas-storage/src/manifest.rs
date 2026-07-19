@@ -34,7 +34,7 @@ pub const MANIFEST_FILENAME: &str = "manifest.json";
 
 /// Pre-Phase-4 single-field file. `readManifest` falls back to this
 /// when `manifest.json` is missing so partitions opened with an older
-/// skafka don't lose their epoch.
+/// kaas don't lose their epoch.
 pub const LEGACY_EPOCH_FILENAME: &str = ".leader-epoch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

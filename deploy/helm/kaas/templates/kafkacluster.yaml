@@ -15,13 +15,13 @@ fixed map (operator-side refactor to a list is a separate
 follow-up). The chart synthesizes that legacy shape from the first
 type=internal + first type=external entry in .Values.listeners.
 */ -}}
-{{- $internal := include "skafka.firstByType" (dict "ctx" . "type" "internal") | fromYaml -}}
-{{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml -}}
+{{- $internal := include "kaas.firstByType" (dict "ctx" . "type" "internal") | fromYaml -}}
+{{- $external := include "kaas.firstByType" (dict "ctx" . "type" "external") | fromYaml -}}
 apiVersion: kaas.rs/v1alpha1
 kind: KafkaCluster
 metadata:
-  name: {{ include "skafka.fullname" . }}
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.broker.replicaCount }}
   storage:

@@ -3,15 +3,15 @@
 //! Versions 0..=7. Flexible (KIP-482) from v5. Used by
 //! `AdminClient.createTopics()` and `kafka-topics.sh --create`.
 //!
-//! Skafka routes CreateTopics through the operator by minting a
+//! Kaas routes CreateTopics through the operator by minting a
 //! `KafkaTopic` CR (gh #51). The handler in `kaas-broker` maps the
 //! wire request to a `TopicCRWriter::create_topic` call.
 //! Replica-assignment and topic-level configs are parsed for
 //! protocol fidelity but only `NumPartitions` is used at the
-//! handler — skafka has no replicas and forwards configs via the
+//! handler — kaas has no replicas and forwards configs via the
 //! CR's `spec.config` map on a follow-up patch.
 //!
-//! v7 adds `topic_id` (UUID) on the response. Skafka echoes
+//! v7 adds `topic_id` (UUID) on the response. Kaas echoes
 //! the all-zeros UUID until the KafkaTopic reconciler stamps
 //! `.status.topicID` (gh #105).
 
@@ -74,10 +74,10 @@ pub struct CreatableTopic {
     /// `-1` when Assignments carries explicit replica placement.
     pub num_partitions: i32,
     /// `-1` when Assignments carries explicit replica placement.
-    /// Skafka has no replicas so any positive value is accepted
+    /// Kaas has no replicas so any positive value is accepted
     /// and ignored at the handler.
     pub replication_factor: i16,
-    /// Per-partition replica assignments. Skafka ignores these.
+    /// Per-partition replica assignments. Kaas ignores these.
     pub assignments: Vec<CreatableReplicaAssignment>,
     /// Per-topic config overrides (retention.ms, cleanup.policy,
     /// ...). Handler forwards these through the CR patch.
@@ -153,7 +153,7 @@ impl CreatableTopicResult {
 pub struct CreatableTopicConfigResult {
     pub name: String,
     pub value: Option<String>,
-    /// v5+ config source. Skafka echoes `DEFAULT_CONFIG (5)`.
+    /// v5+ config source. Kaas echoes `DEFAULT_CONFIG (5)`.
     pub read_only: bool,
     pub config_source: i8,
     pub is_sensitive: bool,

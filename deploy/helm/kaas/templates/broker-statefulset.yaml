@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "skafka.fullname" . }}
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.broker.replicaCount }}
-  serviceName: {{ include "skafka.headlessName" . }}
+  serviceName: {{ include "kaas.headlessName" . }}
   # All brokers are identical — no startup ordering needed.
   podManagementPolicy: Parallel
   selector:
-    matchLabels: {{- include "skafka.selectorLabels" . | nindent 6 }}
+    matchLabels: {{- include "kaas.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "skafka.selectorLabels" . | nindent 8 }}
+      labels: {{- include "kaas.selectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "skafka.brokerSAName" . }}
+      serviceAccountName: {{ include "kaas.brokerSAName" . }}
       {{- with .Values.broker.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -26,11 +26,11 @@ spec:
       {{- end }}
       initContainers:
         - name: partition-init
-          image: {{ include "skafka.brokerImage" . }}
+          image: {{ include "kaas.brokerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["--init"]
           # Run as root so we can chown the data dir to the broker uid/gid
-          # before exiting (skafka#110). When the PVC comes back as
+          # before exiting (kaas#110). When the PVC comes back as
           # root-owned and fsGroupChangePolicy=OnRootMismatch silently skips
           # the recursive perm fix, the broker container (uid 65532) can't
           # mkdir new topic dirs at runtime. The init container's chown is
@@ -61,7 +61,7 @@ spec:
               mountPath: {{ .Values.storage.mountPath }}
       containers:
         - name: broker
-          image: {{ include "skafka.brokerImage" . }}
+          image: {{ include "kaas.brokerImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
           {{- /* gh #126: one containerPort per enabled listener. */}}
@@ -85,11 +85,11 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: KAAS_HEADLESS_SVC
-              value: {{ include "skafka.headlessName" . }}
+              value: {{ include "kaas.headlessName" . }}
             # gh #128: pod-name pattern for the StatefulSet's pods —
             # used together with KAAS_HEADLESS_SVC to build the
             # Strimzi-style headless per-pod DNS name (e.g.
-            # `skafka-0.skafka.<ns>.svc.<domain>`) that the broker
+            # `kaas-0.kaas.<ns>.svc.<domain>`) that the broker
             # advertises in MetadataResponse. Pre-gh #128 a per-broker
             # ClusterIP Service backed each advertised FQDN; that
             # collided with the operator's external-listener reconciler
@@ -98,7 +98,7 @@ spec:
             # pair, so no extra Service object is needed for internal
             # traffic.
             - name: KAAS_POD_NAME_PATTERN
-              value: "{{ include "skafka.fullname" . }}-%d"
+              value: "{{ include "kaas.fullname" . }}-%d"
             - name: KAAS_CLUSTER_DOMAIN
               value: {{ .Values.clusterDomain | default "cluster.local" }}
             - name: KAAS_DATA_DIR
@@ -109,7 +109,7 @@ spec:
               # Matches the KafkaCluster CR's metadata.name so the
               # KafkaClusterAssignments CR mirror writes back to the
               # right object (Phase 6).
-              value: {{ include "skafka.fullname" . }}
+              value: {{ include "kaas.fullname" . }}
             - name: KAAS_PORT
               value: "{{ .Values.broker.ports.kafka }}"
             - name: KAAS_HEALTH_ADDR
@@ -179,7 +179,7 @@ spec:
             # that cadence rate([1m]) windows often see only one
             # sample and Grafana stat panels show "no data".
             #
-            # Skafka-specific env name (not OTEL_METRIC_EXPORT_INTERVAL):
+            # Kaas-specific env name (not OTEL_METRIC_EXPORT_INTERVAL):
             # the OTel spec value is bare-int milliseconds, and the SDK
             # logs an Atoi error on every boot when it sees a duration
             # string. Using KAAS_* keeps that env out of the SDK's path.
@@ -229,21 +229,21 @@ spec:
             multi-external follow-up will rewire these).
             */}}
             - name: KAAS_LISTENERS
-              value: {{ include "skafka.listenersJSON" . | quote }}
+              value: {{ include "kaas.listenersJSON" . | quote }}
             {{- /* gh #126: cluster-wide authorization opt-in. Omitted env = AllowAllAuthorizer. */}}
             {{- if .Values.authorization }}
             {{- with .Values.authorization.type }}
             - name: KAAS_AUTHORIZATION_TYPE
               value: {{ . | quote }}
             {{- end }}
-            {{- $su := include "skafka.superUsersList" . }}
+            {{- $su := include "kaas.superUsersList" . }}
             {{- if $su }}
             - name: KAAS_SUPER_USERS
               value: {{ $su | quote }}
             {{- end }}
             {{- end }}
-            {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
-            {{- if include "skafka.hasAnyTLSListener" . }}
+            {{- $external := include "kaas.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
+            {{- if include "kaas.hasAnyTLSListener" . }}
             # gh #131: shared TLS material across every tls:true listener
             # (internal or external). The broker reuses a single TLS config
             # for all of them (crates/sk-protocol/src/server.rs) —
@@ -278,7 +278,7 @@ spec:
           # reconcile manifests. Without this, kubelet kills the broker
           # mid-recovery and the pod CrashLoops.
           # failureThreshold * periodSeconds = 600s = 10 min budget.
-          {{- $probePort := printf "kafka-%s" (include "skafka.primaryListenerName" .) }}
+          {{- $probePort := printf "kafka-%s" (include "kaas.primaryListenerName" .) }}
           startupProbe:
             tcpSocket:
               port: {{ $probePort }}
@@ -305,11 +305,11 @@ spec:
             # before pulling a broker out of rotation.
             timeoutSeconds: 4
             failureThreshold: 6
-          {{- $external := include "skafka.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
+          {{- $external := include "kaas.firstByType" (dict "ctx" . "type" "external") | fromYaml }}
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}
-            {{- if include "skafka.hasAnyTLSListener" . }}
+            {{- if include "kaas.hasAnyTLSListener" . }}
             - name: tls
               mountPath: /tls
               readOnly: true
@@ -323,8 +323,8 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: {{ include "skafka.pvcName" . }}
-        {{- if include "skafka.hasAnyTLSListener" . }}
+            claimName: {{ include "kaas.pvcName" . }}
+        {{- if include "kaas.hasAnyTLSListener" . }}
         - name: tls
           secret:
             # Secret created by cert-manager. The external-listener path
@@ -333,7 +333,7 @@ spec:
             # `<fullname>-broker-internal-tls`. External wins when both
             # exist — its cert is the public-trust one and presumably has
             # the broader SAN list.
-            secretName: {{ if $external }}{{ include "skafka.fullname" . }}-broker-tls{{ else }}{{ include "skafka.internalTLSSecretName" . }}{{ end }}
+            secretName: {{ if $external }}{{ include "kaas.fullname" . }}-broker-tls{{ else }}{{ include "kaas.internalTLSSecretName" . }}{{ end }}
         {{- end }}
         {{- if and $external $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
         - name: tls-client-ca

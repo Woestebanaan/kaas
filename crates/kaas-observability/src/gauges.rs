@@ -1,7 +1,7 @@
 //! Runtime observable gauges + [`GaugeSource`] trait.
 //!
 //! The
-//! runtime gauges (`skafka.is.controller`, `skafka.assignment.version`,
+//! runtime gauges (`kaas.is.controller`, `kaas.assignment.version`,
 //! per-partition leader/epoch/HWM) are registered once on the meter at
 //! [`crate::bootstrap`] time; a single global [`GaugeSource`] provides
 //! the snapshot at every scrape.

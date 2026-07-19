@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-delete-records.sh against skafka.
+# Test kafka-delete-records.sh against kaas.
 #
 # Scenarios:
 #   1. Produce 10 records, delete-records before offset 7, verify earliest=7

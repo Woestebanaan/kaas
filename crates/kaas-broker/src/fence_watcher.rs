@@ -216,11 +216,11 @@ mod tests {
     fn applies_peer_fences() {
         let tmp = tempfile::tempdir().unwrap();
         let capturing = Arc::new(Capturing::default());
-        let w = FenceWatcher::new(tmp.path().to_path_buf(), "skafka-0", capturing.clone());
+        let w = FenceWatcher::new(tmp.path().to_path_buf(), "kaas-0", capturing.clone());
         let mut peer = HashMap::new();
         peer.insert(42, 3);
         peer.insert(99, 1);
-        write_peer(tmp.path(), "from-skafka-1.json", &peer);
+        write_peer(tmp.path(), "from-kaas-1.json", &peer);
         w.tick();
         let mut calls = capturing.calls.lock().clone();
         calls.sort();
@@ -231,11 +231,11 @@ mod tests {
     fn skips_self_file() {
         let tmp = tempfile::tempdir().unwrap();
         let capturing = Arc::new(Capturing::default());
-        let w = FenceWatcher::new(tmp.path().to_path_buf(), "skafka-0", capturing.clone());
+        let w = FenceWatcher::new(tmp.path().to_path_buf(), "kaas-0", capturing.clone());
         let mut state = HashMap::new();
         state.insert(42, 3);
-        write_peer(tmp.path(), "from-skafka-0.json", &state); // self
-        write_peer(tmp.path(), "from-skafka-1.json", &state); // peer
+        write_peer(tmp.path(), "from-kaas-0.json", &state); // self
+        write_peer(tmp.path(), "from-kaas-1.json", &state); // peer
         w.tick();
         // Only the peer entry fires.
         assert_eq!(capturing.calls.lock().len(), 1);
@@ -245,10 +245,10 @@ mod tests {
     fn dedupe_across_ticks() {
         let tmp = tempfile::tempdir().unwrap();
         let capturing = Arc::new(Capturing::default());
-        let w = FenceWatcher::new(tmp.path().to_path_buf(), "skafka-0", capturing.clone());
+        let w = FenceWatcher::new(tmp.path().to_path_buf(), "kaas-0", capturing.clone());
         let mut state = HashMap::new();
         state.insert(42, 3);
-        write_peer(tmp.path(), "from-skafka-1.json", &state);
+        write_peer(tmp.path(), "from-kaas-1.json", &state);
         w.tick();
         w.tick();
         assert_eq!(capturing.calls.lock().len(), 1);
@@ -258,13 +258,13 @@ mod tests {
     fn higher_epoch_after_first_apply_fires_once_more() {
         let tmp = tempfile::tempdir().unwrap();
         let capturing = Arc::new(Capturing::default());
-        let w = FenceWatcher::new(tmp.path().to_path_buf(), "skafka-0", capturing.clone());
+        let w = FenceWatcher::new(tmp.path().to_path_buf(), "kaas-0", capturing.clone());
         let mut state = HashMap::new();
         state.insert(42, 3);
-        write_peer(tmp.path(), "from-skafka-1.json", &state);
+        write_peer(tmp.path(), "from-kaas-1.json", &state);
         w.tick();
         state.insert(42, 5); // bump
-        write_peer(tmp.path(), "from-skafka-1.json", &state);
+        write_peer(tmp.path(), "from-kaas-1.json", &state);
         w.tick();
         let calls = capturing.calls.lock().clone();
         assert_eq!(calls, vec![(42, 3), (42, 5)]);
@@ -275,7 +275,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
         let capturing = Arc::new(Capturing::default());
-        let w = FenceWatcher::new(missing, "skafka-0", capturing.clone());
+        let w = FenceWatcher::new(missing, "kaas-0", capturing.clone());
         w.tick(); // must not panic / error
         assert!(capturing.calls.lock().is_empty());
     }
@@ -283,9 +283,9 @@ mod tests {
     #[test]
     fn corrupt_peer_file_is_skipped() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("from-skafka-1.json"), b"\xffnot-json").unwrap();
+        fs::write(tmp.path().join("from-kaas-1.json"), b"\xffnot-json").unwrap();
         let capturing = Arc::new(Capturing::default());
-        let w = FenceWatcher::new(tmp.path().to_path_buf(), "skafka-0", capturing.clone());
+        let w = FenceWatcher::new(tmp.path().to_path_buf(), "kaas-0", capturing.clone());
         w.tick();
         assert!(capturing.calls.lock().is_empty());
     }
@@ -296,7 +296,7 @@ mod tests {
         // Wrong prefix / suffix.
         let mut state = HashMap::new();
         state.insert(42, 3);
-        write_peer(tmp.path(), "from-skafka-1.json", &state);
+        write_peer(tmp.path(), "from-kaas-1.json", &state);
         let stringy: HashMap<String, i16> =
             state.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         fs::write(
@@ -305,7 +305,7 @@ mod tests {
         )
         .unwrap();
         let capturing = Arc::new(Capturing::default());
-        let w = FenceWatcher::new(tmp.path().to_path_buf(), "skafka-0", capturing.clone());
+        let w = FenceWatcher::new(tmp.path().to_path_buf(), "kaas-0", capturing.clone());
         w.tick();
         assert_eq!(capturing.calls.lock().len(), 1);
     }

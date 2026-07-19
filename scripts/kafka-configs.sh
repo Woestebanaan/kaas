@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-configs.sh against skafka.
+# Test kafka-configs.sh against kaas.
 #
 # Scenarios:
 #   1. --describe broker config (read path)
@@ -59,7 +59,7 @@ echo ">> Scenario 5: --describe specific broker config"
 # Produce/Fetch throttling — see scenario 9 for the live-throttle probe.
 # ---------------------------------------------------------------------------
 
-QUOTA_USER="skafka-quota-test-$$"
+QUOTA_USER="kaas-quota-test-$$"
 
 # Producer quota target for the scenarios below: 10 MB/s
 # (10 * 1024 * 1024 = 10_485_760 B/s). The probe in scenario 10 pushes
@@ -94,7 +94,7 @@ else
 fi
 
 echo ">> Scenario 8 (XFAIL, gap #122): --alter all 4 Apache quota keys"
-# Wire-protocol compatibility check: skafka must accept all 4 Apache keys
+# Wire-protocol compatibility check: kaas must accept all 4 Apache keys
 # (including controller_mutation_rate, which it stores but doesn't enforce —
 # accept-but-no-op for round-trip compat with kafka-configs.sh that round-
 # trips a full quota config). Tools that re-issue every field on a

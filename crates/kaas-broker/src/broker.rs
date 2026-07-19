@@ -47,7 +47,7 @@ pub struct Broker {
     pub local_lease: LocalLeaseManager,
     pub cluster_id: String,
     pub broker_id: i32,
-    /// Broker identity string (e.g. `"skafka-0"`). Distinct from
+    /// Broker identity string (e.g. `"kaas-0"`). Distinct from
     /// `broker_id: i32` which is the wire-level node id; the
     /// coordinator + assignment.json use the StatefulSet pod-name
     /// shape.
@@ -168,7 +168,7 @@ impl Broker {
             local_lease: LocalLeaseManager,
             cluster_id: cluster_id.into(),
             broker_id,
-            self_id: format!("skafka-{broker_id_val}"),
+            self_id: format!("kaas-{broker_id_val}"),
             authorizer,
             quotas,
             coord_manager: RwLock::new(None),
@@ -353,7 +353,7 @@ mod tests {
 
     fn test_broker() -> Broker {
         let engine: Arc<dyn StorageEngine> = Arc::new(MemoryStorage::new());
-        Broker::new(engine, Arc::new(TopicRegistry::new()), "skafka-test", 0)
+        Broker::new(engine, Arc::new(TopicRegistry::new()), "kaas-test", 0)
     }
 
     #[test]

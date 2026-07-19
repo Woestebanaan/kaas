@@ -1,4 +1,4 @@
-//! skafka broker binary.
+//! kaas broker binary.
 //!
 //! Phase 5: per-listener auth + cluster-wide authorization +
 //! quotas + consumer-group coordinator + assignment-driven
@@ -61,7 +61,7 @@ const RELOAD_INTERVAL_SECS: u64 = 10;
 /// Init-container entry point — chown/chmod the data dir
 /// to the broker uid/gid so the broker container (uid=65532) can
 /// mkdir topic dirs at runtime even when the CSI provisioner
-/// silently skipped fsGroup-driven perms (skafka#110).
+/// silently skipped fsGroup-driven perms (kaas#110).
 ///
 /// Skips any KafkaTopic CR walk — the operator
 /// creates partition dirs on first reconcile, and the storage
@@ -85,13 +85,13 @@ fn run_init() -> Result<()> {
     ensure_data_dir_perms(data_path, uid, gid)
         .with_context(|| format!("init: chown/chmod {}", data_path.display()))?;
     eprintln!(
-        "skafka init: data_dir={} uid={} gid={} ok",
+        "kaas init: data_dir={} uid={} gid={} ok",
         data_dir, uid, gid
     );
     Ok(())
 }
 
-/// Layer B of the skafka#110 defence-in-depth stack: kubelet's
+/// Layer B of the kaas#110 defence-in-depth stack: kubelet's
 /// fsGroup (layer A) can silently fail on non-cooperating CSI
 /// drivers; this init routine runs as root and makes the data dir
 /// writable by the broker process. Layer C (the storage engine's
@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
         data_dir = ?cli.data_dir,
         auth_disabled = cli.auth_disabled,
         authorization_type = cli.authorization_type.as_str(),
-        "skafka starting",
+        "kaas starting",
     );
 
     let engine = build_engine(cli.data_dir.clone(), cli.flush_interval_messages)?;
@@ -338,7 +338,7 @@ async fn main() -> Result<()> {
         health_addr
     };
     let health_cfg = kaas_observability::health::HealthConfig {
-        broker_id: format!("skafka-{}", cli.broker_id),
+        broker_id: format!("kaas-{}", cli.broker_id),
         listeners: cli.listeners.iter().map(|l| l.name.clone()).collect(),
         tls: None,
         // Live runtime fields (controller identity, partitions_led,
@@ -393,7 +393,7 @@ async fn main() -> Result<()> {
     }
     obs_cancel.cancel();
 
-    info!("skafka exited cleanly");
+    info!("kaas exited cleanly");
     Ok(())
 }
 

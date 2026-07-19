@@ -8,7 +8,7 @@
 //!
 //! ## Hash
 //!
-//! FNV-1a 32-bit, mod `num_brokers`. Skafka clients never compute
+//! FNV-1a 32-bit, mod `num_brokers`. Kaas clients never compute
 //! the coordinator locally — they always go through
 //! `FindCoordinator` — so any deterministic 32-bit hash works as
 //! long as every broker uses the same one. FNV-1a is trivial to
@@ -128,7 +128,7 @@ mod tests {
     use super::*;
 
     fn brokers(n: usize) -> Vec<String> {
-        (0..n).map(|i| format!("skafka-{i}")).collect()
+        (0..n).map(|i| format!("kaas-{i}")).collect()
     }
 
     fn alive_all(brokers: &[String]) -> HashMap<String, bool> {
@@ -154,14 +154,14 @@ mod tests {
         // The function sorts internally so swapping the broker order
         // in the input slice yields the same answer.
         let b1 = vec![
-            "skafka-2".to_owned(),
-            "skafka-0".to_owned(),
-            "skafka-1".to_owned(),
+            "kaas-2".to_owned(),
+            "kaas-0".to_owned(),
+            "kaas-1".to_owned(),
         ];
         let b2 = vec![
-            "skafka-0".to_owned(),
-            "skafka-1".to_owned(),
-            "skafka-2".to_owned(),
+            "kaas-0".to_owned(),
+            "kaas-1".to_owned(),
+            "kaas-2".to_owned(),
         ];
         let alive = alive_all(&b1);
         let a = pick_group_coordinator("group-key-1", &b1, &alive).unwrap();
@@ -198,14 +198,14 @@ mod tests {
         let b = brokers(4);
         let alive_a = alive_all(&b);
         let mut alive_b = alive_a.clone();
-        alive_b.insert("skafka-3".to_owned(), false);
+        alive_b.insert("kaas-3".to_owned(), false);
         let a = pick_group_coordinator("g-stable", &b, &alive_a).unwrap();
         let b_pick = pick_group_coordinator("g-stable", &b, &alive_b).unwrap();
         // Either the preferred is still alive in both → same answer;
-        // or the preferred was skafka-3 (down in alive_b) and the
+        // or the preferred was kaas-3 (down in alive_b) and the
         // fallback can differ. Skip the case where the preferred
-        // was skafka-3 — we want the stable-preferred check.
-        if a != "skafka-3" {
+        // was kaas-3 — we want the stable-preferred check.
+        if a != "kaas-3" {
             assert_eq!(a, b_pick);
         }
     }

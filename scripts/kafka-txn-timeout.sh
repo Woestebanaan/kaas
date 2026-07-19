@@ -35,7 +35,7 @@ echo "   InitProducerId advertised, reaper precondition met"
 
 echo ">> Scenario 2: cluster txn_state/ directory present on shared PVC"
 # Only meaningful in-cluster. The data dir is /data on the StatefulSet
-# pods; we exec into pod 0 if kubectl is on PATH and a skafka pod
+# pods; we exec into pod 0 if kubectl is on PATH and a kaas pod
 # exists. Otherwise skip — this scenario is purely a deployment-time
 # smoke test, not a wire-protocol assertion.
 if ! command -v kubectl >/dev/null 2>&1; then
@@ -44,10 +44,10 @@ if ! command -v kubectl >/dev/null 2>&1; then
   exit 0
 fi
 
-NAMESPACE="${NAMESPACE:-skafka}"
-pod=$(kubectl -n "$NAMESPACE" get pods -l app=skafka -o name 2>/dev/null | head -1)
+NAMESPACE="${NAMESPACE:-kaas}"
+pod=$(kubectl -n "$NAMESPACE" get pods -l app=kaas -o name 2>/dev/null | head -1)
 if [ -z "$pod" ]; then
-  echo "   no skafka pod found in namespace $NAMESPACE, scenario 2 skipped"
+  echo "   no kaas pod found in namespace $NAMESPACE, scenario 2 skipped"
   echo ">> PASS (wire surface OK; deployment-time slot-dir check skipped)"
   exit 0
 fi

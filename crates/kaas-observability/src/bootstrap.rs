@@ -128,7 +128,7 @@ pub async fn bootstrap(
 
     // Forward kaas-codec's tripwire bumps to the OTel counters. If a
     // future code path fires the tripwire in production, the
-    // SkafkaByteOpacityViolated alert reads the OTel side and pages;
+    // KaasByteOpacityViolated alert reads the OTel side and pages;
     // pre-bootstrap and tests keep the in-process counter as the
     // fast in-test signal.
     kaas_codec::tripwires::install_tripwire_hooks(
@@ -190,7 +190,7 @@ fn build_resource(service: &str) -> Resource {
             attrs.push(KeyValue::new("k8s.pod.name", v.clone()));
             // Prometheus's OTLP receiver promotes service.instance.id
             // to the `instance` label on every series; without it, all
-            // brokers flatten under the same `job=skafka` and
+            // brokers flatten under the same `job=kaas` and
             // per-broker drill-down in Grafana isn't possible.
             attrs.push(KeyValue::new("service.instance.id", v));
         }
@@ -323,7 +323,7 @@ mod tests {
     async fn bootstrap_without_endpoints_succeeds() {
         std::env::remove_var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT");
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
-        let providers = bootstrap("skafka-test", CancellationToken::new())
+        let providers = bootstrap("kaas-test", CancellationToken::new())
             .await
             .expect("bootstrap should succeed with no OTLP endpoints");
         providers.shutdown().unwrap();

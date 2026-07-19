@@ -10,7 +10,7 @@
 #
 # The remaining wire-protocol probe is the admin `kafka-transactions.sh
 # --list` / `--describe-transactions` path. Both call ListTransactions
-# (API key 66) and DescribeTransactions (API key 65). Skafka doesn't
+# (API key 66) and DescribeTransactions (API key 65). Kaas doesn't
 # implement either yet — they're gh #114-adjacent — so we expect a
 # clean UNSUPPORTED_VERSION rather than a hang or a wrong-typed error.
 

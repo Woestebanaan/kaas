@@ -348,7 +348,7 @@ mod tests {
             metadata: ObjectMeta::default(),
             address_type: "IPv4".to_owned(),
             endpoints: vec![Endpoint {
-                hostname: Some("skafka-1".to_owned()),
+                hostname: Some("kaas-1".to_owned()),
                 addresses: vec!["10.0.0.5".to_owned()],
                 conditions: Some(EndpointConditions {
                     ready: Some(true),
@@ -373,7 +373,7 @@ mod tests {
         let data = convert_slice(&slice);
         assert_eq!(data.kafka_port, Some(9092));
         assert_eq!(data.entries.len(), 1);
-        assert_eq!(data.entries[0].hostname, "skafka-1");
+        assert_eq!(data.entries[0].hostname, "kaas-1");
         assert_eq!(data.entries[0].address, "10.0.0.5");
         assert!(data.entries[0].ready);
     }
@@ -403,8 +403,8 @@ mod tests {
     #[test]
     fn kube_lease_epoch_stores_value() {
         let e = KubeLeaseEpoch::new();
-        e.store(7, Some("skafka-0".to_owned()));
+        e.store(7, Some("kaas-0".to_owned()));
         assert_eq!(e.current_epoch(), 7);
-        assert_eq!(e.current_holder().as_deref(), Some("skafka-0"));
+        assert_eq!(e.current_holder().as_deref(), Some("kaas-0"));
     }
 }

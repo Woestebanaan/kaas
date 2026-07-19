@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-verifiable-producer.sh against skafka.
+# Test kafka-verifiable-producer.sh against kaas.
 #
 # Scenarios:
 #   1. Produce 1000 records with acks=all, verify success line count.

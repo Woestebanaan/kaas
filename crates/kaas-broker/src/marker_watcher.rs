@@ -4,9 +4,9 @@
 //! every 2 s and applies each marker entry as a control-batch
 //! append on the partitions this broker leads (gh #175).
 //!
-//! Skafka's answer to Apache's `WriteTxnMarkers` RPC. Where Apache
+//! Kaas's answer to Apache's `WriteTxnMarkers` RPC. Where Apache
 //! uses a Kafka-wire client from the txn coordinator to each peer
-//! leader, skafka writes JSON files into a per-target inbox on the
+//! leader, kaas writes JSON files into a per-target inbox on the
 //! shared PVC and the leader reads + applies them. No new transport
 //! beyond what `FenceWatcher` already established.
 //!
@@ -237,16 +237,16 @@ mod tests {
     async fn happy_path_applies_and_deletes() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        q.enqueue("skafka-0", &entry(42, 3)).unwrap();
+        q.enqueue("kaas-0", &entry(42, 3)).unwrap();
         let capturing = Capturing::new(ApplyOutcome::Applied);
-        let w = MarkerWatcher::new(q.inbox("skafka-0"), capturing.clone());
+        let w = MarkerWatcher::new(q.inbox("kaas-0"), capturing.clone());
         w.tick().await;
 
         let calls = capturing.calls.lock().clone();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].producer_id, 42);
         assert!(
-            q.list("skafka-0").unwrap().is_empty(),
+            q.list("kaas-0").unwrap().is_empty(),
             "file must be deleted"
         );
     }
@@ -255,14 +255,14 @@ mod tests {
     async fn retry_outcome_leaves_file_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        q.enqueue("skafka-0", &entry(42, 3)).unwrap();
+        q.enqueue("kaas-0", &entry(42, 3)).unwrap();
         let capturing = Capturing::new(ApplyOutcome::Retry);
-        let w = MarkerWatcher::new(q.inbox("skafka-0"), capturing.clone());
+        let w = MarkerWatcher::new(q.inbox("kaas-0"), capturing.clone());
         w.tick().await;
 
         assert_eq!(capturing.calls.lock().len(), 1);
         // File should remain — applier asked for retry.
-        assert_eq!(q.list("skafka-0").unwrap().len(), 1);
+        assert_eq!(q.list("kaas-0").unwrap().len(), 1);
 
         // Second tick re-applies.
         w.tick().await;
@@ -283,21 +283,21 @@ mod tests {
     async fn multiple_entries_one_tick() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        q.enqueue("skafka-0", &entry(1, 0)).unwrap();
-        q.enqueue("skafka-0", &entry(2, 0)).unwrap();
-        q.enqueue("skafka-0", &entry(3, 0)).unwrap();
+        q.enqueue("kaas-0", &entry(1, 0)).unwrap();
+        q.enqueue("kaas-0", &entry(2, 0)).unwrap();
+        q.enqueue("kaas-0", &entry(3, 0)).unwrap();
         let capturing = Capturing::new(ApplyOutcome::Applied);
-        let w = MarkerWatcher::new(q.inbox("skafka-0"), capturing.clone());
+        let w = MarkerWatcher::new(q.inbox("kaas-0"), capturing.clone());
         w.tick().await;
         assert_eq!(capturing.calls.lock().len(), 3);
-        assert!(q.list("skafka-0").unwrap().is_empty());
+        assert!(q.list("kaas-0").unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn corrupt_file_is_skipped_not_deleted() {
         let tmp = tempfile::tempdir().unwrap();
         let q = MarkerQueue::open(tmp.path()).unwrap();
-        let inbox = q.inbox("skafka-0");
+        let inbox = q.inbox("kaas-0");
         fs::create_dir_all(&inbox).unwrap();
         fs::write(inbox.join("garbage.json"), b"\xffnot-json").unwrap();
         let capturing = Capturing::new(ApplyOutcome::Applied);
@@ -324,14 +324,14 @@ mod tests {
             }
         }
         let applier: Arc<dyn MarkerApplier> = Arc::new(Counter(ticks.clone()));
-        let w = MarkerWatcher::new(q.inbox("skafka-0"), applier);
+        let w = MarkerWatcher::new(q.inbox("kaas-0"), applier);
 
-        q.enqueue("skafka-0", &entry(42, 3)).unwrap();
+        q.enqueue("kaas-0", &entry(42, 3)).unwrap();
         w.tick().await;
         assert_eq!(ticks.load(Ordering::SeqCst), 1);
 
         // Producer retried EndTxn; coord enqueued again.
-        q.enqueue("skafka-0", &entry(42, 3)).unwrap();
+        q.enqueue("kaas-0", &entry(42, 3)).unwrap();
         w.tick().await;
         assert_eq!(ticks.load(Ordering::SeqCst), 2);
     }

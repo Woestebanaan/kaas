@@ -11,7 +11,7 @@
 //!    into the registry. Lives behind the `kube-watchers` feature.
 //!
 //! gh #97 / gh #128: each broker advertises the StatefulSet pod's
-//! FQDN (e.g. `"skafka-1.skafka-headless.skafka.svc.cluster.local"`)
+//! FQDN (e.g. `"kaas-1.kaas-headless.kaas.svc.cluster.local"`)
 //! built from [`crate::identity::DnsConfig`] — NOT the pod IP from
 //! `EndpointSlice.Endpoints[].Addresses[0]`, which would break under
 //! pod restart. Tests that pass an empty `DnsConfig` fall back to
@@ -39,7 +39,7 @@ pub struct BrokerEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointSliceEntry {
     /// Pod hostname (`EndpointSlice.Endpoints[].Hostname`), e.g.
-    /// `"skafka-0"`. Used to extract the ordinal.
+    /// `"kaas-0"`. Used to extract the ordinal.
     pub hostname: String,
     /// First `Addresses[]` entry. Used as a fallback host when
     /// `DnsConfig` is unset.
@@ -213,8 +213,8 @@ mod tests {
     fn dns() -> DnsConfig {
         DnsConfig {
             namespace: "kaas".to_owned(),
-            headless_service: "skafka-headless".to_owned(),
-            pod_name_pattern: "skafka-{ordinal}".to_owned(),
+            headless_service: "kaas-headless".to_owned(),
+            pod_name_pattern: "kaas-{ordinal}".to_owned(),
             cluster_domain: "cluster.local".to_owned(),
         }
     }
@@ -222,7 +222,7 @@ mod tests {
     fn self_ep() -> BrokerEndpoint {
         BrokerEndpoint {
             node_id: 0,
-            host: "skafka-0.skafka-headless.skafka.svc.cluster.local".to_owned(),
+            host: "kaas-0.kaas-headless.kaas.svc.cluster.local".to_owned(),
             port: 9092,
             ready: true,
         }
@@ -247,12 +247,12 @@ mod tests {
         let r = BrokerRegistry::new(self_ep(), dns());
         r.apply_slice(&slice_with(vec![
             EndpointSliceEntry {
-                hostname: "skafka-1".to_owned(),
+                hostname: "kaas-1".to_owned(),
                 address: "10.0.0.5".to_owned(),
                 ready: true,
             },
             EndpointSliceEntry {
-                hostname: "skafka-2".to_owned(),
+                hostname: "kaas-2".to_owned(),
                 address: "10.0.0.6".to_owned(),
                 ready: true,
             },
@@ -262,11 +262,11 @@ mod tests {
         // Peers use the headless-DNS FQDN, not the raw address.
         assert_eq!(
             all[1].host,
-            "skafka-1.skafka-headless.skafka.svc.cluster.local"
+            "kaas-1.kaas-headless.kaas.svc.cluster.local"
         );
         assert_eq!(
             all[2].host,
-            "skafka-2.skafka-headless.skafka.svc.cluster.local"
+            "kaas-2.kaas-headless.kaas.svc.cluster.local"
         );
     }
 
@@ -274,13 +274,13 @@ mod tests {
     fn not_ready_entries_are_removed() {
         let r = BrokerRegistry::new(self_ep(), dns());
         r.apply_slice(&slice_with(vec![EndpointSliceEntry {
-            hostname: "skafka-1".to_owned(),
+            hostname: "kaas-1".to_owned(),
             address: "10.0.0.5".to_owned(),
             ready: true,
         }]));
         assert_eq!(r.count(), 2);
         r.apply_slice(&slice_with(vec![EndpointSliceEntry {
-            hostname: "skafka-1".to_owned(),
+            hostname: "kaas-1".to_owned(),
             address: "10.0.0.5".to_owned(),
             ready: false,
         }]));
@@ -291,12 +291,12 @@ mod tests {
     fn delete_slice_removes_every_ordinal() {
         let r = BrokerRegistry::new(self_ep(), dns());
         r.apply_slice(&slice_with(vec![EndpointSliceEntry {
-            hostname: "skafka-1".to_owned(),
+            hostname: "kaas-1".to_owned(),
             address: "10.0.0.5".to_owned(),
             ready: true,
         }]));
         r.delete_slice(&slice_with(vec![EndpointSliceEntry {
-            hostname: "skafka-1".to_owned(),
+            hostname: "kaas-1".to_owned(),
             address: "10.0.0.5".to_owned(),
             ready: true,
         }]));
@@ -313,7 +313,7 @@ mod tests {
         };
         let r = BrokerRegistry::new(self_ep(), empty_dns);
         r.apply_slice(&slice_with(vec![EndpointSliceEntry {
-            hostname: "skafka-1".to_owned(),
+            hostname: "kaas-1".to_owned(),
             address: "10.0.0.5".to_owned(),
             ready: true,
         }]));
@@ -332,12 +332,12 @@ mod tests {
         });
         r.apply_slice(&slice_with(vec![
             EndpointSliceEntry {
-                hostname: "skafka-2".to_owned(),
+                hostname: "kaas-2".to_owned(),
                 address: "10.0.0.6".to_owned(),
                 ready: true,
             },
             EndpointSliceEntry {
-                hostname: "skafka-1".to_owned(),
+                hostname: "kaas-1".to_owned(),
                 address: "10.0.0.5".to_owned(),
                 ready: true,
             },

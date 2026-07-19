@@ -4,7 +4,7 @@
 //!
 //! 1. An [`AssignmentLoop`] running as controller-A publishes a
 //!    fresh assignment.
-//! 2. Both broker-side [`Coordinator`]s (skafka-0 + skafka-1) see
+//! 2. Both broker-side [`Coordinator`]s (kaas-0 + kaas-1) see
 //!    it within the poll window and stamp ownership.
 //! 3. Controller-A "dies" (we drop its loop).
 //! 4. Controller-B takes over at a higher epoch and publishes.
@@ -84,12 +84,12 @@ async fn controller_failover_migrates_ownership_to_new_controller() {
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(1)));
 
     // Two broker-side Coordinators sharing the same data_dir.
-    let c0 = coord("skafka-0", tmp.path(), lease.clone());
-    let c1 = coord("skafka-1", tmp.path(), lease.clone());
+    let c0 = coord("kaas-0", tmp.path(), lease.clone());
+    let c1 = coord("kaas-1", tmp.path(), lease.clone());
 
-    // Controller-A (skafka-0) publishes at epoch 1.
-    let cluster = sources("skafka-0", &["skafka-0", "skafka-1"]);
-    let ctrl_a = build_loop(tmp.path().to_path_buf(), "skafka-0", cluster.clone());
+    // Controller-A (kaas-0) publishes at epoch 1.
+    let cluster = sources("kaas-0", &["kaas-0", "kaas-1"]);
+    let ctrl_a = build_loop(tmp.path().to_path_buf(), "kaas-0", cluster.clone());
     ctrl_a.start(1).await.unwrap();
 
     // Both brokers see the assignment.
@@ -117,8 +117,8 @@ async fn controller_failover_migrates_ownership_to_new_controller() {
     drop(ctrl_a);
     lease.0.store(2, Ordering::Relaxed);
 
-    // Controller-B (skafka-1) wins the lease and republishes.
-    let ctrl_b = build_loop(tmp.path().to_path_buf(), "skafka-1", cluster.clone());
+    // Controller-B (kaas-1) wins the lease and republishes.
+    let ctrl_b = build_loop(tmp.path().to_path_buf(), "kaas-1", cluster.clone());
     ctrl_b.start(2).await.unwrap();
     // Controller-B should bump the version past the
     // bootstrap-from-disk value.
@@ -131,7 +131,7 @@ async fn controller_failover_migrates_ownership_to_new_controller() {
     assert!(c0.apply_if_new());
     assert!(c1.apply_if_new());
     let snap_after = c0.snapshot().expect("snapshot after failover");
-    assert_eq!(snap_after.controller, "skafka-1");
+    assert_eq!(snap_after.controller, "kaas-1");
     assert_eq!(snap_after.controller_epoch, 2);
 
     // Ownership is still consistent — exactly one owner per
@@ -167,39 +167,39 @@ async fn controller_failover_migrates_ownership_to_new_controller() {
 async fn broker_loss_reassigns_only_its_partitions() {
     let tmp = tempfile::tempdir().unwrap();
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(1)));
-    let c0 = coord("skafka-0", tmp.path(), lease.clone());
-    let c1 = coord("skafka-1", tmp.path(), lease.clone());
+    let c0 = coord("kaas-0", tmp.path(), lease.clone());
+    let c1 = coord("kaas-1", tmp.path(), lease.clone());
 
-    let three = sources("skafka-0", &["skafka-0", "skafka-1", "skafka-2"]);
-    let two = sources("skafka-0", &["skafka-0", "skafka-1"]);
-    let ctrl = build_loop(tmp.path().to_path_buf(), "skafka-0", three.clone());
+    let three = sources("kaas-0", &["kaas-0", "kaas-1", "kaas-2"]);
+    let two = sources("kaas-0", &["kaas-0", "kaas-1"]);
+    let ctrl = build_loop(tmp.path().to_path_buf(), "kaas-0", three.clone());
     ctrl.start(1).await.unwrap();
     assert!(c0.apply_if_new());
     assert!(c1.apply_if_new());
 
     // Snapshot the pre-loss partitions per broker.
     let pre = c0.snapshot().expect("present");
-    let pre_skafka_2: Vec<i32> = pre
+    let pre_kaas_2: Vec<i32> = pre
         .partitions
         .iter()
-        .filter(|p| p.broker == "skafka-2")
+        .filter(|p| p.broker == "kaas-2")
         .map(|p| p.partition)
         .collect();
-    let pre_skafka_0: Vec<i32> = pre
+    let pre_kaas_0: Vec<i32> = pre
         .partitions
         .iter()
-        .filter(|p| p.broker == "skafka-0")
+        .filter(|p| p.broker == "kaas-0")
         .map(|p| p.partition)
         .collect();
-    let pre_skafka_1: Vec<i32> = pre
+    let pre_kaas_1: Vec<i32> = pre
         .partitions
         .iter()
-        .filter(|p| p.broker == "skafka-1")
+        .filter(|p| p.broker == "kaas-1")
         .map(|p| p.partition)
         .collect();
 
-    // skafka-2 leaves. Controller publishes a fresh view.
-    let ctrl_after = build_loop(tmp.path().to_path_buf(), "skafka-0", two.clone());
+    // kaas-2 leaves. Controller publishes a fresh view.
+    let ctrl_after = build_loop(tmp.path().to_path_buf(), "kaas-0", two.clone());
     ctrl_after.start(1).await.unwrap();
     let _ = ctrl_after
         .update_assignment(AssignmentReason::BrokerDead)
@@ -211,29 +211,29 @@ async fn broker_loss_reassigns_only_its_partitions() {
     let post = c0.snapshot().expect("present");
     // No partition is left on the dead broker.
     for p in &post.partitions {
-        assert_ne!(p.broker, "skafka-2");
+        assert_ne!(p.broker, "kaas-2");
     }
-    // Every partition NOT previously on skafka-2 stays where it
+    // Every partition NOT previously on kaas-2 stays where it
     // was. The smoother may rebalance to keep counts within 1 of
     // each other, so a few partitions might move — but the
-    // ones that were on skafka-0 or skafka-1 should not all
+    // ones that were on kaas-0 or kaas-1 should not all
     // jump.
     let preserved_0: Vec<i32> = post
         .partitions
         .iter()
-        .filter(|p| p.broker == "skafka-0" && pre_skafka_0.contains(&p.partition))
+        .filter(|p| p.broker == "kaas-0" && pre_kaas_0.contains(&p.partition))
         .map(|p| p.partition)
         .collect();
     let preserved_1: Vec<i32> = post
         .partitions
         .iter()
-        .filter(|p| p.broker == "skafka-1" && pre_skafka_1.contains(&p.partition))
+        .filter(|p| p.broker == "kaas-1" && pre_kaas_1.contains(&p.partition))
         .map(|p| p.partition)
         .collect();
     assert!(
         !preserved_0.is_empty() || !preserved_1.is_empty(),
         "at least some originally-placed partitions must keep their broker; \
-         pre0={pre_skafka_0:?}, pre1={pre_skafka_1:?}, pre2={pre_skafka_2:?}"
+         pre0={pre_kaas_0:?}, pre1={pre_kaas_1:?}, pre2={pre_kaas_2:?}"
     );
 
     // The total partition count is preserved.
@@ -246,7 +246,7 @@ async fn unused_helper_silenced() {
     // code when only the failover test uses it.
     let tmp = tempfile::tempdir().unwrap();
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(0)));
-    let c = coord("skafka-0", tmp.path(), lease);
+    let c = coord("kaas-0", tmp.path(), lease);
     let _ = await_owns_any;
     drop(c);
 }

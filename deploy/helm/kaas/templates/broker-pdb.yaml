@@ -2,10 +2,10 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "skafka.fullname" . }}
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 spec:
   maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
   selector:
-    matchLabels: {{- include "skafka.selectorLabels" . | nindent 6 }}
+    matchLabels: {{- include "kaas.selectorLabels" . | nindent 6 }}
 {{- end }}

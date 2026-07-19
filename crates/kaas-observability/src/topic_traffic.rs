@@ -2,7 +2,7 @@
 //!
 //! Per-topic traffic counters (gh #115, gh #121 PR1). Apache Kafka's `BytesInPerSec` / `BytesOutPerSec`
 //! MBeans emit a current cumulative value at every scrape (idle topics
-//! read zero, not "no data"). Pre-#121 skafka used `Int64Counter`
+//! read zero, not "no data"). Pre-#121 kaas used `Int64Counter`
 //! instruments that only emit on `Add()`, so idle topics disappeared
 //! from the timeseries and `rate()` panels gapped.
 //!

@@ -46,7 +46,7 @@ impl ReconcileObserver {
 
     /// Record a reconcile duration alongside the outcome bump. Used
     /// by the reconciler wrapper to feed
-    /// `skafka.operator.reconcile.duration`.
+    /// `kaas.operator.reconcile.duration`.
     pub fn record_duration(&self, elapsed_s: f64) {
         kaas_observability::metrics::global()
             .operator_reconcile_duration

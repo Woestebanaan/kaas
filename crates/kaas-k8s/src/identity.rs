@@ -34,7 +34,7 @@ pub struct DnsConfig {
     /// StatefulSet `serviceName` — e.g. `"kaas"`.
     pub headless_service: String,
     /// `format!`-style with `{ordinal}` substitution, e.g.
-    /// `"skafka-{ordinal}"`.
+    /// `"kaas-{ordinal}"`.
     pub pod_name_pattern: String,
     /// E.g. `"cluster.local"` (default for >99% of K8s distros).
     pub cluster_domain: String,
@@ -49,7 +49,7 @@ impl DnsConfig {
     /// `{ordinal}` AND printf-style `%d` — the Helm chart emits
     /// `KAAS_POD_NAME_PATTERN=<name>-%d`, the pattern v0.1
     /// deployments were configured with. A `%d`
-    /// passing through unreplaced put `skafka-%d.…` hostnames into
+    /// passing through unreplaced put `kaas-%d.…` hostnames into
     /// live Metadata responses (clients died on DNS).
     pub fn fqdn(&self, ordinal: i32) -> String {
         let ord = ordinal.to_string();
@@ -67,9 +67,9 @@ impl DnsConfig {
 /// Identity of this broker pod.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerIdentity {
-    /// E.g. `"skafka-0"`.
+    /// E.g. `"kaas-0"`.
     pub pod_name: String,
-    /// StatefulSet ordinal — e.g. `2` for `"skafka-2"`.
+    /// StatefulSet ordinal — e.g. `2` for `"kaas-2"`.
     pub ordinal: i32,
     pub namespace: String,
     /// Self FQDN, built from [`DnsConfig::fqdn`].
@@ -85,8 +85,8 @@ impl BrokerIdentity {
     /// identity. Env overrides for the DNS knobs:
     ///
     /// - `KAAS_NAMESPACE` (default `"default"`)
-    /// - `KAAS_HEADLESS_SVC` (default `"skafka-headless"`)
-    /// - `KAAS_POD_NAME_PATTERN` (default `"skafka-{ordinal}"`)
+    /// - `KAAS_HEADLESS_SVC` (default `"kaas-headless"`)
+    /// - `KAAS_POD_NAME_PATTERN` (default `"kaas-{ordinal}"`)
     /// - `KAAS_CLUSTER_DOMAIN` (default `"cluster.local"`)
     pub fn from_env(namespace: &str, headless_svc: &str, port: i32) -> Result<Self, IdentityError> {
         let pod_name = env::var("MY_POD_NAME").map_err(|_| IdentityError::MissingPodName)?;
@@ -99,11 +99,11 @@ impl BrokerIdentity {
             namespace.to_owned()
         };
         let headless_service = if headless_svc.is_empty() {
-            env_or("KAAS_HEADLESS_SVC", "skafka-headless")
+            env_or("KAAS_HEADLESS_SVC", "kaas-headless")
         } else {
             headless_svc.to_owned()
         };
-        let pod_name_pattern = env_or("KAAS_POD_NAME_PATTERN", "skafka-{ordinal}");
+        let pod_name_pattern = env_or("KAAS_POD_NAME_PATTERN", "kaas-{ordinal}");
         let cluster_domain = env_or("KAAS_CLUSTER_DOMAIN", "cluster.local");
 
         let ordinal = parse_ordinal(&pod_name).ok_or_else(|| IdentityError::ParseOrdinal {
@@ -131,7 +131,7 @@ impl BrokerIdentity {
 
 /// Extract the trailing integer from a hyphen-separated name — used
 /// by both [`BrokerIdentity::from_env`] and consumers that need to
-/// translate `"skafka-2"` back to `2`. Returns `None` on parse
+/// translate `"kaas-2"` back to `2`. Returns `None` on parse
 /// failure (the v0.1 implementation returned `-1` from its public
 /// wrapper; we use `Option<i32>` for
 /// honesty).
@@ -154,8 +154,8 @@ mod tests {
     fn dns(namespace: &str) -> DnsConfig {
         DnsConfig {
             namespace: namespace.to_owned(),
-            headless_service: "skafka-headless".to_owned(),
-            pod_name_pattern: "skafka-{ordinal}".to_owned(),
+            headless_service: "kaas-headless".to_owned(),
+            pod_name_pattern: "kaas-{ordinal}".to_owned(),
             cluster_domain: "cluster.local".to_owned(),
         }
     }
@@ -165,20 +165,20 @@ mod tests {
         let d = dns("kaas");
         assert_eq!(
             d.fqdn(2),
-            "skafka-2.skafka-headless.skafka.svc.cluster.local"
+            "kaas-2.kaas-headless.kaas.svc.cluster.local"
         );
         assert_eq!(
             d.fqdn(0),
-            "skafka-0.skafka-headless.skafka.svc.cluster.local"
+            "kaas-0.kaas-headless.kaas.svc.cluster.local"
         );
     }
 
     #[test]
     fn parse_ordinal_extracts_trailing_int() {
-        assert_eq!(parse_ordinal("skafka-0"), Some(0));
-        assert_eq!(parse_ordinal("skafka-2"), Some(2));
-        assert_eq!(parse_ordinal("skafka-broker-2"), Some(2));
-        assert_eq!(parse_ordinal("skafka-broker-2-foo"), None);
+        assert_eq!(parse_ordinal("kaas-0"), Some(0));
+        assert_eq!(parse_ordinal("kaas-2"), Some(2));
+        assert_eq!(parse_ordinal("kaas-broker-2"), Some(2));
+        assert_eq!(parse_ordinal("kaas-broker-2-foo"), None);
         assert_eq!(parse_ordinal(""), None);
         assert_eq!(parse_ordinal("nopodname"), None);
     }

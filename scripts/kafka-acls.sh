@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Test kafka-acls.sh against skafka (gh #107: admin-protocol CreateAcls /
+# Test kafka-acls.sh against kaas (gh #107: admin-protocol CreateAcls /
 # DeleteAcls / DescribeAcls persist via the KafkaUser CR's inline
 # spec.authorization.acls list, gh #135).
 #
-# Skafka's CR model only stores ACLs on KafkaUser, so the writer rejects
+# Kaas's CR model only stores ACLs on KafkaUser, so the writer rejects
 # CreateAcls for a principal that has no corresponding CR. This script
 # applies a temporary KafkaUser with the operator's auto-generated SCRAM
 # Secret (gh #136 — password Secret is optional), runs the scenarios,
@@ -11,7 +11,7 @@
 #
 # Requires auth + an admin principal:
 #   ADMIN_PROPS=/path/to/admin-client.properties
-# Requires kubectl in scope of the skafka namespace (override via
+# Requires kubectl in scope of the kaas namespace (override via
 # NAMESPACE=...).
 #
 # Scenarios:
@@ -26,7 +26,7 @@ ADMIN_PROPS="${ADMIN_PROPS:-}"
 EXTRA=()
 [ -n "$ADMIN_PROPS" ] && EXTRA+=(--command-config "$ADMIN_PROPS")
 
-# ADMIN_PROPS is optional: skafka's chart ships a `plain` listener
+# ADMIN_PROPS is optional: kaas's chart ships a `plain` listener
 # (authentication.type=none) on :9092, which is also the in-cluster
 # bootstrap default. AdminClient writes through unauthenticated on
 # that listener and the gh #107 ACL writer still persists to the
@@ -36,7 +36,7 @@ EXTRA=()
 
 need kubectl
 
-NAMESPACE="${NAMESPACE:-skafka}"
+NAMESPACE="${NAMESPACE:-kaas}"
 # Per-run unique user so concurrent invocations don't collide and a
 # crashed previous run can't leave the next one staring at a stale CR.
 USER_NAME="acl-test-$$-$(date +%s)"

@@ -83,7 +83,7 @@ impl Handler for AlterClientQuotasHandler {
                 ));
                 continue;
             };
-            // skafka only supports a single `user` axis. Reject anything else.
+            // kaas only supports a single `user` axis. Reject anything else.
             let Some(username) = exact_user(&entry.entity) else {
                 entries.push(error_entry(
                     &entry,

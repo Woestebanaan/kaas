@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-topics.sh against skafka.
+# Test kafka-topics.sh against kaas.
 #
 # Scenarios:
 #   1. --create a topic with N partitions

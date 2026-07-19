@@ -6,13 +6,13 @@ are always emitted; those with `enabled: false` are skipped.
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "skafka.headlessName" . }}
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.headlessName" . }}
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 spec:
   # Headless service: provides per-pod DNS names for the StatefulSet.
   clusterIP: None
   publishNotReadyAddresses: false
-  selector: {{- include "skafka.selectorLabels" . | nindent 4 }}
+  selector: {{- include "kaas.selectorLabels" . | nindent 4 }}
   ports:
   {{- range .Values.listeners }}
     {{- if or (not (hasKey . "enabled")) .enabled }}
@@ -24,7 +24,7 @@ spec:
     - name: heartbeat
       # Internal-only: brokers dial each other's heartbeat port to reach
       # the elected cluster controller. Headless DNS gives each pod a
-      # stable name so the resolver in bins/skafka/src/cluster.rs can
+      # stable name so the resolver in bins/kaas/src/cluster.rs can
       # follow Lease handoffs.
       port: {{ .Values.broker.ports.heartbeat }}
       targetPort: heartbeat
@@ -32,13 +32,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "skafka.fullname" . }}
-  labels: {{- include "skafka.labels" . | nindent 4 }}
+  name: {{ include "kaas.fullname" . }}
+  labels: {{- include "kaas.labels" . | nindent 4 }}
 spec:
   # Client-facing Service. Load-balances to any ready broker; clients retry on
   # NOT_LEADER_FOR_PARTITION.
   type: ClusterIP
-  selector: {{- include "skafka.selectorLabels" . | nindent 4 }}
+  selector: {{- include "kaas.selectorLabels" . | nindent 4 }}
   ports:
   {{- range .Values.listeners }}
     {{- if or (not (hasKey . "enabled")) .enabled }}

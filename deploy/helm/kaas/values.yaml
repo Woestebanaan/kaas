@@ -1,5 +1,5 @@
 image:
-  # The default repository is ghcr.io/woestebanaan/skafka, with a
+  # The default repository is ghcr.io/woestebanaan/kaas, with a
   # "-preview" suffix appended automatically when the resolved tag is
   # a pre-release (contains "-"), mirroring the release workflow's
   # naming rule. An explicit repository overrides that derivation.
@@ -21,7 +21,7 @@ operator:
       cpu: 500m
       memory: 256Mi
   # Pod-level securityContext mirrors the broker's defence-in-depth
-  # perms (skafka#110). The operator mounts the SAME data PVC and writes
+  # perms (kaas#110). The operator mounts the SAME data PVC and writes
   # /data/__cluster/{credentials,acls}.json + per-topic dirs at reconcile
   # time, so it needs the same kubelet-fsGroup signal.
   #
@@ -42,7 +42,7 @@ operator:
 
 broker:
   replicaCount: 3
-  clusterID: skafka-local
+  clusterID: kaas-local
   ports:
     kafka: 9092
     tls: 9093
@@ -59,7 +59,7 @@ broker:
       cpu: 2
       memory: 4Gi
   # Pod-level securityContext. Defence-in-depth permission handling for
-  # the shared data PVC (skafka#110): two independent mechanisms both
+  # the shared data PVC (kaas#110): two independent mechanisms both
   # land /data writable for the broker process.
   #
   #   1. Strimzi-modern path (works on cooperating CSI drivers).
@@ -120,7 +120,7 @@ broker:
   # transaction.state.log.num.partitions=50 default. Scale ops change
   # which broker owns each slot (via gh #91 hash routing); slot files
   # remain valid. Strimzi's Kafka CR exposes the same knob via
-  # spec.kafka.config and treats it as bootstrap-once; skafka treats
+  # spec.kafka.config and treats it as bootstrap-once; kaas treats
   # changes as triggering a re-shard pass (idempotent on startup).
   # If you change this on a live cluster, drain transactional
   # producers first to avoid losing in-flight (PID, epoch) state
@@ -169,7 +169,7 @@ auth:
 admin:
   # Optional ArgoCD integration for admin-protocol-created CRs
   # (gh #84 + gh #106). When AdminClient.createTopics / kafka-
-  # topics.sh / Kafbat-UI creates a topic, skafka writes a KafkaTopic
+  # topics.sh / Kafbat-UI creates a topic, kaas writes a KafkaTopic
   # CR via TopicCRWriter — but those CRs aren't in git, so a vanilla
   # ArgoCD Application either deletes them on the next selfHeal sync
   # or sits OutOfSync forever.
@@ -182,7 +182,7 @@ admin:
   #     (default IgnoreExtraneous — no drift, no prune)
   #
   # `applicationName` defaults to the Helm release name (typically
-  # "skafka"), so the typical setup is just `enabled: true`. Override
+  # "kaas"), so the typical setup is just `enabled: true`. Override
   # only if your ArgoCD Application name differs from the release.
   #
   # `compareOptions` accepts ArgoCD's compare-options string (see
@@ -194,7 +194,7 @@ admin:
   # `syncOptions` accepts ArgoCD's sync-options string (see
   # https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/).
   # Default "Delete=false" — production safety: a runtime-created
-  # topic survives `kubectl delete application skafka`, so a typo or
+  # topic survives `kubectl delete application kaas`, so a typo or
   # an operator-driven Application teardown doesn't cascade-delete
   # every Kafbat-/AdminClient-created topic. Common alternatives:
   #   - ""                         — runtime topics cascade-delete
@@ -202,7 +202,7 @@ admin:
   #   - "Prune=false"              — show as drift in UI, never prune
   #   - "Prune=false,Delete=false" — both: surfaced as drift AND
   #     survive Application delete
-  # The string is passed through verbatim; skafka doesn't validate.
+  # The string is passed through verbatim; kaas doesn't validate.
   #
   # `enabled: false` (the default) produces plain CRs with no
   # argocd.argoproj.io/* annotations — non-ArgoCD installs get
@@ -265,7 +265,7 @@ observability:
     level: info        # debug|info|warn|error
     format: json       # json|text
 
-  # Prometheus Operator PrometheusRule for the load-bearing skafka alerts
+  # Prometheus Operator PrometheusRule for the load-bearing kaas alerts
   # (byte-opacity tripwires, self-fence, stale assignments, etc.).
   # Off by default — opt in only if Prometheus Operator is installed and
   # routes PrometheusRule resources from this namespace.
@@ -360,7 +360,7 @@ listeners:
       # fronted by per-broker LoadBalancer Services instead.
       enabled: true
       gatewayRef:
-        name: skafka-gateway
+        name: kaas-gateway
         namespace: kafka
     service:
       annotations: {}

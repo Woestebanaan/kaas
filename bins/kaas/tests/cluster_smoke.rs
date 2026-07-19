@@ -161,15 +161,15 @@ impl LeaseEpochSource for AtomicEpoch {
 fn test_dns() -> DnsConfig {
     DnsConfig {
         namespace: "kaas".to_owned(),
-        headless_service: "skafka-headless".to_owned(),
-        pod_name_pattern: "skafka-{ordinal}".to_owned(),
+        headless_service: "kaas-headless".to_owned(),
+        pod_name_pattern: "kaas-{ordinal}".to_owned(),
         cluster_domain: "cluster.local".to_owned(),
     }
 }
 
 fn slice_entry(ordinal: i32, ready: bool) -> EndpointSliceEntry {
     EndpointSliceEntry {
-        hostname: format!("skafka-{ordinal}"),
+        hostname: format!("kaas-{ordinal}"),
         address: format!("10.0.0.{}", ordinal + 10),
         ready,
     }
@@ -210,7 +210,7 @@ async fn three_broker_controller_balances_and_reassigns() {
         .map(|id| {
             let lease_src: Arc<dyn LeaseEpochSource> = lease.clone();
             let c = Coordinator::new(
-                format!("skafka-{id}"),
+                format!("kaas-{id}"),
                 dir.clone(),
                 lease_src,
                 Arc::new(LocalHeartbeat),
@@ -248,7 +248,7 @@ async fn three_broker_controller_balances_and_reassigns() {
         1,
         leader_token.clone(),
         dir.clone(),
-        "skafka-0".to_owned(),
+        "kaas-0".to_owned(),
         topics.clone(),
         registry.clone(),
         "127.0.0.1:0".to_owned(),
@@ -284,9 +284,9 @@ async fn three_broker_controller_balances_and_reassigns() {
         let owned = snap
             .partitions
             .iter()
-            .filter(|p| p.broker == format!("skafka-{id}"))
+            .filter(|p| p.broker == format!("kaas-{id}"))
             .count();
-        assert_eq!(owned, 2, "skafka-{id} must own exactly 2 of 6 partitions");
+        assert_eq!(owned, 2, "kaas-{id} must own exactly 2 of 6 partitions");
     }
 
     // 2. Topic created → notifier pokes the loop → new partitions
@@ -304,15 +304,15 @@ async fn three_broker_controller_balances_and_reassigns() {
     })
     .await;
 
-    // 3. Broker loss: skafka-2 goes NotReady → the 2 s broker-set
-    //    watcher recomputes → nothing stays assigned to skafka-2.
+    // 3. Broker loss: kaas-2 goes NotReady → the 2 s broker-set
+    //    watcher recomputes → nothing stays assigned to kaas-2.
     registry.apply_slice(&EndpointSliceData {
         entries: vec![slice_entry(2, false)],
         kafka_port: Some(9092),
     });
-    wait_until("skafka-2 drained", Duration::from_secs(10), || {
+    wait_until("kaas-2 drained", Duration::from_secs(10), || {
         coords[0].snapshot().is_some_and(|a| {
-            !a.partitions.is_empty() && a.partitions.iter().all(|p| p.broker != "skafka-2")
+            !a.partitions.is_empty() && a.partitions.iter().all(|p| p.broker != "kaas-2")
         })
     })
     .await;

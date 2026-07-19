@@ -1,6 +1,6 @@
 //! DescribeLogDirs handler (key 35).
 //!
-//! One log dir per skafka broker (the engine's data dir); one topic
+//! One log dir per kaas broker (the engine's data dir); one topic
 //! entry per requested topic — or every known topic when the request
 //! carries a null filter. Partition sizes come straight from
 //! [`StorageEngine::partition_size`].

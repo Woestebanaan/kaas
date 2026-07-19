@@ -55,7 +55,7 @@ async fn client_receives_assignment_changed_pushed_by_server() {
     }
 
     // 2. Spawn the broker-side client pointing at the server.
-    let client = HeartbeatClient::new("skafka-0");
+    let client = HeartbeatClient::new("kaas-0");
     client.set_target(addr.to_string());
 
     // Capture commands the client receives.
@@ -85,7 +85,7 @@ async fn client_receives_assignment_changed_pushed_by_server() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(server.connected_brokers(), vec!["skafka-0".to_owned()]);
+    assert_eq!(server.connected_brokers(), vec!["kaas-0".to_owned()]);
 
     // 3. Push an ASSIGNMENT_CHANGED from the controller; the client
     // must observe it via on_command.

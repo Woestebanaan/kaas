@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn brokers(n: usize) -> Vec<String> {
-        (0..n).map(|i| format!("skafka-{i}")).collect()
+        (0..n).map(|i| format!("kaas-{i}")).collect()
     }
 
     fn loop_with_brokers(
@@ -368,7 +368,7 @@ mod tests {
             brokers: brokers(brokers_n),
             groups: vec!["g1".to_owned()],
         });
-        let l = AssignmentLoop::new(dir, "skafka-0", s.clone(), s.clone());
+        let l = AssignmentLoop::new(dir, "kaas-0", s.clone(), s.clone());
         l.with_group_source(s)
     }
 
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(v, 1, "first write is version 1");
         let snap = l.snapshot().expect("snapshot present after start");
         assert_eq!(snap.controller_epoch, 7);
-        assert_eq!(snap.controller, "skafka-0");
+        assert_eq!(snap.controller, "kaas-0");
         assert_eq!(snap.partitions.len(), 6);
         assert_eq!(snap.consumer_groups.len(), 1);
         let path = tmp.path().join("__cluster").join(Assignment::FILE_NAME);
@@ -414,7 +414,7 @@ mod tests {
             controller_epoch: 9,
             assignment_version: 42,
             generated_at: "2024-12-31T23:59:59Z".to_owned(),
-            controller: "skafka-old".to_owned(),
+            controller: "kaas-old".to_owned(),
             brokers: vec![],
             partitions: vec![],
             consumer_groups: vec![],

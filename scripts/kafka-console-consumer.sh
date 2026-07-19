@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test kafka-console-consumer.sh against skafka.
+# Test kafka-console-consumer.sh against kaas.
 #
 # Scenarios:
 #   1. --from-beginning + --max-messages reads exactly the messages produced

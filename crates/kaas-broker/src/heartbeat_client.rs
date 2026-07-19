@@ -317,14 +317,14 @@ mod tests {
 
     #[test]
     fn fresh_client_is_not_connected() {
-        let c = HeartbeatClient::new("skafka-0");
+        let c = HeartbeatClient::new("kaas-0");
         assert!(!c.is_connected());
         assert_eq!(c.last_received(), None);
     }
 
     #[test]
     fn send_without_stream_returns_err() {
-        let c = HeartbeatClient::new("skafka-0");
+        let c = HeartbeatClient::new("kaas-0");
         let r = c.send(BrokerStatus {
             broker_id: String::new(),
             timestamp_ms: 0,
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn target_resolver_overrides_static_target() {
-        let c = HeartbeatClient::new("skafka-0");
+        let c = HeartbeatClient::new("kaas-0");
         c.set_target("static:9094");
         c.with_target_fn(Arc::new(|| Some("dynamic:9095".to_owned())));
         assert_eq!(c.resolve_target().as_deref(), Some("dynamic:9095"));
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn record_received_advances_last_received() {
-        let c = HeartbeatClient::new("skafka-0");
+        let c = HeartbeatClient::new("kaas-0");
         assert_eq!(c.last_received(), None);
         c.record_received();
         assert!(c.last_received().is_some());

@@ -14,7 +14,7 @@
 //!   omitted), only `transactionTimeoutMs` recorded. The
 //!   `omitempty`-heavy case.
 //! - `txn_state/slot-48.json` — single entry, `CompleteAbort`.
-//! - `fence_log/from-skafka-0.json` — stringified `pid → epoch` map.
+//! - `fence_log/from-kaas-0.json` — stringified `pid → epoch` map.
 //!
 //! Each test loads the captured bytes, deserializes via
 //! [`serde_json`], re-serializes, and asserts the output is
@@ -22,7 +22,7 @@
 //! `skip_serializing_if` behaviour fails the test — that's the
 //! catch the [gh #169] hedge wants before Phase 9 cutover.
 //!
-//! [gh #169]: https://github.com/Woestebanaan/skafka/issues/169
+//! [gh #169]: https://github.com/Woestebanaan/kaas/issues/169
 //!
 //! Regenerating: `cd archive && go run ./cmd/capture-txn-fixtures
 //! ../crates/kaas-coordinator/tests/fixtures/` overwrites every
@@ -72,7 +72,7 @@ fn slot_48_complete_abort_round_trips() {
 
 #[test]
 fn fence_log_round_trips() {
-    let bytes = include_bytes!("fixtures/fence_log/from-skafka-0.json");
+    let bytes = include_bytes!("fixtures/fence_log/from-kaas-0.json");
     // Fence log shape: `{ stringified-pid → epoch }`. No struct
     // ordering issue possible; serde_json preserves insertion
     // order for HashMap-backed values via... actually, no — Rust's

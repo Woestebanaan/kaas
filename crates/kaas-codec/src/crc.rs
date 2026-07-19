@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn validate_pass_fail() {
-        let data = b"skafka test data";
+        let data = b"kaas test data";
         let crc = compute(data);
         assert!(validate(data, crc).is_ok());
         assert!(validate(data, crc.wrapping_add(1)).is_err());
