@@ -2,6 +2,50 @@
 
 Idempotent-producer dedupe, the transaction coordinator state machine on slot-sharded JSON files, and EOS v2 end to end.
 
+The Java producer has enabled idempotence by default since Kafka 3.0, so
+*every* `kafka-console-producer` invocation exercises this machinery — it's
+hot-path, not an exotic feature. Four layers of state, all on the shared
+volume:
+
+| Layer | Where it lives |
+|---|---|
+| PID allocation (`InitProducerId`) | monotonic in-memory counter seeded at boot; txn IDs get the same PID + `epoch+1` on rejoin |
+| Per-partition dedupe | `ProducerStates` map, 5-batch ring per PID (`crates/kaas-storage/src/idempotence.rs`) |
+| Snapshot persistence | `producer-state.snapshot` next to the manifest (`crates/kaas-storage/src/producer_snapshot.rs`) |
+| Per-`transactional.id` state | `txn_state/slot-N.json` (`crates/kaas-coordinator/src/txn_state.rs`) |
+
+## Idempotent producer
+
+`InitProducerId` (key 22) hands a non-transactional producer a fresh PID at
+epoch 0. On every Produce, classification runs **under the partition mutex,
+before append** against a per-PID ring of the last 5 batches — mirroring the
+Java client's `max.in.flight.requests.per.connection=5`:
+
+- **duplicate** → echo the cached `baseOffset`, no log write;
+- **out-of-order sequence** → error 45 (`OUT_OF_ORDER_SEQUENCE_NUMBER`);
+- **stale epoch** → error 47 (`PRODUCER_FENCED`);
+- otherwise accept and advance the ring.
+
+The ring survives leadership moves via `producer-state.snapshot` (written on
+segment roll + relinquish, restored on take-over — see [File-handle
+ownership](./file-handles.md)).
+
+### Fencing across partitions and brokers
+
+A transactional producer that reconnects gets the **same PID with
+`epoch+1`** (gh #22) — fencing is the monotonic epoch, exactly Apache's
+KIP-360 contract. Two mechanisms make the bump stick everywhere:
+
+- **Cross-partition fence**: after every `epoch > 0` rejoin, the
+  InitProducerId handler walks every local partition, advances the PID's
+  epoch and clears its dedupe window — so a zombie batch from the old
+  session is fenced even on partitions the new session hasn't touched yet.
+- **Cross-broker fence broadcast** (gh #108 phase 2): the bump is appended
+  to a per-broker fence log under `/data/__cluster/fence_log/`
+  (`crates/kaas-coordinator/src/fence_log.rs`); every peer's `FenceWatcher`
+  (`crates/kaas-broker/src/fence_watcher.rs`) polls and applies it. Same
+  shared-volume pattern as the marker queue below — no new RPC surface.
+
 ## Transaction state machine
 
 Per-`transactional.id` state lives in `TxnEntry` records
@@ -60,7 +104,38 @@ same `{pid}-{epoch}.json` file — the queue is idempotent by naming. Consumers
 in `read_committed` only see the transaction's records once these markers land
 (the fetch path clamps to the last stable offset).
 
-The transaction timeout reaper (spawned by the broker's cluster runtime) fires
-every 10 s: any `Ongoing` entry past `ongoingSinceMs + transactionTimeoutMs`
-transitions to `CompleteAbort` with an epoch bump, and its staged offsets are
-discarded via the same offset hook.
+## Coordinator routing and staged offsets
+
+Which broker coordinates a transaction is the same deterministic hash story
+as consumer groups: `hash(transactional.id)` picks the slot owner (gh #91),
+and non-coordinators answer the txn APIs with `NOT_COORDINATOR` — see
+[Consumer-group coordination](./consumer-groups.md). On coordinator failover
+the new owner simply reads the same slot file off the shared volume:
+close-to-open consistency means the file *is* the materialized state, with no
+log replay — this is the architectural replacement for Apache's
+`__transaction_state` topic (gh #29).
+
+`TxnOffsetCommit` (key 28) stages consumer offsets in a **pending** layer
+keyed by `(groupID, PID)` in the offset store — invisible to `OffsetFetch`
+until `EndTxn` commits. `AddOffsetsToTxn` (key 25) records which groups the
+transaction will touch, so the EndTxn offset hook knows exactly which pending
+sets to commit or discard. That hook firing atomically with the state
+transition is the KIP-447 (EOS v2) contract; the full
+consume-process-produce-commit round trip is exercised against an in-process
+broker by `bins/kaas/tests/eos_v2.rs`.
+
+## The timeout reaper
+
+The transaction timeout reaper (spawned by the broker's cluster runtime,
+`bins/kaas/src/cluster.rs`) fires every 10 s — Apache's
+`transaction.abort.timed.out.transaction.cleanup.interval.ms` default. Any
+`Ongoing` entry past `ongoingSinceMs + transactionTimeoutMs` transitions to
+`CompleteAbort` with an epoch bump, and its staged offsets are discarded via
+the same offset hook.
+
+One honest caveat: the state-store API has an ownership-gated variant
+(`abort_overdue_owned`), but the production reaper currently calls the
+**ungated** sweep — in a multi-broker cluster every broker's reaper walks
+every slot, so N brokers can race on the same overdue transaction. Gating the
+reaper on txn-slot ownership is the intended end state, not what ships
+today; treat multi-broker reaper behaviour as a known sharp edge.

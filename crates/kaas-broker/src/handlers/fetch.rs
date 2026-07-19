@@ -1,9 +1,9 @@
 //! Fetch handler (key 1).
 //!
 //! Stateless full-fetch per gh #4: `session_id = 0` regardless of
-//! what the client sent. Read-uncommitted only in Phase 3 — the
-//! `aborted_transactions` list is always empty (Phase 6 wires the
-//! `LastStableOffset` differentiator).
+//! what the client sent. Read-committed isolation per gh #31: the
+//! read cap clamps to the last stable offset and the
+//! `aborted_transactions` list is populated from the txn index.
 
 use std::sync::Arc;
 

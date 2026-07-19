@@ -172,3 +172,60 @@ on close/relinquish — **not** on segment roll and not per append — so its
 `highWatermark` can lag in-memory state; recovery treats the log as
 authoritative and reconciles on open by scanning the active segment to the
 first malformed batch boundary.
+
+The index is **sparse**: one `(rel_offset: i32, file_pos: i32)` entry every
+`index.interval.bytes` of log data (4 KiB default). Lookup binary-searches to
+the closest entry ≤ the target offset, then scans the log forward. The index
+is *not* fsynced on the hot path — it's rebuildable from the log during
+takeover recovery, so only the log's durability is on the `acks=all`
+promise. Mmap of the index is feature-gated behind `mmap`, the one
+unsafe-code carve-out in the workspace.
+
+## Byte opacity: the broker never parses records
+
+Exactly three places on the Produce path touch the RecordBatch bytes, and
+none of them decode a record:
+
+1. `kaas-codec` decodes the request with `records: Option<bytes::Bytes>` — a
+   zero-copy slice into the frame buffer.
+2. `kaas-storage/src/idempotence.rs` peeks the fixed-size batch header for
+   PID / epoch / sequence — header only.
+3. `kaas-storage/src/segment.rs` peeks the head for
+   `(base_offset, last_offset_delta, max_timestamp)` — header only.
+
+After that, the same opaque `&[u8]` the client sent lands verbatim on disk
+(with the base offset rewritten in place): **the log file IS the wire
+format**, which is what makes Fetch a byte copy rather than a re-encode.
+Fetch is symmetric — batch bytes come back off disk undecoded. The invariant
+is enforced by tripwire counters that must stay at zero (see
+[Observability](./observability.md)) and the `bins/kaas/tests/byte_opacity.rs`
+integration test.
+
+## The durability dial
+
+`KAAS_FLUSH_INTERVAL_MESSAGES` (default **1** = honest `acks=all`: every
+batch waits for a group-commit fsync cycle) mirrors Apache Kafka's
+`log.flush.interval.messages`. Raising it trades durability for throughput
+by letting the committer skip cycles until N messages are pending — same
+semantics, same trade, as Apache. On NFS substrates where the COMMIT
+round-trip dominates, this and the group-commit coalescing are the two
+levers that matter (see [Performance](../operations/performance.md)).
+
+## Retention, DeleteRecords, and compaction
+
+The cleaner (`crates/kaas-storage/src/cleaner.rs`) enforces per-topic policy
+from `.config.json` (operator-written from `KafkaTopic.spec.config`):
+
+- **Retention** deletes whole closed segments past size/time limits — a
+  leader-side unlink that actually frees disk, per the
+  [file-handle ownership rule](./file-handles.md).
+- **`DeleteRecords`** (API key 21) advances `logStartOffset`; when the purge
+  covers the active segment (`logStart ≥ highWatermark`) the active segment
+  itself is reclaimed.
+- **Compaction** honours two knobs (gh #116): `min.compaction.lag.ms`
+  (KIP-58 — segments whose `maxTimestamp` falls inside the lag window are
+  skipped; default 0 = no gate) and `delete.retention.ms` (KIP-354 —
+  tombstones whose batch `baseTimestamp` predates the cutoff are dropped
+  even if latest for their key; default 0 = tombstones live forever).
+  Tombstone-expiry granularity is **per-batch** in kaas, where Apache is
+  per-record — a deliberate consequence of never opening batches.

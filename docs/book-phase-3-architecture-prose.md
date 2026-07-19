@@ -2,7 +2,16 @@
 
 Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 3).
 
-- **Status**: not started
+- **Status**: **done** (2026-07-19). All ten Part I chapters carry the ported +
+  fact-checked prose; ARCHITECTURE.md is a pointer stub; CLAUDE.md + README updated.
+  Corrections applied during the sweep (beyond the 7 phase-2 divergences, all of which
+  are now reflected in prose): **(8)** gh #105 TopicID wire propagation is *unshipped* —
+  the production topic watch (`run_topic_watch`) inserts all-zero registry entries, so
+  Metadata serves nil topic IDs; CLAUDE.md's "TopicID propagation" section rewritten,
+  and KIP-516 must land as **partial** in the phase-4 KIP index (15/6/8, not 16/5/8).
+  Also fixed: the stale `fetch.rs` docstring (claimed read-uncommitted-only), CLAUDE.md's
+  committer-FD-clone, manifest-persist-sites, reaper-gating, and KafkaTopic-delete
+  claims.
 - **Depends on**: [Phase 2](./book-phase-2-diagrams.md) (diagrams already in place)
 - **Delivers as**: one commit on `main`
 - **Exit state**: Part I is the authoritative architecture doc; `docs/ARCHITECTURE.md` is a

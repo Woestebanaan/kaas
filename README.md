@@ -11,11 +11,10 @@ Current release line: `v0.2.x-preview`.
 
 ## Documentation
 
-- **The kaas book** (`docs/`) — architecture, Kafka compatibility, code tour, operations.
-  Build it locally with `cargo xtask docs` (or `cargo xtask docs --serve` for a live
-  preview); a hosted version is planned.
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — the system-level architecture
-  narrative with diagrams.
+- **The kaas book** (`docs/`) — architecture (Part I is the authoritative
+  architecture doc), Kafka compatibility, code tour, operations. Build it locally with
+  `cargo xtask docs` (or `cargo xtask docs --serve` for a live preview); a hosted
+  version is planned.
 - [`docs/RELEASING.md`](./docs/RELEASING.md) — tag-driven release procedure.
 
 ## Quickstart
