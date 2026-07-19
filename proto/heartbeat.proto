@@ -6,9 +6,8 @@ syntax = "proto3";
 // PING for liveness and ASSIGNMENT_CHANGED to push assignment.json refreshes.
 //
 // Phase 4 wires the client/server. Phase 1 only ships this schema.
-package skafka.heartbeat.v1;
+package kaas.heartbeat.v1;
 
-option go_package = "github.com/woestebanaan/skafka/pkg/heartbeatpb;heartbeatpb";
 
 service ControllerHeartbeat {
   // Stream is opened by the broker. Long-lived; reconnect on disconnect.

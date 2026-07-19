@@ -85,5 +85,5 @@ pub mod heartbeatpb {
         clippy::cast_sign_loss,
         missing_debug_implementations
     )]
-    tonic::include_proto!("skafka.heartbeat.v1");
+    tonic::include_proto!("kaas.heartbeat.v1");
 }
