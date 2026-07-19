@@ -63,7 +63,7 @@ jobs:
         run: cargo build --release --workspace --bins
 
       # Regenerates the CRDs from crates/sk-operator-api and fails on
-      # any diff against deploy/crds + deploy/helm/skafka/crds. This
+      # any diff against deploy/crds + deploy/helm/kaas/crds. This
       # step was documented as existing since Phase 7 but never
       # actually wired — which is how the committed CRDs kept a stale
       # snake_case Condition schema while the Rust type moved to
@@ -100,14 +100,14 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: bins/skafka/Dockerfile
+          file: bins/kaas/Dockerfile
           push: false
 
       - name: Build operator image (no push)
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: bins/skafka-operator/Dockerfile
+          file: bins/kaas-operator/Dockerfile
           push: false
 
   helm:
@@ -118,6 +118,6 @@ jobs:
         with:
           version: 'v3.14.0'
       - name: helm lint
-        run: helm lint deploy/helm/skafka
+        run: helm lint deploy/helm/kaas
       - name: helm template
-        run: helm template test-release deploy/helm/skafka > /tmp/rendered.yaml
+        run: helm template test-release deploy/helm/kaas > /tmp/rendered.yaml

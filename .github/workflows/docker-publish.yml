@@ -4,7 +4,7 @@ name: release
 # to GHCR. Guardrails:
 #   - pre-release tags (v*-*) publish to separate image names
 #
-# Runs on the Woestebanaan/skafka ARC runner set (apps/arc-runners in the
+# Runs on the Woestebanaan/kaas ARC runner set (apps/arc-runners in the
 # k3s-cluster repo). containerMode=dind provides a privileged Docker daemon
 # which supports QEMU, multi-arch, and GHA cache.
 on:
@@ -66,18 +66,18 @@ jobs:
           echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           if [[ "$VERSION" == *-* ]]; then
-            echo "broker_image=ghcr.io/${OWNER}/skafka-preview" >> "$GITHUB_OUTPUT"
-            echo "operator_image=ghcr.io/${OWNER}/skafka-operator-preview" >> "$GITHUB_OUTPUT"
+            echo "broker_image=ghcr.io/${OWNER}/kaas-preview" >> "$GITHUB_OUTPUT"
+            echo "operator_image=ghcr.io/${OWNER}/kaas-operator-preview" >> "$GITHUB_OUTPUT"
           else
-            echo "broker_image=ghcr.io/${OWNER}/skafka" >> "$GITHUB_OUTPUT"
-            echo "operator_image=ghcr.io/${OWNER}/skafka-operator" >> "$GITHUB_OUTPUT"
+            echo "broker_image=ghcr.io/${OWNER}/kaas" >> "$GITHUB_OUTPUT"
+            echo "operator_image=ghcr.io/${OWNER}/kaas-operator" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build + push broker image
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: bins/skafka/Dockerfile
+          file: bins/kaas/Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.names.outputs.broker_image }}:${{ steps.names.outputs.image_tag }}
@@ -86,7 +86,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: bins/skafka-operator/Dockerfile
+          file: bins/kaas-operator/Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.names.outputs.operator_image }}:${{ steps.names.outputs.image_tag }}
@@ -101,11 +101,11 @@ jobs:
           OWNER: ${{ steps.names.outputs.owner }}
         run: |
           CHART_VERSION=${VERSION#v}
-          helm package deploy/helm/skafka \
+          helm package deploy/helm/kaas \
             --version "$CHART_VERSION" \
             --app-version "$CHART_VERSION"
           helm registry login ghcr.io \
             -u "${{ github.actor }}" \
             -p "${{ secrets.GITHUB_TOKEN }}"
-          helm push "skafka-${CHART_VERSION}.tgz" \
+          helm push "kaas-${CHART_VERSION}.tgz" \
             "oci://ghcr.io/${OWNER}/charts"

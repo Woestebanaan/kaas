@@ -21,7 +21,7 @@ members = [
 [workspace.package]
 edition      = "2021"
 license      = "Apache-2.0"
-repository   = "https://github.com/Woestebanaan/skafka"
+repository   = "https://github.com/Woestebanaan/kaas"
 rust-version = "1.85"
 
 [workspace.dependencies]
