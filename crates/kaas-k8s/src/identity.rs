@@ -31,7 +31,7 @@ pub enum IdentityError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsConfig {
     pub namespace: String,
-    /// StatefulSet `serviceName` — e.g. `"skafka"`.
+    /// StatefulSet `serviceName` — e.g. `"kaas"`.
     pub headless_service: String,
     /// `format!`-style with `{ordinal}` substitution, e.g.
     /// `"skafka-{ordinal}"`.
@@ -47,7 +47,7 @@ impl DnsConfig {
     ///
     /// Accepts both placeholder dialects: the native
     /// `{ordinal}` AND printf-style `%d` — the Helm chart emits
-    /// `SKAFKA_POD_NAME_PATTERN=<name>-%d`, the pattern v0.1
+    /// `KAAS_POD_NAME_PATTERN=<name>-%d`, the pattern v0.1
     /// deployments were configured with. A `%d`
     /// passing through unreplaced put `skafka-%d.…` hostnames into
     /// live Metadata responses (clients died on DNS).
@@ -84,27 +84,27 @@ impl BrokerIdentity {
     /// Read `MY_POD_NAME` from the environment and derive the
     /// identity. Env overrides for the DNS knobs:
     ///
-    /// - `SKAFKA_NAMESPACE` (default `"default"`)
-    /// - `SKAFKA_HEADLESS_SVC` (default `"skafka-headless"`)
-    /// - `SKAFKA_POD_NAME_PATTERN` (default `"skafka-{ordinal}"`)
-    /// - `SKAFKA_CLUSTER_DOMAIN` (default `"cluster.local"`)
+    /// - `KAAS_NAMESPACE` (default `"default"`)
+    /// - `KAAS_HEADLESS_SVC` (default `"skafka-headless"`)
+    /// - `KAAS_POD_NAME_PATTERN` (default `"skafka-{ordinal}"`)
+    /// - `KAAS_CLUSTER_DOMAIN` (default `"cluster.local"`)
     pub fn from_env(namespace: &str, headless_svc: &str, port: i32) -> Result<Self, IdentityError> {
         let pod_name = env::var("MY_POD_NAME").map_err(|_| IdentityError::MissingPodName)?;
         if pod_name.is_empty() {
             return Err(IdentityError::MissingPodName);
         }
         let namespace = if namespace.is_empty() {
-            env_or("SKAFKA_NAMESPACE", "default")
+            env_or("KAAS_NAMESPACE", "default")
         } else {
             namespace.to_owned()
         };
         let headless_service = if headless_svc.is_empty() {
-            env_or("SKAFKA_HEADLESS_SVC", "skafka-headless")
+            env_or("KAAS_HEADLESS_SVC", "skafka-headless")
         } else {
             headless_svc.to_owned()
         };
-        let pod_name_pattern = env_or("SKAFKA_POD_NAME_PATTERN", "skafka-{ordinal}");
-        let cluster_domain = env_or("SKAFKA_CLUSTER_DOMAIN", "cluster.local");
+        let pod_name_pattern = env_or("KAAS_POD_NAME_PATTERN", "skafka-{ordinal}");
+        let cluster_domain = env_or("KAAS_CLUSTER_DOMAIN", "cluster.local");
 
         let ordinal = parse_ordinal(&pod_name).ok_or_else(|| IdentityError::ParseOrdinal {
             pod_name: pod_name.clone(),
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn fqdn_shape_matches_strimzi() {
-        let d = dns("skafka");
+        let d = dns("kaas");
         assert_eq!(
             d.fqdn(2),
             "skafka-2.skafka-headless.skafka.svc.cluster.local"

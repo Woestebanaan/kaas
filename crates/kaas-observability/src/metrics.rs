@@ -136,226 +136,226 @@ pub fn new_metrics(m: &Meter) -> Metrics {
     Metrics {
         topic_traffic,
 
-        request_latency: latency_hist(m, "skafka.request.latency", "Kafka request handler latency"),
-        write_latency: latency_hist(m, "skafka.storage.write.latency", "Partition append latency"),
-        read_latency: latency_hist(m, "skafka.storage.read.latency", "Partition read latency"),
-        fsync_latency: latency_hist(m, "skafka.storage.fsync.latency", "Segment fsync latency"),
+        request_latency: latency_hist(m, "kaas.request.latency", "Kafka request handler latency"),
+        write_latency: latency_hist(m, "kaas.storage.write.latency", "Partition append latency"),
+        read_latency: latency_hist(m, "kaas.storage.read.latency", "Partition read latency"),
+        fsync_latency: latency_hist(m, "kaas.storage.fsync.latency", "Segment fsync latency"),
 
         controller_failovers: counter(
             m,
-            "skafka.controller.failovers",
+            "kaas.controller.failovers",
             "Times this broker won the cluster controller lease",
         ),
         controller_failover_duration: latency_hist(
             m,
-            "skafka.controller.failover.duration",
+            "kaas.controller.failover.duration",
             "Seconds from winning the lease to the first AssignmentLoop write",
         ),
 
         assignment_changes: counter(
             m,
-            "skafka.assignment.changes",
+            "kaas.assignment.changes",
             "AssignmentLoop recompute+write iterations",
         ),
         assignment_file_writes: counter(
             m,
-            "skafka.assignment.file.writes",
+            "kaas.assignment.file.writes",
             "AssignmentStore.Write attempts (result=ok|error)",
         ),
         assignment_file_write_latency: latency_hist(
             m,
-            "skafka.assignment.file.write.latency",
+            "kaas.assignment.file.write.latency",
             "AssignmentStore.Write tmp+rename duration",
         ),
         assignment_pushes: counter(
             m,
-            "skafka.assignment.pushes",
+            "kaas.assignment.pushes",
             "ASSIGNMENT_CHANGED broadcasts via heartbeat server",
         ),
         cr_mirror_writes: counter(
             m,
-            "skafka.assignment.cr.mirror.writes",
+            "kaas.assignment.cr.mirror.writes",
             "KafkaClusterAssignments CR Status update attempts (result=ok|error)",
         ),
         assignment_polls: counter(
             m,
-            "skafka.assignment.polls",
+            "kaas.assignment.polls",
             "assignment.json mtime poll iterations (change_detected=true|false)",
         ),
         stale_assignments_rejected: counter(
             m,
-            "skafka.stale.assignments.rejected",
+            "kaas.stale.assignments.rejected",
             "assignment.json reads dropped because controllerEpoch was behind",
         ),
 
         heartbeat_rtt: latency_hist(
             m,
-            "skafka.heartbeat.rtt",
+            "kaas.heartbeat.rtt",
             "Broker→controller→broker heartbeat round-trip",
         ),
         heartbeat_misses: counter(
             m,
-            "skafka.heartbeat.misses",
+            "kaas.heartbeat.misses",
             "Heartbeats not received within heartbeatTimeout",
         ),
         self_fence_events: counter(
             m,
-            "skafka.self.fence.events",
+            "kaas.self.fence.events",
             "Times this broker self-fenced due to stale heartbeat",
         ),
 
         codec_record_decode: counter(
             m,
-            "skafka.codec.record.decode",
+            "kaas.codec.record.decode",
             "Tripwire: code path decoded an individual record. MUST stay at zero — alert if non-zero",
         ),
         codec_batch_reencode: counter(
             m,
-            "skafka.codec.batch.reencode",
+            "kaas.codec.batch.reencode",
             "Tripwire: code path re-encoded a RecordBatch. MUST stay at zero — alert if non-zero",
         ),
 
         group_rebalances: counter(
             m,
-            "skafka.group.rebalances",
+            "kaas.group.rebalances",
             "Consumer group rebalance completions",
         ),
 
         auth_success: counter(
             m,
-            "skafka.auth.success",
+            "kaas.auth.success",
             "Successful SASL / mTLS authentications",
         ),
         auth_failure: counter(
             m,
-            "skafka.auth.failure",
+            "kaas.auth.failure",
             "Failed authentication attempts",
         ),
-        acl_deny: counter(m, "skafka.acl.deny", "Authorization denials"),
+        acl_deny: counter(m, "kaas.acl.deny", "Authorization denials"),
         quota_throttle: counter(
             m,
-            "skafka.quota.throttle",
+            "kaas.quota.throttle",
             "Requests that hit a quota and were throttled",
         ),
-        tls_handshakes: counter(m, "skafka.tls.handshakes", "TLS handshakes completed"),
+        tls_handshakes: counter(m, "kaas.tls.handshakes", "TLS handshakes completed"),
         cert_reloads: counter(
             m,
-            "skafka.cert.reloads",
+            "kaas.cert.reloads",
             "TLS certificate hot-reloads (result=ok|error). Failures stay visible — cert-manager mid-rotation or stale Secret mounts surface as result=error and don't go silent.",
         ),
 
-        connections: counter(m, "skafka.connections", "New client connections accepted"),
+        connections: counter(m, "kaas.connections", "New client connections accepted"),
         connections_open: m
-            .i64_up_down_counter("skafka.connections.open")
+            .i64_up_down_counter("kaas.connections.open")
             .with_description("Currently open client connections")
             .build(),
 
         produce_errors: counter_with_unit(
             m,
-            "skafka.produce.errors",
+            "kaas.produce.errors",
             "Per-partition Produce failures (labels: topic, error_code). Bumped on every error path — storage stalled, not leader, corrupt batch, auth denied, out-of-order sequence, fenced producer epoch.",
             "{error}",
         ),
         fetch_errors: counter_with_unit(
             m,
-            "skafka.fetch.errors",
+            "kaas.fetch.errors",
             "Per-partition Fetch failures (labels: topic, error_code). Bumped on every error path — not leader, read failure, auth denied.",
             "{error}",
         ),
 
         cleaner_runs: counter(
             m,
-            "skafka.cleaner.runs",
+            "kaas.cleaner.runs",
             "Retention cleaner partition-pass completions (result=ok|error)",
         ),
         cleaner_duration: latency_hist(
             m,
-            "skafka.cleaner.duration",
+            "kaas.cleaner.duration",
             "Wall-clock per retention cleaner partition pass",
         ),
         cleaner_segments_deleted: counter_with_unit(
             m,
-            "skafka.cleaner.segments.deleted",
+            "kaas.cleaner.segments.deleted",
             "Segments deleted by the retention cleaner (reason=time|size)",
             "{segment}",
         ),
         cleaner_bytes_reclaimed: counter_with_unit(
             m,
-            "skafka.cleaner.bytes.reclaimed",
+            "kaas.cleaner.bytes.reclaimed",
             "Bytes freed by retention deletes (reason=time|size). Approximates disk-pressure relief; on NFS the actual unlink may lag if another broker held the fd.",
             "By",
         ),
 
         compaction_runs: counter(
             m,
-            "skafka.compaction.runs",
+            "kaas.compaction.runs",
             "Log compactor partition-pass completions (result=ok|error|aborted)",
         ),
         compaction_duration: latency_hist(
             m,
-            "skafka.compaction.duration",
+            "kaas.compaction.duration",
             "Wall-clock per log compactor partition pass",
         ),
         compaction_records_kept: counter_with_unit(
             m,
-            "skafka.compaction.records.kept",
+            "kaas.compaction.records.kept",
             "Records surviving the compactor's keep-latest-per-key pass",
             "{record}",
         ),
         compaction_records_dropped: counter_with_unit(
             m,
-            "skafka.compaction.records.dropped",
+            "kaas.compaction.records.dropped",
             "Records superseded by a later write for the same key — the dedup win",
             "{record}",
         ),
         compaction_bytes_in: counter_with_unit(
             m,
-            "skafka.compaction.bytes.in",
+            "kaas.compaction.bytes.in",
             "Source-segment bytes scanned by the compactor (before dedup)",
             "By",
         ),
         compaction_bytes_out: counter_with_unit(
             m,
-            "skafka.compaction.bytes.out",
+            "kaas.compaction.bytes.out",
             "Replacement-segment bytes written by the compactor (after dedup). bytes.in - bytes.out is the size savings.",
             "By",
         ),
 
         otlp_push_success: counter(
             m,
-            "skafka.otlp.push.success",
+            "kaas.otlp.push.success",
             "OTLP metric exports that succeeded",
         ),
         otlp_push_failure: counter(
             m,
-            "skafka.otlp.push.failure",
+            "kaas.otlp.push.failure",
             "OTLP metric exports that failed (err_class=timeout|refused|other)",
         ),
         otlp_push_duration: latency_hist(
             m,
-            "skafka.otlp.push.duration",
+            "kaas.otlp.push.duration",
             "Time spent in Exporter.Export — high values suggest backend pressure",
         ),
 
         operator_reconciles: counter(
             m,
-            "skafka.operator.reconciles",
+            "kaas.operator.reconciles",
             "Operator reconcile completions (kind=CR kind, result=ok|requeue|error)",
         ),
         operator_reconcile_duration: latency_hist(
             m,
-            "skafka.operator.reconcile.duration",
+            "kaas.operator.reconcile.duration",
             "Operator Reconcile() wall-clock per call (kind=...)",
         ),
 
         k8s_api_calls: counter(
             m,
-            "skafka.k8s.api.calls",
+            "kaas.k8s.api.calls",
             "Apiserver calls from the broker (operation=Get|List|Watch|Patch|Update|Create, resource=KafkaTopic|EndpointSlice|Lease|Pod|KafkaClusterAssignments, result=ok|error)",
         ),
         k8s_api_latency: latency_hist(
             m,
-            "skafka.k8s.api.latency",
+            "kaas.k8s.api.latency",
             "Apiserver call wall-clock per (operation, resource)",
         ),
     }

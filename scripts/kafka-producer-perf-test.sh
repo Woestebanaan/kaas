@@ -33,7 +33,7 @@ done
 
 echo ">> Scenario 3 (gh #14): oversized record (>1MB) must be rejected"
 # Apache broker default max.message.bytes=1048588. Skafka mirrors that
-# via SKAFKA_MAX_MESSAGE_BYTES (chart-default 1048588). Push one
+# via KAAS_MAX_MESSAGE_BYTES (chart-default 1048588). Push one
 # 2 MiB record with max.request.size lifted client-side so the
 # rejection comes from the broker, not the client's own pre-flight.
 #

@@ -11,7 +11,7 @@
 //!   no Coordinator wired. Produce/Fetch fall through to the
 //!   "always lead" `LocalLeaseManager` path. Consumer-group APIs
 //!   (`Manager`) work fully.
-//! - **Single-broker disk** (`SKAFKA_DATA_DIR` set, `MY_POD_NAME`
+//! - **Single-broker disk** (`KAAS_DATA_DIR` set, `MY_POD_NAME`
 //!   unset) — adds a Coordinator + AssignmentLoop. The loop writes
 //!   a self-only `assignment.json` every recompute; the Coordinator
 //!   watcher picks it up and stamps ownership. Manager
@@ -157,7 +157,7 @@ pub fn install(
     );
 
     // Phase 6 transactional-state store + fence log. We always
-    // construct one — dev mode (no SKAFKA_DATA_DIR) gets a tempdir
+    // construct one — dev mode (no KAAS_DATA_DIR) gets a tempdir
     // so the gh #22 rejoin contract still works under unit tests
     // and single-binary smoke runs. Same shape as the offset store
     // fallback above.
@@ -582,7 +582,7 @@ fn prepare_cluster_wiring(
     // Heartbeat client follows the Lease holder: resolver re-runs at
     // the start of every reconnect cycle, so controller failover =
     // one reconnect.
-    let hb_port = env_or("SKAFKA_PEER_HEARTBEAT_PORT", "9094")
+    let hb_port = env_or("KAAS_PEER_HEARTBEAT_PORT", "9094")
         .parse::<i32>()
         .unwrap_or(9094);
     let resolver: TargetResolver = Arc::new({
@@ -608,11 +608,11 @@ fn prepare_cluster_wiring(
         registry,
         lease_epoch,
         heart,
-        heartbeat_bind: env_or("SKAFKA_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094"),
+        heartbeat_bind: env_or("KAAS_CONTROLLER_HEARTBEAT_ADDR", "0.0.0.0:9094"),
         lease_timings: (
-            env_secs("SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS", 15),
-            env_secs("SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS", 10),
-            env_secs("SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS", 2),
+            env_secs("KAAS_CONTROLLER_LEASE_DURATION_SECONDS", 15),
+            env_secs("KAAS_CONTROLLER_RENEW_DEADLINE_SECONDS", 10),
+            env_secs("KAAS_CONTROLLER_RETRY_PERIOD_SECONDS", 2),
         ),
     })
 }
@@ -1051,7 +1051,7 @@ pub(crate) async fn run_controller(
         }
         Err(err) => {
             warn!(%err, addr = %heartbeat_bind,
-                  "bad SKAFKA_CONTROLLER_HEARTBEAT_ADDR; heartbeat server disabled");
+                  "bad KAAS_CONTROLLER_HEARTBEAT_ADDR; heartbeat server disabled");
         }
     }
 
@@ -1257,10 +1257,10 @@ fn self_endpoint_lookup(self_id: &str, port: i32) -> Arc<dyn BrokerLookup> {
     // MemoryStorage-backed dev binary still resolves.
     let advertised = {
         let pod = std::env::var("MY_POD_NAME").ok().filter(|s| !s.is_empty());
-        let svc = std::env::var("SKAFKA_HEADLESS_SVC")
+        let svc = std::env::var("KAAS_HEADLESS_SVC")
             .ok()
             .filter(|s| !s.is_empty());
-        let ns = std::env::var("SKAFKA_NAMESPACE")
+        let ns = std::env::var("KAAS_NAMESPACE")
             .ok()
             .filter(|s| !s.is_empty());
         match (pod, svc, ns) {

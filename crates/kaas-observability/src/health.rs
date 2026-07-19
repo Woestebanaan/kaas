@@ -187,12 +187,12 @@ struct ReadyState {
 
 async fn readyz() -> impl IntoResponse {
     // gh #131: only require EXTERNAL_HOSTNAME_PATTERN when
-    // SKAFKA_TLS_PORT is set (i.e. an external TLS listener is
+    // KAAS_TLS_PORT is set (i.e. an external TLS listener is
     // active). Internal-only TLS deployments set the cert but never
     // an external hostname; without this guard they'd report unready
     // forever.
     let mut is_ready = ready();
-    let tls_port = std::env::var("SKAFKA_TLS_PORT").unwrap_or_default();
+    let tls_port = std::env::var("KAAS_TLS_PORT").unwrap_or_default();
     let ext_host = std::env::var("EXTERNAL_HOSTNAME_PATTERN").unwrap_or_default();
     if !tls_port.is_empty() && ext_host.is_empty() {
         is_ready = false;

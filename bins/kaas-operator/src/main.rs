@@ -9,10 +9,10 @@
 //! Environment variables (chart-templated by
 //! `templates/operator-deployment.yaml`):
 //!
-//! - `SKAFKA_DATA_DIR`            — shared PVC mount (default `/data`)
-//! - `SKAFKA_NAMESPACE`           — operator's own namespace
-//! - `SKAFKA_LOG_LEVEL`           — `debug`/`info`/`warn`/`error`
-//! - `SKAFKA_LOG_FORMAT`          — `json` or `text`
+//! - `KAAS_DATA_DIR`            — shared PVC mount (default `/data`)
+//! - `KAAS_NAMESPACE`           — operator's own namespace
+//! - `KAAS_LOG_LEVEL`           — `debug`/`info`/`warn`/`error`
+//! - `KAAS_LOG_FORMAT`          — `json` or `text`
 //! - `METRICS_BIND_ADDRESS`       — `:8080` (axum metrics endpoint)
 //! - `HEALTH_PROBE_BIND_ADDRESS`  — `:8081` (healthz / readyz)
 //! - `OTEL_EXPORTER_OTLP_*`       — picked up by the OTel SDK via
@@ -61,8 +61,8 @@ async fn main() -> Result<()> {
     // `Client::try_default()` invocation.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let log_level = env_or("SKAFKA_LOG_LEVEL", DEFAULT_LOG_LEVEL);
-    let log_format = env_or("SKAFKA_LOG_FORMAT", DEFAULT_LOG_FORMAT);
+    let log_level = env_or("KAAS_LOG_LEVEL", DEFAULT_LOG_LEVEL);
+    let log_format = env_or("KAAS_LOG_FORMAT", DEFAULT_LOG_FORMAT);
 
     let obs_cancel = CancellationToken::new();
     let providers = kaas_observability::bootstrap("kaas-operator", obs_cancel.clone())
@@ -70,8 +70,8 @@ async fn main() -> Result<()> {
         .context("initialising observability")?;
     kaas_observability::install_tracing(&log_level, &log_format, providers.tracer.clone());
 
-    let data_dir = PathBuf::from(env_or("SKAFKA_DATA_DIR", DEFAULT_DATA_DIR));
-    let namespace = env_or("SKAFKA_NAMESPACE", DEFAULT_NAMESPACE);
+    let data_dir = PathBuf::from(env_or("KAAS_DATA_DIR", DEFAULT_DATA_DIR));
+    let namespace = env_or("KAAS_NAMESPACE", DEFAULT_NAMESPACE);
     let metrics_addr = env_or("METRICS_BIND_ADDRESS", DEFAULT_METRICS_ADDR);
     let probe_addr = env_or("HEALTH_PROBE_BIND_ADDRESS", DEFAULT_PROBE_ADDR);
 

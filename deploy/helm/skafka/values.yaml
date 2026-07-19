@@ -99,9 +99,9 @@ broker:
   # Tighter durations = faster failover, more etcd writes; defaults match
   # the Kubernetes client's recommended renew/retry ratios.
   controllerLease:
-    durationSeconds: 15      # SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS
-    renewDeadlineSeconds: 10 # SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS
-    retryPeriodSeconds: 2    # SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS
+    durationSeconds: 15      # KAAS_CONTROLLER_LEASE_DURATION_SECONDS
+    renewDeadlineSeconds: 10 # KAAS_CONTROLLER_RENEW_DEADLINE_SECONDS
+    retryPeriodSeconds: 2    # KAAS_CONTROLLER_RETRY_PERIOD_SECONDS
 
   # Durability dial. Mirrors Apache Kafka's log.flush.interval.messages.
   #   1   (default) — fsync after every record. Honest acks=all semantics.
@@ -153,13 +153,13 @@ auth:
   # When false, the broker uses an AllowAllAuthEngine (no authentication,
   # ANONYMOUS principal for every connection). When true (default), the
   # RealAuthEngine reads credentials.json and acls.json from the shared
-  # PVC. Translates to SKAFKA_AUTH_DISABLED env var on the broker.
+  # PVC. Translates to KAAS_AUTH_DISABLED env var on the broker.
   enabled: true
   mechanisms:
     - SCRAM-SHA-512
   # When true, the dispatcher rejects non-ApiVersions/SaslHandshake/SaslAuthenticate
   # requests from connections that haven't completed SASL — closes the
-  # "anonymous fallthrough" hole. Translates to SKAFKA_REQUIRE_SASL.
+  # "anonymous fallthrough" hole. Translates to KAAS_REQUIRE_SASL.
   requireSasl: false
   tls:
     enabled: false

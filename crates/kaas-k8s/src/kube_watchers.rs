@@ -9,7 +9,7 @@
 //! The `KafkaTopic` watcher is parked for Phase 7, where the CR
 //! type lands in `kaas-operator-api`. Phase 5 doesn't read the CR
 //! anyway — the broker takes its topic catalog from
-//! `SKAFKA_TOPICS` env JSON until the operator surfaces in
+//! `KAAS_TOPICS` env JSON until the operator surfaces in
 //! Phase 7.
 
 // Module-gating is already done via `#[cfg(...)]` on the
@@ -264,7 +264,7 @@ pub async fn patch_readiness(
         "Pod",
         api.patch_status(
             &pod_name,
-            &PatchParams::apply("skafka").force(),
+            &PatchParams::apply("kaas").force(),
             &Patch::Apply(&patch),
         ),
     )

@@ -123,7 +123,7 @@ mod tests {
         let fs = RealFs::new();
         let payload = Sample {
             a: 42,
-            b: "skafka".into(),
+            b: "kaas".into(),
         };
         atomic_write_json(&fs, tmp.path(), "thing.json", &payload).unwrap();
 

@@ -7,10 +7,10 @@
 //!   (`/api/v1/otlp/v1/metrics`) speaks only http/protobuf; exporting gRPC
 //!   here just gets an h2 GoAway from Prometheus.
 //! * `OTEL_EXPORTER_OTLP_ENDPOINT` — if set, push traces via OTLP/gRPC.
-//! * `SKAFKA_METRIC_EXPORT_INTERVAL` — duration string (`30s` etc.).
+//! * `KAAS_METRIC_EXPORT_INTERVAL` — duration string (`30s` etc.).
 //!   Default `30s` per gh #133 (SDK default is 60s → `rate([1m])`
 //!   panels see one sample and gap).
-//! * `OTEL_SERVICE_VERSION`, `MY_POD_NAME`, `SKAFKA_NAMESPACE` — folded
+//! * `OTEL_SERVICE_VERSION`, `MY_POD_NAME`, `KAAS_NAMESPACE` — folded
 //!   into resource attributes so Grafana can filter by broker /
 //!   namespace.
 //! * `OTEL_TRACES_SAMPLER_ARG` — float in [0, 1]; default `0.1`.
@@ -86,7 +86,7 @@ impl Providers {
 /// stomp the previous provider.
 ///
 /// `service` becomes `service.name` in exported resource attributes;
-/// pass `"skafka"` or `"kaas-operator"`.
+/// pass `"kaas"` or `"kaas-operator"`.
 pub async fn bootstrap(
     service: &'static str,
     cancel: CancellationToken,
@@ -105,7 +105,7 @@ pub async fn bootstrap(
                 .map_err(|e| ObservabilityError::MetricExporter(e.to_string()))?;
 
             let wrapped = ObservedExporter::new(raw);
-            let interval = parse_duration_env("SKAFKA_METRIC_EXPORT_INTERVAL")
+            let interval = parse_duration_env("KAAS_METRIC_EXPORT_INTERVAL")
                 .unwrap_or_else(|| Duration::from_secs(30));
             let reader = PeriodicReader::builder(wrapped, runtime::Tokio)
                 .with_interval(interval)
@@ -195,7 +195,7 @@ fn build_resource(service: &str) -> Resource {
             attrs.push(KeyValue::new("service.instance.id", v));
         }
     }
-    if let Ok(v) = std::env::var("SKAFKA_NAMESPACE") {
+    if let Ok(v) = std::env::var("KAAS_NAMESPACE") {
         if !v.is_empty() {
             attrs.push(KeyValue::new("k8s.namespace.name", v));
         }

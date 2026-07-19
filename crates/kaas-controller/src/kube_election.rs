@@ -190,7 +190,7 @@ impl KubeLeaseElection {
         if existing.is_some() {
             api.patch(
                 &self.lease_name,
-                &PatchParams::apply("skafka").force(),
+                &PatchParams::apply("kaas").force(),
                 &Patch::Apply(&patch),
             )
             .await?;
@@ -246,7 +246,7 @@ impl KubeLeaseElection {
         });
         api.patch(
             &self.lease_name,
-            &PatchParams::apply("skafka").force(),
+            &PatchParams::apply("kaas").force(),
             &Patch::Apply(&patch),
         )
         .await?;
@@ -284,7 +284,7 @@ impl KubeLeaseElection {
             .api()
             .patch(
                 &self.lease_name,
-                &PatchParams::apply("skafka").force(),
+                &PatchParams::apply("kaas").force(),
                 &Patch::Apply(&patch),
             )
             .await

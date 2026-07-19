@@ -220,11 +220,11 @@ mod tests {
         let path = tmp.path().join("hello.txt");
         {
             let mut f = fs.create(&path).unwrap();
-            f.write_all(b"skafka").unwrap();
+            f.write_all(b"kaas").unwrap();
         }
         let mut buf = Vec::new();
         fs.open_read(&path).unwrap().read_to_end(&mut buf).unwrap();
-        assert_eq!(&buf, b"skafka");
+        assert_eq!(&buf, b"kaas");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Env-var parsing for `bins/kaas/main.rs`.
 //!
 //! All knobs are env-only — no flag parser. Names are stable
-//! (`SKAFKA_*`) so the chart's env block doesn't churn
+//! (`KAAS_*`) so the chart's env block doesn't churn
 //! between flavours.
 
 use std::env;
@@ -12,17 +12,17 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("SKAFKA_LISTENERS: {0}")]
+    #[error("KAAS_LISTENERS: {0}")]
     Listeners(serde_json::Error),
-    #[error("SKAFKA_LISTENERS empty — set at least one entry")]
+    #[error("KAAS_LISTENERS empty — set at least one entry")]
     NoListeners,
-    #[error("SKAFKA_BROKER_ID: {0}")]
+    #[error("KAAS_BROKER_ID: {0}")]
     BrokerId(std::num::ParseIntError),
-    #[error("SKAFKA_FLUSH_INTERVAL_MESSAGES: {0}")]
+    #[error("KAAS_FLUSH_INTERVAL_MESSAGES: {0}")]
     FlushInterval(std::num::ParseIntError),
 }
 
-/// JSON entry in `SKAFKA_LISTENERS`. Mirrors the Helm chart's
+/// JSON entry in `KAAS_LISTENERS`. Mirrors the Helm chart's
 /// listener array shape (gh #126). Two shapes are accepted:
 ///
 /// * **Chart shape** (Strimzi-style; what `skafka.listenersJSON`
@@ -30,8 +30,8 @@ pub enum ConfigError {
 ///   `{"name":"plain","port":9092,"type":"internal","tls":false,
 ///     "authentication":{"type":"none"}}`. The `port` is expanded
 ///   into `0.0.0.0:<port>`; `tls: true` is upgraded to a
-///   [`TlsConfig`] populated from `SKAFKA_TLS_CERT_FILE` /
-///   `SKAFKA_TLS_KEY_FILE` (falls back to `/tls/tls.crt` +
+///   [`TlsConfig`] populated from `KAAS_TLS_CERT_FILE` /
+///   `KAAS_TLS_KEY_FILE` (falls back to `/tls/tls.crt` +
 ///   `/tls/tls.key`, matching the chart's Secret mount path).
 ///   `authentication.type` maps into `authentication_type`.
 /// * **Internal shape** (test fixtures + backward-compat):
@@ -112,11 +112,11 @@ impl<'de> Deserialize<'de> for ListenerEntry {
                 // Chart-shape boolean: resolve cert paths from the
                 // Secret-mount env vars the chart populates. Same
                 // paths for every TLS listener.
-                let cert = std::env::var("SKAFKA_TLS_CERT_FILE")
+                let cert = std::env::var("KAAS_TLS_CERT_FILE")
                     .unwrap_or_else(|_| "/tls/tls.crt".to_owned());
-                let key = std::env::var("SKAFKA_TLS_KEY_FILE")
+                let key = std::env::var("KAAS_TLS_KEY_FILE")
                     .unwrap_or_else(|_| "/tls/tls.key".to_owned());
-                let client_ca = std::env::var("SKAFKA_TLS_CLIENT_CA_FILE")
+                let client_ca = std::env::var("KAAS_TLS_CLIENT_CA_FILE")
                     .ok()
                     .filter(|s| !s.is_empty())
                     .map(PathBuf::from);
@@ -183,7 +183,7 @@ pub struct Cli {
 impl Cli {
     pub fn from_env() -> Result<Self, ConfigError> {
         let listeners_json =
-            env::var("SKAFKA_LISTENERS").unwrap_or_else(|_| default_listeners().to_owned());
+            env::var("KAAS_LISTENERS").unwrap_or_else(|_| default_listeners().to_owned());
         let mut listeners: Vec<ListenerEntry> =
             serde_json::from_str(&listeners_json).map_err(ConfigError::Listeners)?;
         if listeners.is_empty() {
@@ -201,7 +201,7 @@ impl Cli {
             }
         }
 
-        let data_dir = env::var("SKAFKA_DATA_DIR").ok().and_then(|s| {
+        let data_dir = env::var("KAAS_DATA_DIR").ok().and_then(|s| {
             if s.is_empty() {
                 None
             } else {
@@ -209,7 +209,7 @@ impl Cli {
             }
         });
 
-        let flush_interval_messages = env::var("SKAFKA_FLUSH_INTERVAL_MESSAGES")
+        let flush_interval_messages = env::var("KAAS_FLUSH_INTERVAL_MESSAGES")
             .ok()
             .map(|s| s.parse::<i64>())
             .transpose()
@@ -217,15 +217,15 @@ impl Cli {
             .unwrap_or(1);
 
         let cluster_id =
-            env::var("SKAFKA_CLUSTER_ID").unwrap_or_else(|_| "skafka-rust-dev".to_owned());
+            env::var("KAAS_CLUSTER_ID").unwrap_or_else(|_| "skafka-rust-dev".to_owned());
 
-        // Explicit SKAFKA_BROKER_ID wins; otherwise derive the
+        // Explicit KAAS_BROKER_ID wins; otherwise derive the
         // StatefulSet ordinal from MY_POD_NAME ("skafka-2" → 2).
         // A StatefulSet can't template
         // per-pod env, so without this every replica boots as
         // broker 0 and the whole cluster elects/renews under one
         // identity. Dev mode (neither var set) stays broker 0.
-        let broker_id = match env::var("SKAFKA_BROKER_ID").ok().filter(|s| !s.is_empty()) {
+        let broker_id = match env::var("KAAS_BROKER_ID").ok().filter(|s| !s.is_empty()) {
             Some(s) => s.parse::<i32>().map_err(ConfigError::BrokerId)?,
             None => env::var("MY_POD_NAME")
                 .ok()
@@ -234,19 +234,19 @@ impl Cli {
                 .unwrap_or(0),
         };
 
-        let topics_seed = env::var("SKAFKA_TOPICS").unwrap_or_default();
+        let topics_seed = env::var("KAAS_TOPICS").unwrap_or_default();
         let log_level = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
 
-        let auth_disabled = parse_bool_env("SKAFKA_AUTH_DISABLED").unwrap_or(false);
-        let authorization_type = env::var("SKAFKA_AUTHORIZATION_TYPE").unwrap_or_default();
-        let super_users = env::var("SKAFKA_SUPER_USERS")
+        let auth_disabled = parse_bool_env("KAAS_AUTH_DISABLED").unwrap_or(false);
+        let authorization_type = env::var("KAAS_AUTHORIZATION_TYPE").unwrap_or_default();
+        let super_users = env::var("KAAS_SUPER_USERS")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .collect();
         let ssl_principal_mapping_rules =
-            env::var("SKAFKA_SSL_PRINCIPAL_MAPPING_RULES").unwrap_or_default();
+            env::var("KAAS_SSL_PRINCIPAL_MAPPING_RULES").unwrap_or_default();
 
         Ok(Self {
             listeners,
@@ -278,15 +278,15 @@ fn default_listeners() -> &'static str {
 }
 
 /// Build a StatefulSet-shaped FQDN
-/// `<MY_POD_NAME>.<SKAFKA_HEADLESS_SVC>.<SKAFKA_NAMESPACE>.svc.cluster.local`
+/// `<MY_POD_NAME>.<KAAS_HEADLESS_SVC>.<KAAS_NAMESPACE>.svc.cluster.local`
 /// when all three env vars are set. Returns `None` in local-dev
 /// mode so listeners fall back to their bind IP.
 fn derive_advertised_host() -> Option<String> {
     let pod = env::var("MY_POD_NAME").ok().filter(|s| !s.is_empty())?;
-    let svc = env::var("SKAFKA_HEADLESS_SVC")
+    let svc = env::var("KAAS_HEADLESS_SVC")
         .ok()
         .filter(|s| !s.is_empty())?;
-    let ns = env::var("SKAFKA_NAMESPACE")
+    let ns = env::var("KAAS_NAMESPACE")
         .ok()
         .filter(|s| !s.is_empty())?;
     Some(format!("{pod}.{svc}.{ns}.svc.cluster.local"))
@@ -342,9 +342,9 @@ mod tests {
     fn chart_shape_tls_true_resolves_from_env() {
         // Chart emits `tls: true` for the TLS listener; the
         // deserializer resolves cert paths from env-var overrides.
-        std::env::set_var("SKAFKA_TLS_CERT_FILE", "/tls/tls.crt");
-        std::env::set_var("SKAFKA_TLS_KEY_FILE", "/tls/tls.key");
-        std::env::remove_var("SKAFKA_TLS_CLIENT_CA_FILE");
+        std::env::set_var("KAAS_TLS_CERT_FILE", "/tls/tls.crt");
+        std::env::set_var("KAAS_TLS_KEY_FILE", "/tls/tls.key");
+        std::env::remove_var("KAAS_TLS_CLIENT_CA_FILE");
 
         let v: Vec<ListenerEntry> = serde_json::from_str(
             r#"[{"name":"tls","port":9093,"type":"internal","tls":true,"authentication":{"type":"none"}}]"#,

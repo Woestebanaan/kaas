@@ -83,7 +83,7 @@ image names.
 
 {{/*
 skafka.listenersJSON — gh #126 helper. Iterates the user-facing
-listeners array (Strimzi shape) and emits the SKAFKA_LISTENERS env
+listeners array (Strimzi shape) and emits the KAAS_LISTENERS env
 value as a JSON list-of-objects matching the broker's listener
 spec (crates/sk-broker/src/cli.rs).
 
@@ -208,7 +208,7 @@ selfSigned cert-manager Issuer + Certificate (gh #131).
 
 {{/*
 skafka.hasAnyTLSListener — true if any enabled listener has tls: true,
-regardless of type. Drives the volume mount + SKAFKA_TLS_CERT_FILE env
+regardless of type. Drives the volume mount + KAAS_TLS_CERT_FILE env
 in broker-statefulset.yaml — internal-TLS and external-TLS share the
 same broker-side cert loader (one TLS config across all listeners,
 per crates/sk-protocol/src/server.rs).
@@ -249,7 +249,7 @@ templates don't have to range-fold themselves.
 
 {{/*
 skafka.superUsersList — emit the cluster-wide superUsers as a
-comma-separated string for SKAFKA_SUPER_USERS. Empty when the list
+comma-separated string for KAAS_SUPER_USERS. Empty when the list
 is empty (broker treats unset env as "no superUsers").
 */}}
 {{- define "skafka.superUsersList" -}}

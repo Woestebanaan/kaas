@@ -271,7 +271,7 @@ impl KafkaClusterReconciler {
         let port = nonzero_or(cluster.spec.listeners.external.port, 9093);
 
         let mut selector = BTreeMap::new();
-        selector.insert("app.kubernetes.io/name".into(), "skafka".into());
+        selector.insert("app.kubernetes.io/name".into(), "kaas".into());
         selector.insert("app.kubernetes.io/instance".into(), cluster_name.clone());
         selector.insert(
             "statefulset.kubernetes.io/pod-name".into(),

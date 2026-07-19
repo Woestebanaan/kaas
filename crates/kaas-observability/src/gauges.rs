@@ -63,7 +63,7 @@ fn load_source() -> Option<Arc<Box<dyn GaugeSource>>> {
 /// reports 0.
 pub fn install_runtime_gauges(meter: &Meter) {
     meter
-        .i64_observable_gauge("skafka.is.controller")
+        .i64_observable_gauge("kaas.is.controller")
         .with_description("1 if this broker holds the cluster controller lease, 0 otherwise")
         .with_callback(|observer| match load_source() {
             Some(src) => observer.observe(src.is_controller(), &[]),
@@ -72,7 +72,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .build();
 
     meter
-        .i64_observable_gauge("skafka.assignment.version")
+        .i64_observable_gauge("kaas.assignment.version")
         .with_description("Most recent assignmentVersion applied by this broker")
         .with_callback(|observer| match load_source() {
             Some(src) => observer.observe(src.assignment_version(), &[]),
@@ -81,7 +81,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .build();
 
     meter
-        .i64_observable_gauge("skafka.broker.count.alive")
+        .i64_observable_gauge("kaas.broker.count.alive")
         .with_description("Live brokers as observed by this broker")
         .with_callback(|observer| match load_source() {
             Some(src) => observer.observe(src.broker_count_alive(), &[]),
@@ -90,7 +90,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .build();
 
     meter
-        .i64_observable_gauge("skafka.broker.count.assigned")
+        .i64_observable_gauge("kaas.broker.count.assigned")
         .with_description("Distinct brokers in the current assignment.json")
         .with_callback(|observer| match load_source() {
             Some(src) => observer.observe(src.broker_count_assigned(), &[]),
@@ -99,7 +99,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .build();
 
     meter
-        .i64_observable_gauge("skafka.assignment.file.size")
+        .i64_observable_gauge("kaas.assignment.file.size")
         .with_description("Size of /data/__cluster/assignment.json")
         .with_unit("By")
         .with_callback(|observer| match load_source() {
@@ -109,7 +109,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .build();
 
     meter
-        .i64_observable_gauge("skafka.partition.leader")
+        .i64_observable_gauge("kaas.partition.leader")
         .with_description("Per-partition leader broker ordinal")
         .with_callback(|observer| {
             if let Some(src) = load_source() {
@@ -127,7 +127,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .build();
 
     meter
-        .i64_observable_gauge("skafka.partition.epoch")
+        .i64_observable_gauge("kaas.partition.epoch")
         .with_description("Per-partition leader epoch")
         .with_callback(|observer| {
             if let Some(src) = load_source() {
@@ -145,7 +145,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .build();
 
     meter
-        .i64_observable_gauge("skafka.partition.high.watermark")
+        .i64_observable_gauge("kaas.partition.high.watermark")
         .with_description("Per-partition high watermark offset")
         .with_callback(|observer| {
             if let Some(src) = load_source() {

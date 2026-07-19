@@ -212,7 +212,7 @@ mod tests {
 
     fn dns() -> DnsConfig {
         DnsConfig {
-            namespace: "skafka".to_owned(),
+            namespace: "kaas".to_owned(),
             headless_service: "skafka-headless".to_owned(),
             pod_name_pattern: "skafka-{ordinal}".to_owned(),
             cluster_domain: "cluster.local".to_owned(),

@@ -259,7 +259,7 @@ mod tests {
                 topic_id: [0; 16],
             });
         }
-        Arc::new(Broker::new(engine, r, "skafka-dev", 0))
+        Arc::new(Broker::new(engine, r, "kaas-dev", 0))
     }
 
     fn listeners() -> Vec<ListenerEntry> {
@@ -305,7 +305,7 @@ mod tests {
         let resp = metadata::decode_response(&mut r, 9).unwrap();
         assert_eq!(resp.brokers.len(), 1);
         assert_eq!(resp.brokers[0].node_id, 0);
-        assert_eq!(resp.cluster_id.as_deref(), Some("skafka-dev"));
+        assert_eq!(resp.cluster_id.as_deref(), Some("kaas-dev"));
         assert_eq!(resp.topics.len(), 1);
         assert_eq!(resp.topics[0].name, "events");
         assert_eq!(resp.topics[0].partitions.len(), 3);

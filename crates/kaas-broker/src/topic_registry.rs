@@ -1,4 +1,4 @@
-//! In-memory topic registry seeded from `SKAFKA_TOPICS` env JSON.
+//! In-memory topic registry seeded from `KAAS_TOPICS` env JSON.
 //!
 //! Phase 3 stand-in for the `KafkaTopic` CR watcher that lands in
 //! Phase 5/7. The shape is intentionally narrow — just what the
@@ -35,7 +35,7 @@ impl TopicMeta {
     }
 }
 
-/// JSON shape accepted in `SKAFKA_TOPICS`. Mirrors the simplest
+/// JSON shape accepted in `KAAS_TOPICS`. Mirrors the simplest
 /// possible KafkaTopic CR projection — name + partitions. Extra
 /// fields are ignored so the env-var can grow without breaking
 /// downgrade.

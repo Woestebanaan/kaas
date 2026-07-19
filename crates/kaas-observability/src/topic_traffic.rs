@@ -133,7 +133,7 @@ struct TopicSnapshot {
 pub fn register_topic_traffic_instruments(meter: &Meter, traffic: Arc<TopicTrafficMeter>) {
     let t = Arc::clone(&traffic);
     meter
-        .u64_observable_counter("skafka.produce.records")
+        .u64_observable_counter("kaas.produce.records")
         .with_description(
             "Cumulative records produced per topic. Emits at every scrape interval (including 0 for idle topics) so dashboard rate() panels never gap.",
         )
@@ -150,7 +150,7 @@ pub fn register_topic_traffic_instruments(meter: &Meter, traffic: Arc<TopicTraff
 
     let t = Arc::clone(&traffic);
     meter
-        .u64_observable_counter("skafka.produce.bytes")
+        .u64_observable_counter("kaas.produce.bytes")
         .with_description("Cumulative bytes produced per topic. Idle-emit invariant.")
         .with_unit("By")
         .with_callback(move |observer| {
@@ -165,7 +165,7 @@ pub fn register_topic_traffic_instruments(meter: &Meter, traffic: Arc<TopicTraff
 
     let t = Arc::clone(&traffic);
     meter
-        .u64_observable_counter("skafka.fetch.records")
+        .u64_observable_counter("kaas.fetch.records")
         .with_description("Cumulative records fetched per topic. Idle-emit invariant.")
         .with_unit("{record}")
         .with_callback(move |observer| {
@@ -180,7 +180,7 @@ pub fn register_topic_traffic_instruments(meter: &Meter, traffic: Arc<TopicTraff
 
     let t = Arc::clone(&traffic);
     meter
-        .u64_observable_counter("skafka.fetch.bytes")
+        .u64_observable_counter("kaas.fetch.bytes")
         .with_description("Cumulative bytes fetched per topic. Idle-emit invariant.")
         .with_unit("By")
         .with_callback(move |observer| {

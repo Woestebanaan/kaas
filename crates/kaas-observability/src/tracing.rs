@@ -1,7 +1,7 @@
 //! `tracing-subscriber` + OTel tracing bring-up.
 //!
-//! Honours `SKAFKA_LOG_LEVEL` (debug|info|warn|error) and
-//! `SKAFKA_LOG_FORMAT` (json|text). Replaces the ad-hoc `init_tracing`
+//! Honours `KAAS_LOG_LEVEL` (debug|info|warn|error) and
+//! `KAAS_LOG_FORMAT` (json|text). Replaces the ad-hoc `init_tracing`
 //! stubs in `bins/kaas/main.rs` and `bins/kaas-operator/main.rs`.
 //!
 //! The OTel layer emits every `tracing::span!` as an OTel span through

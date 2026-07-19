@@ -42,9 +42,9 @@ spec:
             runAsUser: 0
             runAsGroup: 0
           env:
-            - name: SKAFKA_DATA_DIR
+            - name: KAAS_DATA_DIR
               value: {{ .Values.storage.mountPath }}
-            - name: SKAFKA_NAMESPACE
+            - name: KAAS_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
@@ -52,9 +52,9 @@ spec:
             # here — sprig's `default` treats 0 as empty, which would silently
             # rewrite runAsGroup=0 (Strimzi-modern primary-GID-0 convention)
             # back to 65532 and break the kubelet-fsGroup path.
-            - name: SKAFKA_BROKER_UID
+            - name: KAAS_BROKER_UID
               value: "{{ .Values.broker.podSecurityContext.runAsUser }}"
-            - name: SKAFKA_BROKER_GID
+            - name: KAAS_BROKER_GID
               value: "{{ .Values.broker.podSecurityContext.runAsGroup }}"
           volumeMounts:
             - name: data
@@ -80,14 +80,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: SKAFKA_NAMESPACE
+            - name: KAAS_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: SKAFKA_HEADLESS_SVC
+            - name: KAAS_HEADLESS_SVC
               value: {{ include "skafka.headlessName" . }}
             # gh #128: pod-name pattern for the StatefulSet's pods —
-            # used together with SKAFKA_HEADLESS_SVC to build the
+            # used together with KAAS_HEADLESS_SVC to build the
             # Strimzi-style headless per-pod DNS name (e.g.
             # `skafka-0.skafka.<ns>.svc.<domain>`) that the broker
             # advertises in MetadataResponse. Pre-gh #128 a per-broker
@@ -97,41 +97,41 @@ spec:
             # per-pod A record from the StatefulSet + headless Service
             # pair, so no extra Service object is needed for internal
             # traffic.
-            - name: SKAFKA_POD_NAME_PATTERN
+            - name: KAAS_POD_NAME_PATTERN
               value: "{{ include "skafka.fullname" . }}-%d"
-            - name: SKAFKA_CLUSTER_DOMAIN
+            - name: KAAS_CLUSTER_DOMAIN
               value: {{ .Values.clusterDomain | default "cluster.local" }}
-            - name: SKAFKA_DATA_DIR
+            - name: KAAS_DATA_DIR
               value: {{ .Values.storage.mountPath }}
-            - name: SKAFKA_CLUSTER_ID
+            - name: KAAS_CLUSTER_ID
               value: {{ .Values.broker.clusterID }}
-            - name: SKAFKA_CLUSTER_NAME
+            - name: KAAS_CLUSTER_NAME
               # Matches the KafkaCluster CR's metadata.name so the
               # KafkaClusterAssignments CR mirror writes back to the
               # right object (Phase 6).
               value: {{ include "skafka.fullname" . }}
-            - name: SKAFKA_PORT
+            - name: KAAS_PORT
               value: "{{ .Values.broker.ports.kafka }}"
-            - name: SKAFKA_HEALTH_ADDR
+            - name: KAAS_HEALTH_ADDR
               value: ":{{ .Values.broker.ports.health }}"
-            - name: SKAFKA_CONTROLLER_HEARTBEAT_ADDR
+            - name: KAAS_CONTROLLER_HEARTBEAT_ADDR
               value: "0.0.0.0:{{ .Values.broker.ports.heartbeat }}"
-            - name: SKAFKA_PEER_HEARTBEAT_PORT
+            - name: KAAS_PEER_HEARTBEAT_PORT
               value: "{{ .Values.broker.ports.heartbeat }}"
-            - name: SKAFKA_CONTROLLER_LEASE_DURATION_SECONDS
+            - name: KAAS_CONTROLLER_LEASE_DURATION_SECONDS
               value: "{{ .Values.broker.controllerLease.durationSeconds }}"
-            - name: SKAFKA_CONTROLLER_RENEW_DEADLINE_SECONDS
+            - name: KAAS_CONTROLLER_RENEW_DEADLINE_SECONDS
               value: "{{ .Values.broker.controllerLease.renewDeadlineSeconds }}"
-            - name: SKAFKA_CONTROLLER_RETRY_PERIOD_SECONDS
+            - name: KAAS_CONTROLLER_RETRY_PERIOD_SECONDS
               value: "{{ .Values.broker.controllerLease.retryPeriodSeconds }}"
-            - name: SKAFKA_FLUSH_INTERVAL_MESSAGES
+            - name: KAAS_FLUSH_INTERVAL_MESSAGES
               value: "{{ .Values.broker.flushIntervalMessages | default 1 }}"
             {{- if .Values.broker.pprof }}
             # gh #132: pprof on the health server's mux at /debug/pprof/.
             # Enables block + mutex profiling at full sample rate — only
             # flip this on for short-lived investigations; the runtime
             # overhead is observable.
-            - name: SKAFKA_PPROF
+            - name: KAAS_PPROF
               value: "true"
             {{- end }}
             # gh #108 (refactored v0.1.84): numSlots for the sharded
@@ -145,7 +145,7 @@ spec:
             # (idempotent, but lossy under heavy concurrent writes
             # during a rolling upgrade — drain transactional
             # producers first if changing).
-            - name: SKAFKA_TXN_NUM_SLOTS
+            - name: KAAS_TXN_NUM_SLOTS
               value: "{{ .Values.broker.txnState.numSlots }}"
             # gh #109: auto.create.topics.enable (default true, matches
             # Apache 3.7). When the broker receives MetadataRequest for
@@ -153,21 +153,21 @@ spec:
             # writes a KafkaTopic CR via TopicCRWriter and returns
             # LEADER_NOT_AVAILABLE so the client retries. Internal
             # topics (`__` prefix) are reserved.
-            - name: SKAFKA_AUTO_CREATE_TOPICS_ENABLE
+            - name: KAAS_AUTO_CREATE_TOPICS_ENABLE
               value: "{{ .Values.broker.autoCreateTopics.enabled }}"
-            - name: SKAFKA_NUM_PARTITIONS
+            - name: KAAS_NUM_PARTITIONS
               value: "{{ .Values.broker.autoCreateTopics.numPartitions }}"
             {{- if .Values.auth.requireSasl }}
-            - name: SKAFKA_REQUIRE_SASL
+            - name: KAAS_REQUIRE_SASL
               value: "true"
             {{- end }}
             {{- if not .Values.auth.enabled }}
-            - name: SKAFKA_AUTH_DISABLED
+            - name: KAAS_AUTH_DISABLED
               value: "true"
             {{- end }}
-            - name: SKAFKA_LOG_LEVEL
+            - name: KAAS_LOG_LEVEL
               value: {{ .Values.observability.logs.level | quote }}
-            - name: SKAFKA_LOG_FORMAT
+            - name: KAAS_LOG_FORMAT
               value: {{ .Values.observability.logs.format | quote }}
             {{- if .Values.observability.otlp.metrics.enabled }}
             - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
@@ -182,8 +182,8 @@ spec:
             # Skafka-specific env name (not OTEL_METRIC_EXPORT_INTERVAL):
             # the OTel spec value is bare-int milliseconds, and the SDK
             # logs an Atoi error on every boot when it sees a duration
-            # string. Using SKAFKA_* keeps that env out of the SDK's path.
-            - name: SKAFKA_METRIC_EXPORT_INTERVAL
+            # string. Using KAAS_* keeps that env out of the SDK's path.
+            - name: KAAS_METRIC_EXPORT_INTERVAL
               value: {{ .Values.observability.otlp.metrics.exportInterval | quote }}
             {{- end }}
             {{- if .Values.observability.otlp.traces.enabled }}
@@ -195,7 +195,7 @@ spec:
               value: "{{ .Values.observability.otlp.traces.samplerRatio }}"
             {{- end }}
             {{- if .Values.admin.argocd.enabled }}
-            - name: SKAFKA_ARGOCD_ENABLED
+            - name: KAAS_ARGOCD_ENABLED
               # Explicit enable flag — the broker checks this first
               # and ignores every other ArgoCD field when not "true".
               # Belt-and-braces with the chart-side gate above: if
@@ -203,42 +203,42 @@ spec:
               # going through the chart, this gate keeps the broker
               # honest.
               value: "true"
-            - name: SKAFKA_ARGOCD_APPLICATION_NAME
+            - name: KAAS_ARGOCD_APPLICATION_NAME
               # applicationName falls back to the Helm release name —
               # typical install just sets `admin.argocd.enabled: true`
               # and the broker infers everything else.
               value: {{ default .Release.Name .Values.admin.argocd.applicationName | quote }}
-            - name: SKAFKA_ARGOCD_COMPARE_OPTIONS
+            - name: KAAS_ARGOCD_COMPARE_OPTIONS
               # Empty string (operator wants tracking-id without
               # compare-options) is preserved by quoting; the broker
               # checks LookupEnv to distinguish "set to empty" from
               # "not set".
               value: {{ .Values.admin.argocd.compareOptions | quote }}
-            - name: SKAFKA_ARGOCD_SYNC_OPTIONS
+            - name: KAAS_ARGOCD_SYNC_OPTIONS
               # Chart default is "Delete=false" — runtime-created
               # topics survive parent Application delete. Set to ""
               # to skip the sync-options annotation entirely.
               value: {{ .Values.admin.argocd.syncOptions | quote }}
             {{- end }}
             {{- /*
-            gh #126: every listener flows through SKAFKA_LISTENERS
+            gh #126: every listener flows through KAAS_LISTENERS
             (JSON) — the broker reads that as the single source of
             truth and stops needing per-listener env vars for ports.
             The TLS cert / external-hostname env vars below still
             target the FIRST type=external listener entry (the
             multi-external follow-up will rewire these).
             */}}
-            - name: SKAFKA_LISTENERS
+            - name: KAAS_LISTENERS
               value: {{ include "skafka.listenersJSON" . | quote }}
             {{- /* gh #126: cluster-wide authorization opt-in. Omitted env = AllowAllAuthorizer. */}}
             {{- if .Values.authorization }}
             {{- with .Values.authorization.type }}
-            - name: SKAFKA_AUTHORIZATION_TYPE
+            - name: KAAS_AUTHORIZATION_TYPE
               value: {{ . | quote }}
             {{- end }}
             {{- $su := include "skafka.superUsersList" . }}
             {{- if $su }}
-            - name: SKAFKA_SUPER_USERS
+            - name: KAAS_SUPER_USERS
               value: {{ $su | quote }}
             {{- end }}
             {{- end }}
@@ -248,16 +248,16 @@ spec:
             # (internal or external). The broker reuses a single TLS config
             # for all of them (crates/sk-protocol/src/server.rs) —
             # per-listener cert files are a future extension.
-            - name: SKAFKA_TLS_CERT_FILE
+            - name: KAAS_TLS_CERT_FILE
               value: /tls/tls.crt
-            - name: SKAFKA_TLS_KEY_FILE
+            - name: KAAS_TLS_KEY_FILE
               value: /tls/tls.key
             {{- end }}
             {{- if $external }}
             # External-listener machinery (per-broker advertised host via
             # fmt-style hostname pattern + pod ordinal). Internal-only TLS
             # deploys never set these.
-            - name: SKAFKA_TLS_PORT
+            - name: KAAS_TLS_PORT
               value: "{{ $external.port }}"
             - name: POD_ORDINAL
               valueFrom:
@@ -268,7 +268,7 @@ spec:
             {{- if and $external.clientCA $external.clientCA.enabled $external.clientCA.existingSecret }}
             # Mutual TLS: require every TLS client to present a cert
             # signed by this CA bundle.
-            - name: SKAFKA_TLS_CLIENT_CA_FILE
+            - name: KAAS_TLS_CLIENT_CA_FILE
               value: /tls-client-ca/{{ $external.clientCA.key }}
             {{- end }}
             {{- end }}

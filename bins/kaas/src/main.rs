@@ -13,12 +13,12 @@
 //! decision tree.
 //!
 //! Storage selection:
-//! - `SKAFKA_DATA_DIR` set → `DiskStorageEngine` rooted there.
+//! - `KAAS_DATA_DIR` set → `DiskStorageEngine` rooted there.
 //! - unset → `MemoryStorage` (dev mode).
 //!
-//! Auth selection (per-listener via `SKAFKA_LISTENERS`, cluster-wide
-//! via `SKAFKA_AUTH_DISABLED` / `SKAFKA_AUTHORIZATION_TYPE` /
-//! `SKAFKA_SUPER_USERS` / `SKAFKA_SSL_PRINCIPAL_MAPPING_RULES`).
+//! Auth selection (per-listener via `KAAS_LISTENERS`, cluster-wide
+//! via `KAAS_AUTH_DISABLED` / `KAAS_AUTHORIZATION_TYPE` /
+//! `KAAS_SUPER_USERS` / `KAAS_SSL_PRINCIPAL_MAPPING_RULES`).
 //! `auth_disabled=true` forces `AllowAllAuthorizer` + `NoQuotaChecker`
 //! across the board.
 
@@ -68,12 +68,12 @@ const RELOAD_INTERVAL_SECS: u64 = 10;
 /// engine mkdirs lazily on Produce; the CR walk was an optimisation
 /// to have the dirs pre-warm, not a correctness requirement.
 fn run_init() -> Result<()> {
-    let data_dir = std::env::var("SKAFKA_DATA_DIR").context("init: SKAFKA_DATA_DIR not set")?;
-    let uid: u32 = std::env::var("SKAFKA_BROKER_UID")
+    let data_dir = std::env::var("KAAS_DATA_DIR").context("init: KAAS_DATA_DIR not set")?;
+    let uid: u32 = std::env::var("KAAS_BROKER_UID")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(65532);
-    let gid: u32 = std::env::var("SKAFKA_BROKER_GID")
+    let gid: u32 = std::env::var("KAAS_BROKER_GID")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(65532);
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
     // another crate.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cli = Cli::from_env().context("parsing SKAFKA_* env")?;
+    let cli = Cli::from_env().context("parsing KAAS_* env")?;
 
     // Bring up OTel BEFORE the first tracing event so the OTel layer
     // sees every subsequent span. Bootstrap installs the global
@@ -161,10 +161,10 @@ async fn main() -> Result<()> {
     // registry; install_tracing then routes tracing macros through
     // the freshly-built tracer.
     let obs_cancel = CancellationToken::new();
-    let providers = kaas_observability::bootstrap("skafka", obs_cancel.clone())
+    let providers = kaas_observability::bootstrap("kaas", obs_cancel.clone())
         .await
         .context("initialising observability")?;
-    let log_format = std::env::var("SKAFKA_LOG_FORMAT").unwrap_or_else(|_| "json".into());
+    let log_format = std::env::var("KAAS_LOG_FORMAT").unwrap_or_else(|_| "json".into());
     kaas_observability::install_tracing(&cli.log_level, &log_format, providers.tracer.clone());
 
     info!(
@@ -179,10 +179,10 @@ async fn main() -> Result<()> {
 
     let engine = build_engine(cli.data_dir.clone(), cli.flush_interval_messages)?;
     let topics =
-        Arc::new(TopicRegistry::from_env_json(&cli.topics_seed).context("parsing SKAFKA_TOPICS")?);
+        Arc::new(TopicRegistry::from_env_json(&cli.topics_seed).context("parsing KAAS_TOPICS")?);
     if topics.is_empty() {
         warn!(
-            "SKAFKA_TOPICS is empty — broker will serve metadata for zero topics. \
+            "KAAS_TOPICS is empty — broker will serve metadata for zero topics. \
              Set the env var to a JSON array, e.g. [{{\"name\":\"t1\",\"partitions\":1}}]"
         );
     }
@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
     // leaves cr_writer as None and those handlers return
     // CLUSTER_AUTHORIZATION_FAILED.
     if let Some(client) = kube_client.clone() {
-        let ns = std::env::var("SKAFKA_NAMESPACE").unwrap_or_else(|_| "default".into());
+        let ns = std::env::var("KAAS_NAMESPACE").unwrap_or_else(|_| "default".into());
         let writer = kaas_broker::topic_cr_writer::KubeTopicCRWriter::new(client.clone(), ns.clone());
         broker.install_cr_writer(Arc::new(writer));
         info!("installed KubeTopicCRWriter for admin handlers");
@@ -327,11 +327,11 @@ async fn main() -> Result<()> {
     let serve_cancel = cancel.clone();
     let serve = tokio::spawn(async move { server.serve(serve_cancel).await });
 
-    // Spawn the axum /healthz + /readyz server on SKAFKA_HEALTH_ADDR
+    // Spawn the axum /healthz + /readyz server on KAAS_HEALTH_ADDR
     // (chart default `:8080`). The chart's readinessProbe hits
     // http://<pod>:8080/readyz — without this, pods stay 0/1
     // Ready forever.
-    let health_addr = std::env::var("SKAFKA_HEALTH_ADDR").unwrap_or_else(|_| ":8080".into());
+    let health_addr = std::env::var("KAAS_HEALTH_ADDR").unwrap_or_else(|_| ":8080".into());
     let health_addr = if let Some(stripped) = health_addr.strip_prefix(':') {
         format!("0.0.0.0:{stripped}")
     } else {
@@ -409,7 +409,7 @@ struct AuthSetup {
 fn build_auth(cli: &Cli) -> Result<AuthSetup> {
     let mapper = Arc::new(
         PrincipalMapper::parse(&cli.ssl_principal_mapping_rules)
-            .context("parsing SKAFKA_SSL_PRINCIPAL_MAPPING_RULES")?,
+            .context("parsing KAAS_SSL_PRINCIPAL_MAPPING_RULES")?,
     );
 
     if cli.auth_disabled {
@@ -476,7 +476,7 @@ fn build_auth(cli: &Cli) -> Result<AuthSetup> {
         other => {
             warn!(
                 authorization_type = other,
-                "unknown SKAFKA_AUTHORIZATION_TYPE — falling back to AllowAll"
+                "unknown KAAS_AUTHORIZATION_TYPE — falling back to AllowAll"
             );
             Arc::new(AllowAllAuthorizer)
         }
@@ -533,8 +533,8 @@ fn build_engine(
 ) -> Result<Arc<dyn StorageEngine>> {
     match data_dir {
         Some(dir) => {
-            std::fs::create_dir_all(&dir).context("creating SKAFKA_DATA_DIR")?;
-            // SKAFKA_FLUSH_INTERVAL_MESSAGES is THE durability vs
+            std::fs::create_dir_all(&dir).context("creating KAAS_DATA_DIR")?;
+            // KAAS_FLUSH_INTERVAL_MESSAGES is THE durability vs
             // throughput dial (mirrors Apache's
             // log.flush.interval.messages; default 1 = honest
             // acks=all). It was parsed by the CLI but dropped on the
