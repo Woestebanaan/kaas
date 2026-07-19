@@ -50,7 +50,7 @@ phase 3 prose sweep). One known instance already found — see task 6 below.
      CompleteCommit/CompleteAbort, including the timeout-reaper edge
      (Ongoing → CompleteAbort after `transactionTimeoutMs`, epoch bump).
    - `sequenceDiagram`: SCRAM pre-auth gate on an authed listener
-     (`crates/sk-protocol/src/dispatch.rs` — non-handshake APIs blocked until SASL completes).
+     (`crates/kaas-protocol/src/dispatch.rs` — non-handshake APIs blocked until SASL completes).
    - `flowchart`: operator reconcile loops (per-CRD; reconcile-time cleanup, no finalizers).
    - `flowchart`: topic-delete handle-close path (`deletionTimestamp` → topic-watcher event →
      leader closes FDs → operator unlink; the NFS silly-rename story, gh #76).
@@ -59,8 +59,8 @@ phase 3 prose sweep). One known instance already found — see task 6 below.
 6. **Fix the stale EndTxn diagram while converting** (block 8): the ASCII says
    "WriteTxnMarkers RPC to peer brokers (gh #114)", but since gh #175 cross-broker marker
    dispatch goes through the shared-PVC marker queue
-   (`crates/sk-coordinator/src/marker_queue.rs` → per-broker `to-<target>/` polling in
-   `crates/sk-broker/src/marker_watcher.rs`), and `EndTxn` returns as soon as the queue entry
+   (`crates/kaas-coordinator/src/marker_queue.rs` → per-broker `to-<target>/` polling in
+   `crates/kaas-broker/src/marker_watcher.rs`), and `EndTxn` returns as soon as the queue entry
    is written. Draw the current mechanism.
 
 ## Out of scope

@@ -23,13 +23,13 @@ same fix).
 | System overview | "At a glance" + "Process topology" |
 | Broker/operator runtime independence | "Process topology" (broker/operator/PVC subsections) + CLAUDE.md's "runtime-independent" section (the strongest statement of the invariant — the book becomes its canonical home) |
 | Controller, leases & assignment.json | "Control plane" section |
-| Storage engine hot path | "Data plane: Produce" + "Storage architecture" (group commit, segments, manifest lag semantics, `SKAFKA_FLUSH_INTERVAL_MESSAGES`) |
+| Storage engine hot path | "Data plane: Produce" + "Storage architecture" (group commit, segments, manifest lag semantics, `KAAS_FLUSH_INTERVAL_MESSAGES`) |
 | File-handle ownership & takeover | "Single-FD ownership (gh #76)" + "Manifest + producer snapshot" + SIGTERM drain (gh #61/#139) |
 | Consumer-group coordination | gh #92 hash routing, two-tier ownership, `GroupTakeoverDriver` orphan sweep |
 | Transactions & idempotence | "Idempotent producer + transactions" + the txn state store / marker queue / fence log triad |
 | Listeners, authentication, authorization | gh #124/#125/#126 material (per-listener auth vs cluster-wide authz, Metadata port advertisement, quota debt-carry) |
 | Kubernetes integration | CRDs (4 types incl. the Strimzi-divergent quota field naming), reconcile-time cleanup (no finalizers — the ArgoCD deadlock story), broker RBAC (`update,patch` on kafkatopics), readiness gate |
-| Observability | `sk-observability`: OTLP push, `/healthz` runtime state, byte-opacity tripwires |
+| Observability | `kaas-observability`: OTLP push, `/healthz` runtime state, byte-opacity tripwires |
 
 ## Tasks
 

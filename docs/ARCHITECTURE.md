@@ -1,4 +1,4 @@
-# skafka — Architecture
+# kaas — Architecture
 
 Narrative + diagrams. For per-feature reference detail, see
 [`CLAUDE.md`](../CLAUDE.md).
@@ -7,7 +7,7 @@ Narrative + diagrams. For per-feature reference detail, see
 
 ## At a glance
 
-skafka is a from-scratch Apache Kafka 3.7 wire-compatible broker that
+kaas is a from-scratch Apache Kafka 3.7 wire-compatible broker that
 runs on Kubernetes. Three deliberate divergences from Apache:
 
 - **No KRaft.** Cluster-wide controller election uses a Kubernetes
@@ -18,7 +18,7 @@ runs on Kubernetes. Three deliberate divergences from Apache:
 - **No `__transaction_state` internal topic.** Transaction-coordinator
   state lives in slot-sharded JSON files on the same shared volume.
 
-Apache-Kafka clients (Java, librdkafka, franz-go) talk to skafka
+Apache-Kafka clients (Java, librdkafka, franz-go) talk to kaas
 unchanged. Kubernetes is the only "control plane" — there is no peer
 gossip protocol, no replicated state machine.
 
@@ -36,7 +36,7 @@ gossip protocol, no replicated state machine.
                        │                            │                            │
                        ▼                            ▼                            │
               ┌────────────────┐         ┌────────────────┐                      │
-              │ skafka         │         │ skafka brokers │                      │
+              │ kaas         │         │ kaas brokers │                      │
               │ operator       │         │ (StatefulSet,  │                      │
               │ (Deployment)   │         │  N replicas)   │                      │
               └────────┬───────┘         └───┬─────────┬──┘                      │
@@ -53,7 +53,7 @@ gossip protocol, no replicated state machine.
                   │   credentials.json              │  │                         │
                   │   acls.json                     │  │                         │
                   │   txn_state/slot-*.json         │  │                         │
-                  │   fence_log/from-skafka-*.json  │  │                         │
+                  │   fence_log/from-kaas-*.json  │  │                         │
                   │   __consumer_offsets/<g>.json   │  │                         │
                   │ /data/<topic>/<partition>/      │  │                         │
                   │   {epoch:08x}-{base:020d}.log   │  │                         │
@@ -67,20 +67,20 @@ gossip protocol, no replicated state machine.
    (Java, librdkafka, franz-go)                                                 │
        Produce / Fetch / Metadata / SASL / etc.                                 │
                                                                                 │
-   Strimzi / Apache Kafka 3.7 ←─── parity matrix in skafka-migration-parity ────┘
+   Strimzi / Apache Kafka 3.7 ←─── parity matrix in kaas-migration-parity ────┘
 ```
 
 ---
 
 ## Process topology
 
-### Broker — `bins/skafka`
+### Broker — `bins/kaas`
 
-`StatefulSet` with stable pod ordinals (`skafka-0`, `skafka-1`, …). Each
+`StatefulSet` with stable pod ordinals (`kaas-0`, `kaas-1`, …). Each
 pod is a single broker process that:
 
 - Listens for client traffic on the listeners declared via the
-  `SKAFKA_LISTENERS` JSON env. The Helm chart synthesises one entry per
+  `KAAS_LISTENERS` JSON env. The Helm chart synthesises one entry per
   `.Values.listeners[]` item.
 - Listens for peer heartbeats on `:9094` (gRPC, controller-bound).
 - Exposes `/healthz` on `:8080` (HTTP, kubelet probes + diagnostics).
@@ -91,7 +91,7 @@ Brokers are **runtime-independent of the operator**: once the broker
 process is up, K8s API outages don't block the Produce/Fetch hot path.
 The hot path makes zero K8s API calls.
 
-### Operator — `bins/skafka-operator`
+### Operator — `bins/kaas-operator`
 
 `Deployment`, single replica. Reconciles four CRDs into on-disk config
 files (auth + topics) and Kubernetes plumbing (TLS Certs + Routes):
@@ -126,13 +126,13 @@ epoch-prefix swap, and the txn-state slot file close-to-open consistency.
 Client ──[Produce v9]──> Broker A's listener socket
                                 │
                                 ▼
-                        sk-codec::frame::read_frame      ─── length-prefix
+                        kaas-codec::frame::read_frame      ─── length-prefix
                                 │                            framing
                                 ▼
-                        sk-codec::headers::decode         ─── api_key=0,
+                        kaas-codec::headers::decode         ─── api_key=0,
                                 │                            api_version=9
                                 ▼
-                        sk-protocol::dispatch::dispatch   ─── route by
+                        kaas-protocol::dispatch::dispatch   ─── route by
                                 │                            (api_key, listener)
                                 ▼
                         produce_handler                   ─── auth + quota
@@ -192,19 +192,19 @@ Client ──[Produce v9]──> Broker A's listener socket
                   Encode ProduceResponse(base_offset, error_code=0)
                                   │
                                   ▼
-                  sk-codec::frame::write_frame ──> client
+                  kaas-codec::frame::write_frame ──> client
 ```
 
 **Byte-opacity callouts.** Three places this path touches the
 RecordBatch bytes:
 
-1. `sk-codec` produces `records: Option<bytes::Bytes>` in the decoded
+1. `kaas-codec` produces `records: Option<bytes::Bytes>` in the decoded
    request — zero-copy slice into the frame buffer. **Records bytes are
    never parsed.**
-2. `sk-storage::idempotence::parse_batch_producer_info` reads the
+2. `kaas-storage::idempotence::parse_batch_producer_info` reads the
    57-byte batch header for PID / epoch / sequence — header only, no
    records.
-3. `sk-storage::segment::parse_batch_offsets` reads the 43-byte head
+3. `kaas-storage::segment::parse_batch_offsets` reads the 43-byte head
    for `(base_offset, last_offset_delta, max_timestamp)` — header only.
 
 After step 3, `active.append_batch` calls `Fs::write_at(raw, log_size)`
@@ -251,7 +251,7 @@ Two response-shape facts:
 - **Stateless fetch sessions** (gh #4). The broker returns `SessionID=0`
   on every Fetch response. Apache's documented contract for "broker
   doesn't support sessions" — clients fall back to full Fetch data per
-  request. CPU cost is fine at skafka's scale; KIP-227 caching is a
+  request. CPU cost is fine at kaas's scale; KIP-227 caching is a
   future optimisation, not a correctness gap.
 - **Read-committed isolation** (gh #31). For transactional reads, the
   handler clamps `max_offset` to the partition's last stable offset
@@ -266,19 +266,19 @@ a record.
 
 ## Control plane: controller election + `assignment.json`
 
-skafka has no peer gossip protocol. The cluster's state machine is:
+kaas has no peer gossip protocol. The cluster's state machine is:
 
 ```
                      ┌──────────────────────────────┐
                      │ Kubernetes Lease             │
-                     │   name: skafka-controller    │
-                     │   spec.holderIdentity: "skafka-0"
+                     │   name: kaas-controller    │
+                     │   spec.holderIdentity: "kaas-0"
                      │   spec.leaseTransitions: N    │  ◄── epoch source
                      └────────────┬─────────────────┘
                                   │
                   ┌───────────────┼────────────────┐
                   │               │                │
-              skafka-0        skafka-1         skafka-2
+              kaas-0        kaas-1         kaas-2
               (controller)    (peer)           (peer)
                   │               │                │
                   │ writes        │ reads          │ reads
@@ -288,19 +288,19 @@ skafka has no peer gossip protocol. The cluster's state machine is:
 
             { "epoch": N,         ◄── matches Lease.spec.leaseTransitions
               "partitions": [
-                { "topic": "T", "partition": 0, "leader": "skafka-0", ... },
+                { "topic": "T", "partition": 0, "leader": "kaas-0", ... },
                 ...
               ],
               "consumerGroups": [ ... ]
             }
 ```
 
-The **controller is just a broker with the `skafka-controller` Lease**.
+The **controller is just a broker with the `kaas-controller` Lease**.
 Its extra responsibilities:
 
 - Observes peer brokers via heartbeat gRPC (`proto/heartbeat.proto`).
 - Computes partition + consumer-group assignments
-  (`crates/sk-controller/src/balancer.rs`).
+  (`crates/kaas-controller/src/balancer.rs`).
 - Writes `assignment.json` epoch-prefixed (tmp + atomic rename). Stale
   epochs are rejected by `Coordinator::set_assignment`.
 - Mirrors the assignment into a `KafkaClusterAssignments` CR for
@@ -311,14 +311,14 @@ When does it recompute?
 | Trigger                          | Wired via                                          |
 |----------------------------------|----------------------------------------------------|
 | First win of controller Lease    | initial recompute                                  |
-| `KafkaTopic` CR add/modify/delete| `TopicWatcher` → topic-change notify (`bins/skafka/src/cluster.rs`) |
-| Broker joins/leaves alive set    | broker-set watcher polls the alive set (`bins/skafka/src/cluster.rs`) |
+| `KafkaTopic` CR add/modify/delete| `TopicWatcher` → topic-change notify (`bins/kaas/src/cluster.rs`) |
+| Broker joins/leaves alive set    | broker-set watcher polls the alive set (`bins/kaas/src/cluster.rs`) |
 
 Non-controller brokers watch `assignment.json` via fsnotify + 1 s poll
-(`crates/sk-broker/src/coordinator.rs`). The `TakeoverDriver` /
+(`crates/kaas-broker/src/coordinator.rs`). The `TakeoverDriver` /
 `GroupTakeoverDriver` opens or relinquishes partitions in the storage
 engine when ownership changes. There is no per-partition Lease — the
-singleton `skafka-controller` Lease is the only K8s coordination
+singleton `kaas-controller` Lease is the only K8s coordination
 primitive on the hot path.
 
 ---
@@ -335,8 +335,8 @@ primitive on the hot path.
         slot-01.json
         ...
     fence_log/
-        from-skafka-0.json        ── one per broker; cross-broker producer
-        from-skafka-1.json           epoch fence broadcast (gh #108 phase 2)
+        from-kaas-0.json        ── one per broker; cross-broker producer
+        from-kaas-1.json           epoch fence broadcast (gh #108 phase 2)
         ...
     __consumer_offsets/
         <group_id>.json           ── per-group offset file
@@ -476,7 +476,7 @@ Three properties that make this work:
    `LogStartOffset()` callbacks never block on the partition mutex.
    Before the `ArcSwap` mirror, a stuck NAS fsync held the mutex for
    the watchdog deadline, the OTel gauge callback stalled, and all
-   skafka metrics vanished from Prometheus until the stall cleared.
+   kaas metrics vanished from Prometheus until the stall cleared.
 3. **Fsync watchdog (gh #95).** `tokio::time::timeout` around
    `spawn_blocking(|| sync_all)` so a hung NFS server doesn't pin the
    committer indefinitely. On timeout, `flush_err` is set sticky and
@@ -542,12 +542,12 @@ state machine" section.
 
 ```
                 ┌──────────────────┐
-                │   sk-codec       │   wire frames, primitives, CRC32C,
+                │   kaas-codec       │   wire frames, primitives, CRC32C,
                 │                  │   tagged fields, per-API codecs
                 └────────┬─────────┘
                          │
                 ┌────────▼─────────┐         ┌──────────────────┐
-                │   sk-protocol    │ ◄──────  │   sk-auth        │
+                │   kaas-protocol    │ ◄──────  │   kaas-auth        │
                 │                  │          │                  │
                 │ dispatch, server │          │ SCRAM, mTLS,     │
                 │ bring-up,        │          │ ACLs, quotas     │
@@ -555,7 +555,7 @@ state machine" section.
                 └────────┬─────────┘          └──────────────────┘
                          │
                 ┌────────▼─────────┐
-                │   sk-broker      │ ◄──┐
+                │   kaas-broker      │ ◄──┐
                 │                  │    │
                 │ Broker glue,     │    │
                 │ Coordinator,     │    │
@@ -566,7 +566,7 @@ state machine" section.
        │                     │  │       │
        ▼                     ▼  ▼       │
 ┌──────────────┐    ┌──────────────┐   │
-│  sk-storage  │    │ sk-coordinator│  │
+│  kaas-storage  │    │ kaas-coordinator│  │
 │              │    │              │   │
 │ Engine,      │    │ consumer-grp │   │
 │ partitions,  │    │ + txn        │   │
@@ -575,7 +575,7 @@ state machine" section.
 └──────────────┘                       │
                                        │
                 ┌──────────────────┐   │
-                │   sk-controller  │ ──┤
+                │   kaas-controller  │ ──┤
                 │                  │   │
                 │ Election,        │   │
                 │ balancer,        │   │
@@ -584,7 +584,7 @@ state machine" section.
                 └──────────────────┘   │
                                        │
                 ┌──────────────────┐   │
-                │   sk-k8s         │ ──┤
+                │   kaas-k8s         │ ──┤
                 │                  │   │
                 │ BrokerRegistry,  │   │
                 │ TopicWatcher,    │   │
@@ -593,7 +593,7 @@ state machine" section.
                          │             │
                          ▼             │
               ┌──────────────────┐    │
-              │ sk-operator-api  │ ───┘
+              │ kaas-operator-api  │ ───┘
               │                  │
               │ CRD types        │
               │ (kube-derive)    │
@@ -601,18 +601,18 @@ state machine" section.
                        │
                        ▼
             ┌──────────────────────────┐
-            │ sk-operator-controllers  │
+            │ kaas-operator-controllers  │
             │                          │
             │ reconcilers              │
             └──────────────────────────┘
 
-           bins/skafka          bins/skafka-operator
+           bins/kaas          bins/kaas-operator
            (broker entrypoint)  (operator entrypoint)
 ```
 
-`sk-observability` is depended on by everything that emits metrics,
+`kaas-observability` is depended on by everything that emits metrics,
 traces, or `/healthz`; it isn't on the diagram to keep the layout
-readable. `sk-test-harness` carries the byte-opacity test fixtures and
+readable. `kaas-test-harness` carries the byte-opacity test fixtures and
 the `recordbatch` helper — the **only** place in the workspace where a
 decoded-record representation is allowed to live.
 
@@ -623,7 +623,7 @@ decoded-record representation is allowed to live.
 Each of these is a deliberate choice with a real cost to flipping:
 
 - **KRaft / metadata quorum.** Apache replaced ZooKeeper with a Raft-
-  based controller quorum. skafka leans on Kubernetes Leases instead.
+  based controller quorum. kaas leans on Kubernetes Leases instead.
   Reasons: (a) the K8s API server IS our metadata store; reinventing it
   in-process duplicates that role for no operational benefit. (b)
   brokers come and go via StatefulSet scaling, and Lease holderIdentity
@@ -632,7 +632,7 @@ Each of these is a deliberate choice with a real cost to flipping:
   a peer gossip protocol that the rest of the broker has no use for.
 
 - **Replication / ISR.** Apache replicates each partition across N
-  brokers. skafka writes a single copy to shared RWX storage and lets
+  brokers. kaas writes a single copy to shared RWX storage and lets
   the substrate handle durability. Reasons: (a) ISR replication is
   what makes a multi-broker Kafka cluster operationally complex —
   preferred leader election, under-replicated alerts, controlled
@@ -644,7 +644,7 @@ Each of these is a deliberate choice with a real cost to flipping:
   fencing.
 
 - **`__transaction_state` internal topic.** Apache persists txn-
-  coordinator state as records in a special internal topic. skafka
+  coordinator state as records in a special internal topic. kaas
   uses slot-sharded JSON files on the shared PVC. Reasons: (a) we don't
   have replication, so the internal-topic-as-state approach buys
   nothing. (b) close-to-open consistency on NFS means the slot file IS
@@ -652,7 +652,7 @@ Each of these is a deliberate choice with a real cost to flipping:
   (c) JSON is debuggable: a stuck transaction is `cat slot-N.json`.
 
 - **Tiered storage / S3 backend.** Apache 3.6+ ships KIP-405 tiered
-  storage. skafka has no remote tier today. Reasons: (a) the NFS
+  storage. kaas has no remote tier today. Reasons: (a) the NFS
   substrate is itself a "near-tier" with cheap-ish bulk storage. (b)
   KIP-405 doubles the cleanup state machine; deferring keeps the
   storage engine small. The API surfaces (`EARLIEST_LOCAL_TIMESTAMP`,
@@ -667,6 +667,6 @@ flag it rather than adding the underlying machinery.
 ## Where to go next
 
 - Per-feature reference: [`CLAUDE.md`](../CLAUDE.md).
-- Helm chart docs: [`deploy/helm/skafka/README.md`](../deploy/helm/skafka/README.md).
+- Helm chart docs: [`deploy/helm/kaas/README.md`](../deploy/helm/kaas/README.md).
 - Release procedure: [`RELEASING.md`](./RELEASING.md).
 - Documentation book plan: [`book-plan.md`](./book-plan.md).

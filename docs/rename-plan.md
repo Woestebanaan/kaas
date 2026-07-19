@@ -1,6 +1,6 @@
 # Rename Plan — skafka → kaas
 
-Status: **proposed**. Executes **before** [book phase 1](./book-phase-1-scaffolding.md) — the
+Status: **executed** (R1 swept 2026-07-19; this doc keeps the old name as a record and is grep-gate allowlisted). Executes **before** [book phase 1](./book-phase-1-scaffolding.md) — the
 book must be born under the final name (published Pages URL, README, every chapter title).
 
 Baseline (grep-verified 2026-07-18): the name appears in **1,143 places across 173 files**.

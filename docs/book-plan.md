@@ -4,13 +4,13 @@ Status: **proposed** (not started). Fact-checked against the tree on 2026-07-18
 (`main`, post-`v0.2.3-preview`); per-phase execution breakdowns live in
 `docs/book-phase-{1..6}-*.md`.
 
-> **Blocked on the [skafka → kaas rename](./rename-plan.md)**: the project renames before
+> **Rename executed** (see [rename plan](./rename-plan.md)): the project renamed before
 > phase 1 so the book (published URL, README, every chapter) is born under the final name.
 > Name references throughout this plan and the phase files are swept in rename step R1.7.
 
 ## Context
 
-skafka needs documentation that *proves* Kafka API compatibility and reliability — for users
+kaas needs documentation that *proves* Kafka API compatibility and reliability — for users
 evaluating it against Apache Kafka / Strimzi, and for future maintainers. Today the repo has:
 
 - `docs/ARCHITECTURE.md` (672 lines, 9 fenced ASCII blocks — 7 are diagrams worth converting
@@ -24,15 +24,15 @@ per implemented KIP, plus an honest list of deliberate non-goals.
 
 ### Inventory the book must cover (as of `v0.2.3-preview`)
 
-- **36 Kafka API keys** registered by the broker (`bins/skafka/src/main.rs` dispatch;
-  `crates/sk-codec/src/api/registry.rs` ApiSpec table, with a test asserting
+- **36 Kafka API keys** registered by the broker (`bins/kaas/src/main.rs` dispatch;
+  `crates/kaas-codec/src/api/registry.rs` ApiSpec table, with a test asserting
   `ALL.len() == 36`). Known gaps vs the Apache 3.7 admin surface, each an open follow-up:
   key 23 (OffsetForLeaderEpoch — storage-side lookup also stubbed, see KIP-101 in §4),
   33 (legacy AlterConfigs — superseded by key 44 but still served by Apache 3.7),
   50/51 (Describe/AlterUserScramCredentials), 60 (DescribeCluster).
 - **29 distinct KIPs** referenced across the codebase: 16 implemented, 5 partial,
   8 deliberately not (see §4 below for the source-verified split).
-- 12 crates + 2 bins (~54k LoC of Rust incl. tests — only `sk-test-harness` is still a stub).
+- 12 crates + 2 bins (~54k LoC of Rust incl. tests — only `kaas-test-harness` is still a stub).
 - 41 `scripts/kafka-*.sh` integration scripts (parity baseline recorded in
   `scripts/.parity-baseline.txt`: 21 PASS / 20 SKIP / 0 FAIL on `v0.2.0-preview`).
 
@@ -57,7 +57,7 @@ per implemented KIP, plus an honest list of deliberate non-goals.
 ## 2. Book structure (`docs/src/SUMMARY.md`)
 
 ```text
-Introduction (what skafka is, Kafka 3.7 parity target, design pillars)
+Introduction (what kaas is, Kafka 3.7 parity target, design pillars)
 Getting Started (Helm deploy, local dev mode)
 
 Part I — Architecture              ← port of ARCHITECTURE.md, ASCII → mermaid
@@ -79,7 +79,7 @@ Part II — Kafka Compatibility      ← the "prove it" section
     fixed template per anchor:
       versions · semantics · deviations from Apache · source paths · test coverage
   KIP index: matrix of all 29 KIPs (implemented / partial / deliberate non-goal)
-  Per-KIP pages (16 implemented + 5 partial): what the KIP does, how skafka
+  Per-KIP pages (16 implemented + 5 partial): what the KIP does, how kaas
     implements it, source refs, how it's verified — partial pages carry an
     explicit "what's missing" section
   Explicit non-goals with rationale (see §4)
@@ -108,7 +108,7 @@ Part IV — Operations
 
 ## 3. Auto-generated API matrix (the honesty lever)
 
-`crates/sk-codec/src/api/registry.rs` already carries the `ApiSpec` table (36 keys, with a
+`crates/kaas-codec/src/api/registry.rs` already carries the `ApiSpec` table (36 keys, with a
 test asserting the count). Add:
 
 - `cargo xtask gen-api-matrix` — dumps that table into `docs/src/compat/api-matrix.md`
@@ -137,9 +137,9 @@ this plan listed all five as implemented, corrected against source 2026-07-18):
 
 | KIP | Landed | Missing |
 |---|---|---|
-| 101 (leader-epoch truncation) | segment filenames carry the leader epoch | leader-epoch cache + lookup — `DiskStorageEngine::offset_for_leader_epoch` returns the `(-1,-1)` sentinel (`crates/sk-storage/src/disk.rs`); wire key 23 unregistered |
+| 101 (leader-epoch truncation) | segment filenames carry the leader epoch | leader-epoch cache + lookup — `DiskStorageEngine::offset_for_leader_epoch` returns the `(-1,-1)` sentinel (`crates/kaas-storage/src/disk.rs`); wire key 23 unregistered |
 | 219 (throttle ordering) | `throttle_time_ms` computed (quota debt-carry) and returned in responses | broker never mutes the channel after responding — throttle enforcement relies on client cooperation |
-| 345 (static membership) | `group.instance.id` plumbed through join/sync; static members survive the rebalance-eviction sweep (`crates/sk-coordinator/src/group.rs`) | `FENCED_INSTANCE_ID` fencing of duplicate static members |
+| 345 (static membership) | `group.instance.id` plumbed through join/sync; static members survive the rebalance-eviction sweep (`crates/kaas-coordinator/src/group.rs`) | `FENCED_INSTANCE_ID` fencing of duplicate static members |
 | 394 (MEMBER_ID_REQUIRED) | error code defined | the v4+ two-step handshake — `join()` still takes the legacy assign-inline path (explicit follow-up comment in `group.rs`) |
 | 554 (SCRAM admin API) | operator-side rotation path (gh #104: KafkaUser pre-derived credential passthrough to `credentials.json`) | wire keys 50/51 entirely — no codec modules, no dispatch |
 
@@ -149,12 +149,12 @@ Deliberately not implemented (each gets a rationale entry, not silence):
 metrics), **848** / **1071** (next-gen rebalance — post-3.7), **932** (share groups — 4.0+),
 plus the architectural non-goals: KRaft, replication/ISR, literal `__transaction_state` topic.
 
-Per-KIP page template: *what the KIP changes in Apache Kafka* → *how skafka implements it*
+Per-KIP page template: *what the KIP changes in Apache Kafka* → *how kaas implements it*
 (source paths) → *how it's verified* (unit/integration test, `scripts/kafka-*.sh`
 scenario, parity-board entry).
 
 Per-API anchor template: purpose · supported versions · request/response handling ·
-skafka-specific semantics & deviations from Apache 3.7 · source paths · test coverage.
+kaas-specific semantics & deviations from Apache 3.7 · source paths · test coverage.
 
 **Note**: 36 individual API pages plus 21 KIP pages would be ~57 files of repetitive content
 (~2.9k lines at 50 lines each). Favor grouped-by-domain pages with anchors over

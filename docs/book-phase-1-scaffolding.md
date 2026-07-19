@@ -24,7 +24,7 @@ decisions left.
 | `xtask/src/main.rs` | Two new match arms: `docs` → `mdbook build docs`; `docs --serve` → `mdbook serve docs`. Update the usage string (`try: gen-proto \| gen-crds \| ...`) |
 | `.gitignore` | Add `docs/book/` (build output) |
 | `.github/workflows/ci.yml` | New `docs` job (see below) |
-| `README.md` (repo root) | Minimal stub: what skafka is, parity target, link to the book + `docs/ARCHITECTURE.md`, quickstart pointer to the Helm chart. Currently **no root README exists** — evaluators land on a bare file listing |
+| `README.md` (repo root) | Minimal stub: what kaas is, parity target, link to the book + `docs/ARCHITECTURE.md`, quickstart pointer to the Helm chart. Currently **no root README exists** — evaluators land on a bare file listing |
 
 ## Tasks
 

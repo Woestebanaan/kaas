@@ -19,9 +19,9 @@ Finish Parts III and IV, then turn on publishing.
   dependency graph embedded.
 - **One chapter per crate + bin (14)**, seeded from the existing `//!` crate-level doc
   comments — port the prose, then *add what rustdoc can't say*: why the crate boundary is
-  where it is, which invariants callers must hold (e.g. `sk-storage`'s "read the hot-path
-  section first" warning, `sk-coordinator`'s assignment-source indirection).
-- `sk-test-harness` gets an honest three-line chapter: still a stub, populated as integration
+  where it is, which invariants callers must hold (e.g. `kaas-storage`'s "read the hot-path
+  section first" warning, `kaas-coordinator`'s assignment-source indirection).
+- `kaas-test-harness` gets an honest three-line chapter: still a stub, populated as integration
   tests need it.
 - Keep chapters short; deep architecture stays in Part I with cross-links rather than being
   repeated per-crate.
@@ -30,8 +30,8 @@ Finish Parts III and IV, then turn on publishing.
 
 | Chapter | Content / sources |
 |---|---|
-| Helm chart & listener configuration | `deploy/helm/skafka/`: the Strimzi-shape `listeners[]` array (gh #126), per-listener auth axes, `authorization.{type,superUsers}`, CRD-upgrade caveat from the chart README, the legacy single-listener KafkaCluster synthesis note |
-| Storage substrate requirements | RWO/local-path single-broker vs RWX multi-broker; the NFSv4 semantics contract (same-dir rename atomicity, fsync durability, close-to-open consistency); provider matrix from NOTES.txt; `SKAFKA_FLUSH_INTERVAL_MESSAGES` durability dial |
+| Helm chart & listener configuration | `deploy/helm/kaas/`: the Strimzi-shape `listeners[]` array (gh #126), per-listener auth axes, `authorization.{type,superUsers}`, CRD-upgrade caveat from the chart README, the legacy single-listener KafkaCluster synthesis note |
+| Storage substrate requirements | RWO/local-path single-broker vs RWX multi-broker; the NFSv4 semantics contract (same-dir rename atomicity, fsync durability, close-to-open consistency); provider matrix from NOTES.txt; `KAAS_FLUSH_INTERVAL_MESSAGES` durability dial |
 | Releasing | Port or link `docs/RELEASING.md` (tag-driven, patch-bump-never-recut); decide during the phase whether RELEASING.md becomes a stub like ARCHITECTURE.md or stays canonical with the book linking out — either is fine, don't duplicate |
 | Performance vs Strimzi | Summarize `docs/perf-results/`: current standing (~75% of Strimzi single-consumer throughput; producer p50 gap is architectural — group-commit fsync vs page-cache ack), bench methodology (multi-run, outlier exclusion), and the known dead-ends so they aren't re-litigated |
 

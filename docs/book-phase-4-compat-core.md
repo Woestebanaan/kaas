@@ -20,16 +20,16 @@ matrix honest forever.
 ### 1. `cargo xtask gen-api-matrix`
 
 New xtask match arm (same pattern as `gen-crds`). Dumps
-`crates/sk-codec/src/api/registry.rs::ALL` (36 entries, count-asserted by the existing unit
+`crates/kaas-codec/src/api/registry.rs::ALL` (36 entries, count-asserted by the existing unit
 test) into `docs/src/compat/api-matrix.md`:
 
 - Columns: key · name · supported version range · flexible-from · KIP cross-refs · status.
 - **Gap rows included**: keys 23, 33, 50/51, 60 (present in Apache 3.7's admin surface, not
-  served by skafka — each an open follow-up), plus a link to the non-goals page for the
+  served by kaas — each an open follow-up), plus a link to the non-goals page for the
   deliberately-absent surfaces (KRaft/replication inter-broker keys, delegation tokens,
   tiered-storage-only fields).
-- Implementation choice: either have the xtask *run* a small generator binary in `sk-codec`
-  (`cargo run -p sk-codec --bin gen-api-matrix`-style, or a `#[test]`-adjacent example), or
+- Implementation choice: either have the xtask *run* a small generator binary in `kaas-codec`
+  (`cargo run -p kaas-codec --bin gen-api-matrix`-style, or a `#[test]`-adjacent example), or
   parse via a tiny `include!`-based helper — pick whatever keeps the ApiSpec table the single
   source of truth. Do **not** hand-maintain the table in markdown.
 
@@ -48,7 +48,7 @@ The source-verified split (fact-checked 2026-07-18 — see plan §4 for the tabl
 
 - **16 implemented**: 482, 516, 107, 195, 339, 546, 290, 800, 13, 371, 58, 354, 32, 98, 360, 447.
 - **5 partial** (each with a "what's missing" cell): 101 (leader-epoch cache/lookup stubbed —
-  `(-1,-1)` sentinel in `sk-storage/src/disk.rs`), 219 (throttle_time advertised, channel
+  `(-1,-1)` sentinel in `kaas-storage/src/disk.rs`), 219 (throttle_time advertised, channel
   never muted), 345 (static members survive eviction; no `FENCED_INSTANCE_ID`), 394 (error
   code only; legacy assign-inline join path), 554 (operator rotation path only; keys 50/51
   unserved).
@@ -62,7 +62,7 @@ Index rows link to the per-KIP pages (phase 5) — stub anchors until then.
 Port the rationale from CLAUDE.md §"Parity target & non-goals" + ARCHITECTURE.md's non-goals
 section: KRaft (K8s Leases instead), replication/ISR (single-writer-per-partition), literal
 `__transaction_state` topic (slot files on the PVC), tiered storage (deferred, not refused),
-fetch sessions (stateless by contract). Each entry: *what Apache does* → *what skafka does
+fetch sessions (stateless by contract). Each entry: *what Apache does* → *what kaas does
 instead* → *why* → *what would change our mind* (where honest).
 
 ### 5. Verification-story page (`docs/src/compat/verification.md`)
@@ -70,9 +70,9 @@ instead* → *why* → *what would change our mind* (where honest).
 - The `scripts/kafka-*.sh` matrix: 41 scripts, how `_common.sh` skip/exit-77 works, and the
   recorded baseline (`scripts/.parity-baseline.txt`: 21 PASS / 20 SKIP / 0 FAIL on
   `v0.2.0-preview`; note SKIPs map to documented non-goals).
-- The integration suites: `bins/skafka/tests/` (smoke, auth, byte-opacity tripwire, cluster
-  bringup, EOS v2 round trip), `crates/sk-controller/tests/` (failover, stale-controller race).
-- The [skafka-migration-parity](https://github.com/users/Woestebanaan/projects/2) project board
+- The integration suites: `bins/kaas/tests/` (smoke, auth, byte-opacity tripwire, cluster
+  bringup, EOS v2 round trip), `crates/kaas-controller/tests/` (failover, stale-controller race).
+- The [kaas-migration-parity](https://github.com/users/Woestebanaan/projects/2) project board
   as the tracking surface.
 - Bench methodology summary + link to `docs/perf-results/` (multi-run averaging, outlier
   exclusion — one paragraph, details live in Part IV's performance chapter, phase 6).

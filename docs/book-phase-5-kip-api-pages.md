@@ -35,8 +35,8 @@ story spans Fetch + Metadata; the txn handlers share the coordinator-routing pre
 ### Per-API anchor template (from plan §4)
 
 purpose · supported versions (must match the registry `SPEC`) · request/response handling ·
-skafka-specific semantics & deviations from Apache 3.7 · source paths
-(`crates/sk-broker/src/handlers/<x>.rs`, codec module) · test coverage (unit / integration /
+kaas-specific semantics & deviations from Apache 3.7 · source paths
+(`crates/kaas-broker/src/handlers/<x>.rs`, codec module) · test coverage (unit / integration /
 `scripts/kafka-*.sh` scenario).
 
 Deviations worth first-class treatment (don't bury them): Fetch `SessionID=0` (gh #4),
@@ -47,7 +47,7 @@ rejoin contract (gh #22), EndTxn returning once the marker-queue entry is writte
 
 ## Per-KIP pages (21)
 
-Template (plan §4): *what the KIP changes in Apache Kafka* → *how skafka implements it*
+Template (plan §4): *what the KIP changes in Apache Kafka* → *how kaas implements it*
 (source paths) → *how it's verified* (test, script scenario, parity-board entry).
 
 - **16 implemented** (list in [phase 4](./book-phase-4-compat-core.md) / plan §4).
