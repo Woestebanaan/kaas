@@ -26,10 +26,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
 use kaas_broker::heartbeatpb::controller_command::Type as ControllerCmdType;
 use kaas_broker::heartbeatpb::controller_heartbeat_server::ControllerHeartbeat;
 use kaas_broker::heartbeatpb::{BrokerStatus, ControllerCommand};
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};

@@ -26,11 +26,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Secret;
+use kaas_operator_api::{Condition, KafkaUser, KafkaUserScramCredential, KafkaUserStatus};
 use kube::api::{Patch, PatchParams, PostParams};
 use kube::core::ObjectMeta;
 use kube::runtime::controller::Action;
 use kube::{Api, Client};
-use kaas_operator_api::{Condition, KafkaUser, KafkaUserScramCredential, KafkaUserStatus};
 
 use crate::acls;
 use crate::conditions::{set_condition, READY};
@@ -396,7 +396,11 @@ fn owner_ref_for(
     owner: &KafkaUser,
 ) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
     k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-        api_version: format!("{}/{}", kaas_operator_api::GROUP, kaas_operator_api::VERSION),
+        api_version: format!(
+            "{}/{}",
+            kaas_operator_api::GROUP,
+            kaas_operator_api::VERSION
+        ),
         kind: "KafkaUser".into(),
         name: owner.metadata.name.clone().unwrap_or_default(),
         uid: owner.metadata.uid.clone().unwrap_or_default(),

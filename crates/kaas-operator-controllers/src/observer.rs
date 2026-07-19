@@ -69,13 +69,15 @@ impl ReconcileObserver {
 
 fn emit(kind: &'static str, result: &'static str) {
     tracing::debug!(kind, result, "reconcile outcome");
-    kaas_observability::metrics::global().operator_reconciles.add(
-        1,
-        &[
-            kaas_observability::KeyValue::new("kind", kind),
-            kaas_observability::KeyValue::new("result", result),
-        ],
-    );
+    kaas_observability::metrics::global()
+        .operator_reconciles
+        .add(
+            1,
+            &[
+                kaas_observability::KeyValue::new("kind", kind),
+                kaas_observability::KeyValue::new("result", result),
+            ],
+        );
 }
 
 #[cfg(test)]

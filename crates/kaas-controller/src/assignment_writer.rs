@@ -24,11 +24,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use chrono::SecondsFormat;
-use parking_lot::Mutex;
-use serde::Serialize;
 use kaas_broker::{
     Assignment, BrokerAssignment, BrokerHealth, ConsumerGroupAssignment, PartitionAssignment,
 };
+use parking_lot::Mutex;
+use serde::Serialize;
 
 use crate::balancer::{balance, balance_groups, GroupSpec, TopicSpec};
 use crate::k8s_mirror::{CrMirror, NoopMirror};

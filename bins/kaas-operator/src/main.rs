@@ -28,16 +28,16 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{routing::get, Router};
 use futures::StreamExt;
-use kube::api::ListParams;
-use kube::runtime::watcher::Config as WatcherConfig;
-use kube::runtime::Controller;
-use kube::{Api, Client};
 use kaas_controller::{KubeLeaseElection, LeaseElection};
 use kaas_operator_api::{KafkaCluster, KafkaTopic, KafkaUser};
 use kaas_operator_controllers::{
     kafkacluster_controller, kafkatopic_controller, kafkauser_controller, sweep,
     KafkaClusterReconciler, KafkaTopicReconciler, KafkaUserReconciler,
 };
+use kube::api::ListParams;
+use kube::runtime::watcher::Config as WatcherConfig;
+use kube::runtime::Controller;
+use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 

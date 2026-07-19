@@ -19,12 +19,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_auth::{Operation, Principal, Quotas, Resource};
 use kaas_codec::api::describe_client_quotas::{
     self, entity_type, match_type, ComponentData, EntityData, EntryData, Response, ValueData,
 };
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 use crate::broker::Broker;
 

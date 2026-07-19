@@ -15,10 +15,10 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use parking_lot::RwLock;
 use kaas_auth::{AllowAllAuthorizer, Authorizer, NoQuotaChecker, QuotaChecker, QuotaEnforcer};
 use kaas_coordinator::{FenceLog, Manager, MarkerQueue, TxnStateStore};
 use kaas_storage::StorageEngine;
+use parking_lot::RwLock;
 
 use crate::coordinator::Coordinator;
 use crate::local_lease::LocalLeaseManager;

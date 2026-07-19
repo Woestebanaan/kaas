@@ -15,11 +15,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use kaas_operator_api::{Condition, KafkaTopic};
+use kaas_storage::TopicConfigFile;
 use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Api, Client};
-use kaas_operator_api::{Condition, KafkaTopic};
-use kaas_storage::TopicConfigFile;
 
 use crate::conditions::{set_condition, READY};
 use crate::errors::ControllerError;
@@ -245,8 +245,8 @@ pub fn topic_dir_for(data_dir: &Path, topic: &KafkaTopic) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kube::api::ObjectMeta;
     use kaas_operator_api::{KafkaTopic, KafkaTopicConfig, KafkaTopicSpec, KafkaTopicStatus};
+    use kube::api::ObjectMeta;
 
     #[test]
     fn generate_topic_uuid_matches_v4_pattern() {

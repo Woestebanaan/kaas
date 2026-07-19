@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_auth::selector::AuthEngineSelector;
 use kaas_codec::api::{sasl_authenticate, sasl_handshake};
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 // Wire error codes — same numeric values Apache uses.
 const ERR_NETWORK_EXCEPTION: i16 = 13;

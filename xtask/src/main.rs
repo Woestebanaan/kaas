@@ -14,8 +14,8 @@ use std::process::Command;
 use std::{env, fs};
 
 use anyhow::{bail, Context, Result};
-use kube::CustomResourceExt;
 use kaas_operator_api::{KafkaCluster, KafkaClusterAssignments, KafkaTopic, KafkaUser};
+use kube::CustomResourceExt;
 
 fn main() -> Result<()> {
     let task = env::args().nth(1).unwrap_or_default();

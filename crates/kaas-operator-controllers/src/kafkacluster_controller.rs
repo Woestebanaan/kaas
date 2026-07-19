@@ -26,14 +26,14 @@ use std::time::Duration;
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams};
-use kube::core::ObjectMeta;
-use kube::runtime::controller::Action;
-use kube::{Api, Client};
 use kaas_operator_api::{
     Condition, KafkaCluster, KafkaClusterAssignments, KafkaClusterAssignmentsSpec,
     KafkaClusterStatus,
 };
+use kube::api::{ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams};
+use kube::core::ObjectMeta;
+use kube::runtime::controller::Action;
+use kube::{Api, Client};
 use std::collections::BTreeMap;
 
 use crate::conditions::{set_condition, READY};
@@ -595,7 +595,11 @@ fn nonzero_or(v: i32, fallback: i32) -> i32 {
 
 fn owner_ref_for(cluster: &KafkaCluster) -> OwnerReference {
     OwnerReference {
-        api_version: format!("{}/{}", kaas_operator_api::GROUP, kaas_operator_api::VERSION),
+        api_version: format!(
+            "{}/{}",
+            kaas_operator_api::GROUP,
+            kaas_operator_api::VERSION
+        ),
         kind: "KafkaCluster".into(),
         name: cluster.metadata.name.clone().unwrap_or_default(),
         uid: cluster.metadata.uid.clone().unwrap_or_default(),

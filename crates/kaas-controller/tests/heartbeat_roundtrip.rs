@@ -14,12 +14,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
 use kaas_broker::coordinator::HeartbeatSource;
 use kaas_broker::heartbeatpb::controller_command::Type as CmdType;
 use kaas_broker::heartbeatpb::controller_heartbeat_server::ControllerHeartbeatServer;
 use kaas_broker::HeartbeatClient;
 use kaas_controller::{HeartbeatServer, HeartbeatService};
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

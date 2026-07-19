@@ -16,9 +16,9 @@
 
 use std::path::{Path, PathBuf};
 
+use kaas_operator_api::{KafkaUser, KafkaUserAcl};
 use kube::{api::ListParams, Api, Client};
 use serde::{Deserialize, Serialize};
-use kaas_operator_api::{KafkaUser, KafkaUserAcl};
 
 use crate::errors::ControllerError;
 

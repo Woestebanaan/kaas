@@ -192,8 +192,8 @@ impl MarkerWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
     use kaas_coordinator::{MarkerQueue, TxnTopic};
+    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -245,10 +245,7 @@ mod tests {
         let calls = capturing.calls.lock().clone();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].producer_id, 42);
-        assert!(
-            q.list("kaas-0").unwrap().is_empty(),
-            "file must be deleted"
-        );
+        assert!(q.list("kaas-0").unwrap().is_empty(), "file must be deleted");
     }
 
     #[tokio::test]

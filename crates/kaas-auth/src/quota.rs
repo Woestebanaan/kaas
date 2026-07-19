@@ -224,9 +224,10 @@ impl QuotaChecker for QuotaEnforcer {
     fn check_fetch_quota(&self, principal: &Principal, bytes: usize) -> i32 {
         let throttle_ms = self.check(principal, bytes, false);
         if throttle_ms > 0 {
-            kaas_observability::metrics::global()
-                .quota_throttle
-                .add(1, &[kaas_observability::KeyValue::new("direction", "fetch")]);
+            kaas_observability::metrics::global().quota_throttle.add(
+                1,
+                &[kaas_observability::KeyValue::new("direction", "fetch")],
+            );
         }
         throttle_ms
     }

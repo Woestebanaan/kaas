@@ -44,7 +44,9 @@ use kaas_broker::{
     FetchHandler, InitProducerIdHandler, ListOffsetsHandler, ListenerEntry, MetadataHandler,
     ProduceHandler, TopicMeta, TopicRegistry, TxnOffsetCommitHandler,
 };
-use kaas_codec::api::common::{write_array_len, write_nullable_bytes, write_nullable_str, write_str};
+use kaas_codec::api::common::{
+    write_array_len, write_nullable_bytes, write_nullable_str, write_str,
+};
 use kaas_codec::api::{
     add_offsets_to_txn, add_partitions_to_txn, end_txn, fetch, init_producer_id, produce,
     txn_offset_commit,
@@ -88,12 +90,7 @@ fn build_test_broker(topic: &str, partitions: i32, data_dir: &std::path::Path) -
     let authorizer: Arc<dyn Authorizer> = Arc::new(AllowAllAuthorizer);
     let quotas: Arc<dyn QuotaChecker> = Arc::new(NoQuotaChecker);
     Arc::new(Broker::with_auth(
-        engine,
-        topics,
-        "kaas-eos",
-        0,
-        authorizer,
-        quotas,
+        engine, topics, "kaas-eos", 0, authorizer, quotas,
     ))
 }
 

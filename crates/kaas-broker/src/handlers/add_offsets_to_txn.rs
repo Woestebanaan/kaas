@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_codec::api::add_offsets_to_txn;
 use kaas_coordinator::TxnStateError;
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 use crate::broker::Broker;
 

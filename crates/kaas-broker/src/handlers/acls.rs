@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_codec::api::acl_types::{
     self, operation_from_cr, operation_to_cr, pattern_type, pattern_type_from_cr,
     pattern_type_to_cr, permission_from_cr, permission_to_cr, resource_type_from_cr,
@@ -26,6 +25,7 @@ use kaas_codec::api::acl_types::{
 };
 use kaas_codec::api::{create_acls, delete_acls, describe_acls};
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 use crate::acl_cr_writer::{AclBinding, AclFilter, AclWriteError};
 use crate::broker::Broker;

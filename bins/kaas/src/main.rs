@@ -29,9 +29,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig as RustlsServerConfig};
 use kaas_auth::{
     AclEngine, AllowAllAuthEngine, AllowAllAuthorizer, AuthEngine, AuthEngineSelector, Authorizer,
     CredentialLoader, NoQuotaChecker, PerListenerAuthEngine, PrincipalMapper, QuotaChecker,
@@ -51,6 +48,9 @@ use kaas_broker::{
 };
 use kaas_protocol::{Dispatcher, ListenerConfig, MtlsConfig, Server, ServerConfigBuilder};
 use kaas_storage::{DiskStorageEngine, MemoryStorage, PartitionConfig, RealFs, StorageEngine};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig as RustlsServerConfig};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -230,13 +230,15 @@ async fn main() -> Result<()> {
     // CLUSTER_AUTHORIZATION_FAILED.
     if let Some(client) = kube_client.clone() {
         let ns = std::env::var("KAAS_NAMESPACE").unwrap_or_else(|_| "default".into());
-        let writer = kaas_broker::topic_cr_writer::KubeTopicCRWriter::new(client.clone(), ns.clone());
+        let writer =
+            kaas_broker::topic_cr_writer::KubeTopicCRWriter::new(client.clone(), ns.clone());
         broker.install_cr_writer(Arc::new(writer));
         info!("installed KubeTopicCRWriter for admin handlers");
 
         // ACL admin surface (gh #107 parity): CreateAcls / DeleteAcls
         // / DescribeAcls mutate KafkaUser.spec.authorization.acls.
-        let acl_writer = kaas_broker::acl_cr_writer::KubeAclCRWriter::new(client.clone(), ns.clone());
+        let acl_writer =
+            kaas_broker::acl_cr_writer::KubeAclCRWriter::new(client.clone(), ns.clone());
         broker.install_acl_cr_writer(Arc::new(acl_writer));
         info!("installed KubeAclCRWriter for ACL admin handlers");
 
@@ -268,7 +270,9 @@ async fn main() -> Result<()> {
                         topic_id: [0u8; 16],
                     });
                     match prev {
-                        None => notify_apply.notify(kaas_controller::AssignmentReason::TopicCreated),
+                        None => {
+                            notify_apply.notify(kaas_controller::AssignmentReason::TopicCreated)
+                        }
                         Some(p) if p != partitions => {
                             notify_apply.notify(kaas_controller::AssignmentReason::TopicResized);
                         }

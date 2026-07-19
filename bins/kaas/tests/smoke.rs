@@ -25,7 +25,9 @@ use kaas_broker::{
     ApiVersionsHandler, Broker, FetchHandler, InitProducerIdHandler, ListOffsetsHandler,
     ListenerEntry, MetadataHandler, ProduceHandler, TopicMeta, TopicRegistry,
 };
-use kaas_codec::api::common::{write_array_len, write_nullable_bytes, write_nullable_str, write_str};
+use kaas_codec::api::common::{
+    write_array_len, write_nullable_bytes, write_nullable_str, write_str,
+};
 use kaas_codec::api::{fetch, metadata, produce};
 use kaas_codec::headers::{encode_request_header, HeaderVersion};
 use kaas_codec::primitives::{write_i16, write_i32, write_i64, write_i8};

@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_codec::api::write_txn_markers;
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 use crate::broker::Broker;
 use crate::control_batch::build_control_batch;

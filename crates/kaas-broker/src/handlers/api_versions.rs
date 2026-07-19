@@ -6,9 +6,9 @@
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_codec::api::api_versions;
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 #[derive(Debug, Default)]
 pub struct ApiVersionsHandler;

@@ -286,10 +286,10 @@ pub use kube_impl::KubeTopicCRWriter;
 #[cfg(feature = "cr-writer")]
 mod kube_impl {
     use super::*;
+    use kaas_operator_api::KafkaTopic;
     use kube::api::{Patch, PatchParams};
     use kube::Api;
     use serde_json::json;
-    use kaas_operator_api::KafkaTopic;
 
     /// Real kube-backed writer.
     #[derive(Clone)]
@@ -326,8 +326,8 @@ mod kube_impl {
             name: &str,
             num_partitions: i32,
         ) -> Result<(), TopicWriteError> {
-            use kube::api::PostParams;
             use kaas_operator_api::{KafkaTopicConfig, KafkaTopicSpec};
+            use kube::api::PostParams;
 
             // gh #86: non-RFC-1123 Kafka names (Streams internals)
             // get a deterministic synthetic CR name with the literal

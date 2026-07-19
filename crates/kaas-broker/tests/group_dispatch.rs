@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_auth::Principal;
 use kaas_broker::{
     Broker, FindCoordinatorHandler, HeartbeatHandler, JoinGroupHandler, LeaveGroupHandler,
@@ -41,6 +40,7 @@ use kaas_coordinator::{
 };
 use kaas_protocol::{ConnState, Handler};
 use kaas_storage::{MemoryStorage, StorageEngine};
+use parking_lot::Mutex;
 
 const INITIAL_REBALANCE_DELAY: Duration = Duration::from_millis(3_100);
 
@@ -64,12 +64,7 @@ fn broker_with_manager(tmpdir: &std::path::Path) -> Arc<Broker> {
             None
         }
     }));
-    let mgr = Manager::new(
-        "kaas-0",
-        offsets,
-        lookup,
-        LocalGroupSource::new("kaas-0"),
-    );
+    let mgr = Manager::new("kaas-0", offsets, lookup, LocalGroupSource::new("kaas-0"));
     broker.install_coord_manager(mgr);
     broker
 }

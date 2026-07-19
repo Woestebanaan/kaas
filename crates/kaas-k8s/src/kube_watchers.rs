@@ -314,8 +314,11 @@ where
     }
 }
 
-fn handle_topic_event<A, D>(on_apply: &A, on_delete: &D, event: Event<kaas_operator_api::KafkaTopic>)
-where
+fn handle_topic_event<A, D>(
+    on_apply: &A,
+    on_delete: &D,
+    event: Event<kaas_operator_api::KafkaTopic>,
+) where
     A: Fn(&str, i32),
     D: Fn(&str),
 {

@@ -14,8 +14,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use kube::{api::ListParams, Api, Client};
 use kaas_operator_api::{KafkaTopic, KafkaUser};
+use kube::{api::ListParams, Api, Client};
 
 use crate::credentials::{read_credentials, write_credentials};
 use crate::errors::ControllerError;

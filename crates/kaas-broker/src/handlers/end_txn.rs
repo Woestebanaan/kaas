@@ -25,10 +25,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_codec::api::end_txn;
 use kaas_coordinator::{EndTxnOutcome, MarkerEntry, TxnStateError, TxnTopic};
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 use std::collections::HashMap;
 

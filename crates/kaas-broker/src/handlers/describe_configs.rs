@@ -23,13 +23,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_auth::{Operation, Principal, Resource};
 use kaas_codec::api::describe_configs::{
     self, config_type, resource_type, source, DescribeConfigsResult, DescribeConfigsResultConfig,
     DescribeConfigsSynonym, Response,
 };
 use kaas_protocol::{ConnState, Handler, HandlerError};
+use parking_lot::Mutex;
 
 use crate::broker::Broker;
 use crate::topic_config_defaults;

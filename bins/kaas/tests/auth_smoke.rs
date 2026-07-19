@@ -29,7 +29,9 @@ use kaas_broker::{
     ListenerEntry, MetadataHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
     TopicMeta, TopicRegistry,
 };
-use kaas_codec::api::common::{write_array_len, write_nullable_bytes, write_nullable_str, write_str};
+use kaas_codec::api::common::{
+    write_array_len, write_nullable_bytes, write_nullable_str, write_str,
+};
 use kaas_codec::api::{produce, sasl_authenticate, sasl_handshake};
 use kaas_codec::headers::{encode_request_header, HeaderVersion};
 use kaas_codec::primitives::{write_compact_bytes, write_i16, write_i32};

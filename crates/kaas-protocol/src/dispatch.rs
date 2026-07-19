@@ -13,12 +13,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_auth::selector::AuthEngineSelector;
 use kaas_codec::api::registry;
 use kaas_codec::headers::HeaderVersion;
 use kaas_codec::primitives::write_i16;
 use kaas_codec::RequestHeader;
+use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::connstate::ConnState;
@@ -165,13 +165,15 @@ impl Dispatcher {
         // Label by numeric api_key to cap cardinality — the API name
         // is one lookup away in dashboards. Cross-hairs with the
         // `request.latency` histogram (workspace metric name).
-        kaas_observability::metrics::global().request_latency.record(
-            started.elapsed().as_secs_f64(),
-            &[kaas_observability::KeyValue::new(
-                "api_key",
-                i64::from(api_key),
-            )],
-        );
+        kaas_observability::metrics::global()
+            .request_latency
+            .record(
+                started.elapsed().as_secs_f64(),
+                &[kaas_observability::KeyValue::new(
+                    "api_key",
+                    i64::from(api_key),
+                )],
+            );
         out
     }
 

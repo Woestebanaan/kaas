@@ -260,14 +260,8 @@ mod tests {
         let all = r.all();
         assert_eq!(all.len(), 3);
         // Peers use the headless-DNS FQDN, not the raw address.
-        assert_eq!(
-            all[1].host,
-            "kaas-1.kaas-headless.kaas.svc.cluster.local"
-        );
-        assert_eq!(
-            all[2].host,
-            "kaas-2.kaas-headless.kaas.svc.cluster.local"
-        );
+        assert_eq!(all[1].host, "kaas-1.kaas-headless.kaas.svc.cluster.local");
+        assert_eq!(all[2].host, "kaas-2.kaas-headless.kaas.svc.cluster.local");
     }
 
     #[test]

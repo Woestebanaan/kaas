@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use parking_lot::Mutex;
 use kaas_codec::api::list_offsets;
 use kaas_protocol::{ConnState, Handler, HandlerError};
 use kaas_storage::StorageError;
+use parking_lot::Mutex;
 
 use crate::broker::Broker;
 

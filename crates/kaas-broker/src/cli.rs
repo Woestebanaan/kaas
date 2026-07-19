@@ -216,8 +216,7 @@ impl Cli {
             .map_err(ConfigError::FlushInterval)?
             .unwrap_or(1);
 
-        let cluster_id =
-            env::var("KAAS_CLUSTER_ID").unwrap_or_else(|_| "kaas-rust-dev".to_owned());
+        let cluster_id = env::var("KAAS_CLUSTER_ID").unwrap_or_else(|_| "kaas-rust-dev".to_owned());
 
         // Explicit KAAS_BROKER_ID wins; otherwise derive the
         // StatefulSet ordinal from MY_POD_NAME ("kaas-2" → 2).
@@ -286,9 +285,7 @@ fn derive_advertised_host() -> Option<String> {
     let svc = env::var("KAAS_HEADLESS_SVC")
         .ok()
         .filter(|s| !s.is_empty())?;
-    let ns = env::var("KAAS_NAMESPACE")
-        .ok()
-        .filter(|s| !s.is_empty())?;
+    let ns = env::var("KAAS_NAMESPACE").ok().filter(|s| !s.is_empty())?;
     Some(format!("{pod}.{svc}.{ns}.svc.cluster.local"))
 }
 

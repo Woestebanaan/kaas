@@ -163,14 +163,8 @@ mod tests {
     #[test]
     fn fqdn_shape_matches_strimzi() {
         let d = dns("kaas");
-        assert_eq!(
-            d.fqdn(2),
-            "kaas-2.kaas-headless.kaas.svc.cluster.local"
-        );
-        assert_eq!(
-            d.fqdn(0),
-            "kaas-0.kaas-headless.kaas.svc.cluster.local"
-        );
+        assert_eq!(d.fqdn(2), "kaas-2.kaas-headless.kaas.svc.cluster.local");
+        assert_eq!(d.fqdn(0), "kaas-0.kaas-headless.kaas.svc.cluster.local");
     }
 
     #[test]

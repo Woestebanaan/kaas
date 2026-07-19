@@ -144,9 +144,11 @@ pub use kube_impl::KubeAclCRWriter;
 #[cfg(feature = "cr-writer")]
 mod kube_impl {
     use super::*;
+    use kaas_operator_api::{
+        KafkaUser, KafkaUserAcl, KafkaUserAclResource, KafkaUserAuthorization,
+    };
     use kube::api::{ListParams, PostParams};
     use kube::Api;
-    use kaas_operator_api::{KafkaUser, KafkaUserAcl, KafkaUserAclResource, KafkaUserAuthorization};
 
     /// Real kube-backed writer over the KafkaUser CRs in one
     /// namespace (typically the broker's own).

@@ -489,12 +489,7 @@ mod tests {
             }
         }
         let tmp = tempfile::tempdir().unwrap();
-        let c = Coordinator::new(
-            "kaas-0",
-            tmp.path(),
-            Arc::new(E5),
-            Arc::new(LocalHeartbeat),
-        );
+        let c = Coordinator::new("kaas-0", tmp.path(), Arc::new(E5), Arc::new(LocalHeartbeat));
         write_assignment(tmp.path(), &sample(1, 3, "kaas-0", "kaas-0"));
         assert!(!c.apply_if_new(), "epoch 3 < lease 5 → rejected");
         write_assignment(tmp.path(), &sample(1, 5, "kaas-0", "kaas-0"));

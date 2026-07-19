@@ -8,8 +8,8 @@
 //! `printcolumn` JSON, etc.) at the crate gate, not at the workspace
 //! gate.
 
-use kube::CustomResourceExt;
 use kaas_operator_api::{KafkaCluster, KafkaClusterAssignments, KafkaTopic, KafkaUser};
+use kube::CustomResourceExt;
 
 #[test]
 fn kafkatopic_crd_serialises() {
@@ -53,8 +53,8 @@ fn kafkaclusterassignments_crd_serialises() {
 
 #[test]
 fn kafkatopic_effective_topic_name_falls_back_to_metadata_name() {
-    use kube::api::ObjectMeta;
     use kaas_operator_api::{KafkaTopicConfig, KafkaTopicSpec};
+    use kube::api::ObjectMeta;
 
     // spec.topic_name set → wins
     let with_topic_name = KafkaTopic {
