@@ -272,14 +272,36 @@ pub async fn patch_readiness(
     Ok(())
 }
 
-/// Stream `KafkaTopic` CR events into the broker's topic-registry
-/// callback. Called with a `on_apply` closure that receives `(name,
-/// partition_count)` on Apply/InitApply and an `on_delete` closure
-/// that receives `name` on Delete.
+/// Backoff bounds for restarting the `KafkaTopic` watch stream.
+const TOPIC_WATCH_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const TOPIC_WATCH_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Topics reported to `on_apply` and not yet retracted, plus the
+/// relist currently being accumulated.
 ///
-/// Runs until `cancel` fires or the stream terminates permanently.
-/// Individual watcher errors are logged and swallowed — the stream
-/// restarts on the next tick.
+/// `known` deliberately outlives any single stream: kube ends a
+/// watch stream for routine reasons (relist, API hiccup, apiserver
+/// rollout), and a topic deleted while we were disconnected is only
+/// discoverable by diffing the next relist against what we last
+/// reported. See gh #202.
+#[derive(Default)]
+struct TopicWatchState {
+    known: std::collections::HashSet<String>,
+    /// `Some` between `Event::Init` and `Event::InitDone`.
+    relist: Option<std::collections::HashSet<String>>,
+}
+
+/// Stream `KafkaTopic` CR events into the broker's topic-registry
+/// callback. Called with an `on_apply` closure that receives `(name,
+/// partition_count)` on Apply/InitApply and an `on_delete` closure
+/// that receives `name` on Delete — and, on relist, for any topic
+/// that vanished while the watch was down.
+///
+/// Runs until `cancel` fires. A stream that ends is restarted with
+/// exponential backoff rather than terminating the watch: before
+/// gh #202 this returned `Ok(())` on stream end and the caller never
+/// restarted it, so topic tracking stopped silently and the registry
+/// served deleted topics indefinitely.
 pub async fn run_topic_watch<A, D>(
     client: Client,
     namespace: String,
@@ -292,25 +314,51 @@ where
     D: Fn(&str) + Send + Sync + 'static,
 {
     let api: Api<kaas_operator_api::KafkaTopic> = Api::namespaced(client, &namespace);
-    let mut stream = watcher(api, WatcherConfig::default()).boxed();
+    let mut state = TopicWatchState::default();
+    let mut backoff = TOPIC_WATCH_BACKOFF_MIN;
+
     loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            evt = stream.next() => {
-                let evt = match evt {
-                    None => {
-                        debug!("topic watch: stream ended; caller may restart");
-                        return Ok(());
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        let mut stream = watcher(api.clone(), WatcherConfig::default()).boxed();
+        // A relist may have been cut short by the previous stream
+        // ending; drop the partial set so it can't retract topics
+        // it never finished enumerating.
+        state.relist = None;
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                evt = stream.next() => {
+                    match evt {
+                        None => break,
+                        Some(Ok(e)) => {
+                            // The stream produced something, so the
+                            // connection is healthy — don't carry a
+                            // long backoff into the next restart.
+                            backoff = TOPIC_WATCH_BACKOFF_MIN;
+                            handle_topic_event(&on_apply, &on_delete, e, &mut state);
+                        }
+                        Some(Err(err)) => {
+                            warn!(%err, "topic watch: error from stream");
+                            continue;
+                        }
                     }
-                    Some(Ok(e)) => e,
-                    Some(Err(err)) => {
-                        warn!(%err, "topic watch: error from stream");
-                        continue;
-                    }
-                };
-                handle_topic_event(&on_apply, &on_delete, evt);
+                }
             }
         }
+
+        warn!(
+            ?backoff,
+            known_topics = state.known.len(),
+            "topic watch: stream ended; restarting"
+        );
+        tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            () = tokio::time::sleep(backoff) => {}
+        }
+        backoff = (backoff * 2).min(TOPIC_WATCH_BACKOFF_MAX);
     }
 }
 
@@ -318,6 +366,7 @@ fn handle_topic_event<A, D>(
     on_apply: &A,
     on_delete: &D,
     event: Event<kaas_operator_api::KafkaTopic>,
+    state: &mut TopicWatchState,
 ) where
     A: Fn(&str, i32),
     D: Fn(&str),
@@ -328,14 +377,35 @@ fn handle_topic_event<A, D>(
                 return;
             };
             on_apply(name, t.spec.partitions);
+            state.known.insert(name.to_owned());
+            if let Some(relist) = state.relist.as_mut() {
+                relist.insert(name.to_owned());
+            }
         }
         Event::Delete(t) => {
             let Some(name) = t.metadata.name.as_deref() else {
                 return;
             };
             on_delete(name);
+            state.known.remove(name);
         }
-        Event::Init | Event::InitDone => {}
+        Event::Init => {
+            state.relist = Some(std::collections::HashSet::new());
+        }
+        Event::InitDone => {
+            // The relist is the authoritative topic set. Anything we
+            // previously reported that isn't in it was deleted —
+            // possibly while this watch was disconnected, in which
+            // case no Delete event ever arrives.
+            let Some(relist) = state.relist.take() else {
+                return;
+            };
+            for stale in state.known.difference(&relist) {
+                debug!(topic = stale.as_str(), "topic watch: retracting on relist");
+                on_delete(stale);
+            }
+            state.known = relist;
+        }
     }
 }
 
@@ -409,5 +479,95 @@ mod tests {
         e.store(7, Some("kaas-0".to_owned()));
         assert_eq!(e.current_epoch(), 7);
         assert_eq!(e.current_holder().as_deref(), Some("kaas-0"));
+    }
+
+    fn topic(name: &str, partitions: i32) -> kaas_operator_api::KafkaTopic {
+        kaas_operator_api::KafkaTopic::new(
+            name,
+            kaas_operator_api::KafkaTopicSpec {
+                topic_name: String::new(),
+                partitions,
+                config: kaas_operator_api::KafkaTopicConfig::default(),
+            },
+        )
+    }
+
+    /// Drives `handle_topic_event` over a script of events and returns
+    /// the names passed to `on_delete`, in order.
+    fn deletes_from(events: Vec<Event<kaas_operator_api::KafkaTopic>>) -> Vec<String> {
+        let deleted = std::cell::RefCell::new(Vec::new());
+        let mut state = TopicWatchState::default();
+        {
+            let on_apply = |_: &str, _: i32| {};
+            let on_delete = |n: &str| deleted.borrow_mut().push(n.to_owned());
+            for evt in events {
+                handle_topic_event(&on_apply, &on_delete, evt, &mut state);
+            }
+        }
+        deleted.into_inner()
+    }
+
+    #[test]
+    fn relist_retracts_topics_deleted_while_disconnected() {
+        // t1 + t2 seen, then a relist that only carries t1 — t2 was
+        // deleted while the watch was down, so no Delete ever arrives.
+        let deleted = deletes_from(vec![
+            Event::Apply(topic("t1", 1)),
+            Event::Apply(topic("t2", 1)),
+            Event::Init,
+            Event::InitApply(topic("t1", 1)),
+            Event::InitDone,
+        ]);
+        assert_eq!(deleted, vec!["t2".to_owned()]);
+    }
+
+    #[test]
+    fn first_relist_retracts_nothing() {
+        let deleted = deletes_from(vec![
+            Event::Init,
+            Event::InitApply(topic("t1", 1)),
+            Event::InitApply(topic("t2", 1)),
+            Event::InitDone,
+        ]);
+        assert!(deleted.is_empty(), "got {deleted:?}");
+    }
+
+    #[test]
+    fn explicit_delete_is_not_repeated_on_next_relist() {
+        let deleted = deletes_from(vec![
+            Event::Apply(topic("t1", 1)),
+            Event::Delete(topic("t1", 1)),
+            Event::Init,
+            Event::InitDone,
+        ]);
+        assert_eq!(deleted, vec!["t1".to_owned()]);
+    }
+
+    #[test]
+    fn init_done_without_init_retracts_nothing() {
+        // A relist cut short by a stream restart must not retract the
+        // topics it never finished enumerating.
+        let deleted = deletes_from(vec![
+            Event::Apply(topic("t1", 1)),
+            Event::Apply(topic("t2", 1)),
+            Event::InitDone,
+        ]);
+        assert!(deleted.is_empty(), "got {deleted:?}");
+    }
+
+    #[test]
+    fn relist_keeps_surviving_topics_tracked() {
+        // t1 survives two relists; only t2 is ever retracted.
+        let deleted = deletes_from(vec![
+            Event::Apply(topic("t1", 1)),
+            Event::Apply(topic("t2", 1)),
+            Event::Init,
+            Event::InitApply(topic("t1", 1)),
+            Event::InitDone,
+            Event::Init,
+            Event::InitApply(topic("t1", 1)),
+            Event::InitDone,
+        ]);
+        assert_eq!(deleted, vec!["t2".to_owned()]);
     }
 }
