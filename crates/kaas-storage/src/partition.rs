@@ -164,6 +164,113 @@ fn read_snapshot(
     Ok(out.freeze())
 }
 
+/// What [`open_blocking`] recovers off disk, handed back to
+/// [`Partition::open`] to assemble into a [`Partition`].
+struct OpenedState {
+    epoch: i64,
+    hwm: i64,
+    log_start: i64,
+    closed: Vec<SegmentMeta>,
+    active: ActiveSegment,
+    producer_states: HashMap<i64, ProducerEntry>,
+}
+
+/// Blocking prologue of [`Partition::open`] — runs on a
+/// `spawn_blocking` thread (gh #210).
+///
+/// Every call in here is synchronous `std::io` against the partition
+/// directory, and `scan_high_watermark` walks the entire active
+/// segment (up to `segment.bytes`, 1 GiB by default) to find the true
+/// high-watermark. That walk is inherent — the log is authoritative
+/// and the manifest only best-effort — so unlike the gh #209 read
+/// path there is no index to shortcut it. What was wrong was *where*
+/// it ran: on a scheduler worker, it took brokers off the air at
+/// every takeover. With `limits.cpu: 2` tokio sizes its pool to two
+/// workers, so one NFS-backed scan starved the runtime long enough to
+/// fail the readiness probe — which dropped the broker from the
+/// controller's alive set, triggered reassignment, and caused *more*
+/// takeovers (gh #208).
+fn open_blocking(fs: &dyn Fs, dir: &std::path::Path) -> Result<OpenedState, StorageError> {
+    fs.mkdir_all(dir)?;
+
+    // Manifest is the source of truth for (epoch, hwm, log_start)
+    // when present; segment scan is the fallback.
+    let manifest_read = manifest::read(fs, dir).map_err(|e| match e {
+        manifest::ManifestError::Io(e) => StorageError::Io(e),
+        manifest::ManifestError::Json(e) => StorageError::Json(e),
+        other => StorageError::Io(std::io::Error::other(other.to_string())),
+    })?;
+    let (epoch, hwm, log_start) = match manifest_read {
+        ReadResult::Present(m) => (m.epoch, m.high_watermark, m.log_start_offset),
+        ReadResult::Legacy(m) => (m.epoch, 0, 0),
+        ReadResult::NotFound => (0, 0, 0),
+    };
+
+    // Load any existing segments.
+    let mut closed = segment::list_segments(fs, dir)?;
+
+    // The active segment is the last one (highest base_offset);
+    // if none exist yet, create at offset 0 with our current
+    // epoch.
+    let active = if let Some(last) = closed.pop() {
+        let mut a = ActiveSegment::open_meta_only(last);
+        a.open_handles(fs)?;
+        a
+    } else {
+        ActiveSegment::create(fs, dir, hwm, epoch)?
+    };
+
+    // Recover: scan the active segment forward from its base
+    // offset, stopping at the first torn batch. The log file is
+    // authoritative; the manifest is best-effort.
+    //
+    // - `recovered_hwm > manifest_hwm`: manifest was lagging the
+    //   log (normal — the manifest is rewritten only on roll /
+    //   close / takeover). Advance to the real value.
+    // - `recovered_hwm < manifest_hwm`: phantom HWM. Manifest
+    //   claims durable records that aren't actually in the log
+    //   (operator hand-deleted segments, partial roll). Rewind
+    //   so we never serve nonexistent offsets.
+    let hwm = {
+        let mut f = fs.open_read(&active.meta.log_path)?;
+        segment::scan_high_watermark(&mut f, active.meta.base_offset)?
+    };
+
+    // Restore the idempotence window.
+    let producer_states = read_producer_snapshot(fs, dir)
+        .map_err(|e| match e {
+            crate::producer_snapshot::ProducerSnapshotError::Io(e) => StorageError::Io(e),
+            crate::producer_snapshot::ProducerSnapshotError::Json(e) => StorageError::Json(e),
+        })?
+        .map(|entries| entries.into_iter().collect::<HashMap<i64, ProducerEntry>>())
+        .unwrap_or_default();
+
+    // Persist the manifest so the next open is fast.
+    manifest::write(
+        fs,
+        dir,
+        &Manifest {
+            epoch,
+            high_watermark: hwm,
+            log_start_offset: log_start,
+        },
+    )
+    .map_err(|e| match e {
+        manifest::ManifestError::Io(e) => StorageError::Io(e),
+        manifest::ManifestError::Json(e) => StorageError::Json(e),
+        other => StorageError::Io(std::io::Error::other(other.to_string())),
+    })?;
+
+    Ok(OpenedState {
+        epoch,
+        hwm,
+        log_start,
+        closed,
+        active,
+        producer_states,
+    })
+}
+
 struct PartitionInner {
     dir: PathBuf,
     active: ActiveSegment,
@@ -245,76 +352,22 @@ impl Partition {
         dir: PathBuf,
         cfg: PartitionConfig,
     ) -> Result<Self, StorageError> {
-        fs.mkdir_all(&dir)?;
-
-        // Manifest is the source of truth for (epoch, hwm, log_start)
-        // when present; segment scan is the fallback.
-        let manifest_read = manifest::read(fs.as_ref(), &dir).map_err(|e| match e {
-            manifest::ManifestError::Io(e) => StorageError::Io(e),
-            manifest::ManifestError::Json(e) => StorageError::Json(e),
-            other => StorageError::Io(std::io::Error::other(other.to_string())),
-        })?;
-        let (epoch, hwm, log_start) = match manifest_read {
-            ReadResult::Present(m) => (m.epoch, m.high_watermark, m.log_start_offset),
-            ReadResult::Legacy(m) => (m.epoch, 0, 0),
-            ReadResult::NotFound => (0, 0, 0),
-        };
-
-        // Load any existing segments.
-        let mut closed = segment::list_segments(fs.as_ref(), &dir)?;
-
-        // The active segment is the last one (highest base_offset);
-        // if none exist yet, create at offset 0 with our current
-        // epoch.
-        let active = if let Some(last) = closed.pop() {
-            let mut a = ActiveSegment::open_meta_only(last);
-            a.open_handles(fs.as_ref())?;
-            a
-        } else {
-            ActiveSegment::create(fs.as_ref(), &dir, hwm, epoch)?
-        };
-
-        // Recover: scan the active segment forward from its base
-        // offset, stopping at the first torn batch. The log file is
-        // authoritative; the manifest is best-effort.
-        //
-        // - `recovered_hwm > manifest_hwm`: manifest was lagging the
-        //   log (normal — the manifest is rewritten only on roll /
-        //   close / takeover). Advance to the real value.
-        // - `recovered_hwm < manifest_hwm`: phantom HWM. Manifest
-        //   claims durable records that aren't actually in the log
-        //   (operator hand-deleted segments, partial roll). Rewind
-        //   so we never serve nonexistent offsets.
-        let recovered_hwm = {
-            let mut f = fs.open_read(&active.meta.log_path)?;
-            segment::scan_high_watermark(&mut f, active.meta.base_offset)?
-        };
-        let hwm = recovered_hwm;
-
-        // Restore the idempotence window.
-        let producer_states = read_producer_snapshot(fs.as_ref(), &dir)
-            .map_err(|e| match e {
-                crate::producer_snapshot::ProducerSnapshotError::Io(e) => StorageError::Io(e),
-                crate::producer_snapshot::ProducerSnapshotError::Json(e) => StorageError::Json(e),
-            })?
-            .map(|entries| entries.into_iter().collect::<HashMap<i64, ProducerEntry>>())
-            .unwrap_or_default();
-
-        // Persist the manifest so the next open is fast.
-        manifest::write(
-            fs.as_ref(),
-            &dir,
-            &Manifest {
-                epoch,
-                high_watermark: hwm,
-                log_start_offset: log_start,
-            },
-        )
-        .map_err(|e| match e {
-            manifest::ManifestError::Io(e) => StorageError::Io(e),
-            manifest::ManifestError::Json(e) => StorageError::Json(e),
-            other => StorageError::Io(std::io::Error::other(other.to_string())),
-        })?;
+        // gh #210: the whole recovery prologue is synchronous I/O and
+        // the high-watermark scan walks up to a full segment, so it
+        // runs on a blocking thread. Everything after it is cheap and
+        // needs the runtime (the committer task spawn).
+        let fs_open = fs.clone();
+        let dir_open = dir.clone();
+        let OpenedState {
+            epoch,
+            hwm,
+            log_start,
+            closed,
+            active,
+            producer_states,
+        } = tokio::task::spawn_blocking(move || open_blocking(fs_open.as_ref(), &dir_open))
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))??;
 
         let initial_snapshot = ReadSnapshot {
             high_water: hwm,
@@ -894,6 +947,100 @@ fn spawn_committer(
 mod tests {
     use super::*;
     use crate::fs::RealFs;
+
+    /// [`RealFs`] with a deliberate stall on every `open_read`, to
+    /// stand in for NFS latency.
+    struct SlowFs {
+        inner: RealFs,
+        delay: Duration,
+    }
+
+    impl Fs for SlowFs {
+        fn open_read(&self, p: &std::path::Path) -> std::io::Result<Box<dyn crate::fs::FileRead>> {
+            std::thread::sleep(self.delay);
+            self.inner.open_read(p)
+        }
+        fn open_write(
+            &self,
+            p: &std::path::Path,
+            append: bool,
+        ) -> std::io::Result<Box<dyn crate::fs::FileWrite>> {
+            self.inner.open_write(p, append)
+        }
+        fn create(&self, p: &std::path::Path) -> std::io::Result<Box<dyn crate::fs::FileWrite>> {
+            self.inner.create(p)
+        }
+        fn fsync(&self, f: &mut dyn crate::fs::FileWrite) -> std::io::Result<()> {
+            self.inner.fsync(f)
+        }
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn remove(&self, p: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove(p)
+        }
+        fn mkdir_all(&self, p: &std::path::Path) -> std::io::Result<()> {
+            self.inner.mkdir_all(p)
+        }
+        fn readdir(&self, p: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.readdir(p)
+        }
+        fn stat(&self, p: &std::path::Path) -> std::io::Result<std::fs::Metadata> {
+            self.inner.stat(p)
+        }
+    }
+
+    /// gh #210: `Partition::open` recovers by walking the active
+    /// segment, which on NFS costs seconds. It used to do that inline
+    /// on a scheduler worker, and with `limits.cpu: 2` tokio only has
+    /// two — so a takeover took the broker off the air entirely: no
+    /// accepts, no `/readyz`, no background tasks.
+    ///
+    /// Both futures are `spawn`ed so they contend for the *same*
+    /// single worker. Driving `open` on `block_on`'s calling thread
+    /// instead would let the ticker run on the worker regardless, and
+    /// the test would pass even with the blocking version.
+    #[test]
+    fn open_does_not_starve_the_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("t").join("0");
+
+        let rt1 = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ticker_ticks = ticks.clone();
+
+        let p = rt1.block_on(async move {
+            let ticker = tokio::spawn(async move {
+                loop {
+                    ticker_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            });
+            let fs: Arc<dyn Fs> = Arc::new(SlowFs {
+                inner: RealFs::new(),
+                delay: Duration::from_millis(40),
+            });
+            let opened = tokio::spawn(async move {
+                Partition::open(fs, "t".to_owned(), 0, dir, PartitionConfig::default()).await
+            });
+            let p = opened.await.unwrap().unwrap();
+            ticker.abort();
+            p
+        });
+
+        let observed = ticks.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            observed > 50,
+            "runtime advanced only {observed} ticks while Partition::open ran — \
+             the recovery scan is blocking the scheduler worker"
+        );
+        drop(p);
+    }
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
