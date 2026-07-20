@@ -1,7 +1,8 @@
 # Documentation Book Plan — mdbook + mdbook-mermaid
 
 Status: **done** (all six phases landed 2026-07-19/20; published at
-<https://woestebanaan.github.io/kaas/>, rebuilt on every push to `main`).
+<https://woestebanaan.github.io/kaas/book/> behind the custom landing page at
+the site root, rebuilt on every push to `main`).
 Per-phase execution breakdowns and their outcome notes live in
 `docs/book-phase-{1..6}-*.md`. Two standing deviations from the plan as
 written: the KIP index ships **12 implemented / 9 partial / 8 non-goals**

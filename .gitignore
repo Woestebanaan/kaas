@@ -4,6 +4,8 @@
 
 # mdbook build output
 docs/book/
+# assembled Pages artifact (landing + book), built by CI / docs-publish
+/_site/
 
 # Editor / OS
 .DS_Store

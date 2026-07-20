@@ -10,7 +10,7 @@ volume). Apache Kafka clients connect unchanged.
 
 Read the architecture chapters in the book:
 
-- Published: <https://woestebanaan.github.io/kaas/> (Part I).
+- Published: <https://woestebanaan.github.io/kaas/book/> (Part I).
 - Build locally: `cargo xtask docs` (or `cargo xtask docs --serve` for live
   preview).
 - Source chapters: [`docs/src/architecture/`](./src/architecture/) —

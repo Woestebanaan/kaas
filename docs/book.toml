@@ -5,6 +5,7 @@ language = "en"
 src = "src"
 
 [output.html]
+default-theme = "rust"
 git-repository-url = "https://github.com/Woestebanaan/kaas"
 edit-url-template = "https://github.com/Woestebanaan/kaas/edit/main/docs/{path}"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]

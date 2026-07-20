@@ -53,10 +53,20 @@ jobs:
       - name: mdbook build
         run: mdbook build docs
 
+      # Site layout: the custom landing page owns the root, the book lives
+      # under /book/ (the landing page's cards link to book/…).
+      - name: Assemble site (landing page + book)
+        run: |
+          rm -rf _site
+          mkdir _site
+          cp -r docs/landing/. _site/
+          test -f _site/index.html   # the landing page must own the root
+          cp -r docs/book/html _site/book
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
-          path: docs/book/html
+          path: _site
 
   deploy:
     needs: build
