@@ -6,10 +6,8 @@ metadata:
 spec:
   group: kaas.rs
   names:
-    categories: []
     kind: KafkaTopic
     plural: kafkatopics
-    shortNames: []
     singular: kafkatopic
   scope: Namespaced
   versions:

@@ -6,10 +6,8 @@ metadata:
 spec:
   group: kaas.rs
   names:
-    categories: []
     kind: KafkaUser
     plural: kafkausers
-    shortNames: []
     singular: kafkauser
   scope: Namespaced
   versions:

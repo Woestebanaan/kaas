@@ -6,10 +6,8 @@ metadata:
 spec:
   group: kaas.rs
   names:
-    categories: []
     kind: KafkaClusterAssignments
     plural: kafkaclusterassignments
-    shortNames: []
     singular: kafkaclusterassignments
   scope: Namespaced
   versions:

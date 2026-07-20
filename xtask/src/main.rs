@@ -174,6 +174,7 @@ fn canonicalise(yaml: &str) -> Result<String> {
     // default is also semantically inert (serde already treats the
     // absent field as empty), so strip every one of them.
     strip_empty_string_defaults(&mut value);
+    strip_empty_name_lists(&mut value);
     if let Some(map) = value.as_mapping_mut() {
         if let Some(meta) = map
             .get_mut(Value::String("metadata".into()))
@@ -205,6 +206,41 @@ fn canonicalise(yaml: &str) -> Result<String> {
     } else {
         format!("---\n{body}")
     })
+}
+
+/// Remove empty `spec.names.categories` / `spec.names.shortNames`
+/// sequences.
+///
+/// kube-derive always populates these as `Some(vec![])` rather than
+/// `None`, so they serialise as literal `[]`. The apiserver's Go type
+/// tags both `omitempty` on a `[]string`, which can't distinguish
+/// empty from nil — so the stored object comes back with the keys
+/// absent entirely. A GitOps differ (ArgoCD, `kubectl diff`) then
+/// compares `categories: []` against nothing and reports a
+/// permanently-pending "add these fields" change that applying never
+/// resolves.
+/// controller-gen omits them, so stripping matches the shape every
+/// other CRD in the cluster has.
+fn strip_empty_name_lists(value: &mut serde_yaml::Value) {
+    use serde_yaml::Value;
+    let Some(names) = value
+        .get_mut(Value::String("spec".into()))
+        .and_then(|s| s.get_mut(Value::String("names".into())))
+        .and_then(Value::as_mapping_mut)
+    else {
+        return;
+    };
+    for key in ["categories", "shortNames"] {
+        let is_empty = names
+            .get(Value::String(key.into()))
+            .is_some_and(|v| v.as_sequence().is_some_and(|s| s.is_empty()));
+        if is_empty {
+            // `shift_remove`, not `remove` — the latter is swap-remove
+            // on the backing IndexMap and would rotate an unrelated
+            // key into the hole, churning the generated YAML.
+            names.shift_remove(Value::String(key.into()));
+        }
+    }
 }
 
 /// Recursively remove `default: ""` mapping entries. See the note in
