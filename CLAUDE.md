@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Layout
 
-kaas is a Rust workspace: `Cargo.toml` at the root, `rust-toolchain.toml` (pin = 1.85), 12 lib crates under `crates/kaas-*`, 2 bins under `bins/{kaas,kaas-operator}`, and an `xtask` runner. `protoc` is vendored via `tonic-build` in `kaas-broker`. `proto/`, `deploy/`, and `scripts/` live at the root (tonic-build consumes `proto/heartbeat.proto`; the Helm chart and shell integration suite target the broker's wire surface). System-level architecture lives in the documentation book's Part I (`docs/src/architecture/`; build with `cargo xtask docs`, preview with `cargo xtask docs --serve` — `docs/ARCHITECTURE.md` is a pointer stub). The release line is `v0.2.x-preview` (see [`docs/RELEASING.md`](./docs/RELEASING.md)); the book plan is [`docs/book-plan.md`](./docs/book-plan.md).
+kaas is a Rust workspace: `Cargo.toml` at the root, `rust-toolchain.toml` (pin = 1.85), 12 lib crates under `crates/kaas-*`, 2 bins under `bins/{kaas,kaas-operator}`, and an `xtask` runner. `protoc` is vendored via `tonic-build` in `kaas-broker`. `proto/`, `deploy/`, and `scripts/` live at the root (tonic-build consumes `proto/heartbeat.proto`; the Helm chart and shell integration suite target the broker's wire surface). System-level architecture lives in the documentation book's Part I (`docs/src/architecture/`; build with `cargo xtask docs`, preview with `cargo xtask docs --serve` — `docs/ARCHITECTURE.md` is a pointer stub). The release line is `v0.2.x-preview` (see [`docs/RELEASING.md`](./docs/RELEASING.md)); how the book is built, gated, and published is [`docs/README.md`](./docs/README.md).
 
 ## Parity target & non-goals
 
