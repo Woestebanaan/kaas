@@ -9,7 +9,7 @@ Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 6).
   head-to-head: kaas 3.7× Strimzi throughput at flushIntervalMessages=10000, honest
   single-run + substrate caveats). Introduction + getting-started filled.
   `docs-publish.yml` deploys on every push to `main`; Pages enabled via API
-  (`build_type=workflow`) at <https://woestebanaan.github.io/kaas/>; README +
+  (`build_type=workflow`) at <https://kaas.rs/>; README +
   ARCHITECTURE stub point at the live site. Also fixed while porting: chart README's
   pre-rename `sk-controller` reference, its stale finalizer uninstall note (the
   operator has no finalizers), and its pre-gh #126 listener values table.
