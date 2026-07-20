@@ -1,4 +1,4 @@
-//! kaas-auth — SCRAM-256/512, mTLS, ACLs, quotas, principal mapping.
+//! kaas-auth — SCRAM-SHA-512 + SASL PLAIN, mTLS, ACLs, quotas, principal mapping.
 //!
 //! Module layout:
 //!

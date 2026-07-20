@@ -136,7 +136,7 @@ ships today.
     txn_state/
         slot-00.json              ── 50 slots, hash(transactional_id) % 50
         ...
-    fence_log/
+    producer_fences/
         from-kaas-0.json          ── one per broker; cross-broker producer
         ...                          epoch fence broadcast (gh #108 phase 2)
     marker_queue/
@@ -211,21 +211,28 @@ semantics, same trade, as Apache. On NFS substrates where the COMMIT
 round-trip dominates, this and the group-commit coalescing are the two
 levers that matter (see [Performance](../operations/performance.md)).
 
-## Retention, DeleteRecords, and compaction
+## Retention, DeleteRecords, and compaction — the honest state
 
-The cleaner (`crates/kaas-storage/src/cleaner.rs`) enforces per-topic policy
-from `.config.json` (operator-written from `KafkaTopic.spec.config`):
+Per-topic policy flows from `KafkaTopic.spec.config` through the
+operator-written `.config.json` into the broker
+(`crates/kaas-storage/src/topicconfig.rs`) — but as of today **no
+background cleaner runs in production**:
 
-- **Retention** deletes whole closed segments past size/time limits — a
-  leader-side unlink that actually frees disk, per the
-  [file-handle ownership rule](./file-handles.md).
-- **`DeleteRecords`** (API key 21) advances `logStartOffset`; when the purge
-  covers the active segment (`logStart ≥ highWatermark`) the active segment
-  itself is reclaimed.
-- **Compaction** honours two knobs (gh #116): `min.compaction.lag.ms`
-  (KIP-58 — segments whose `maxTimestamp` falls inside the lag window are
-  skipped; default 0 = no gate) and `delete.retention.ms` (KIP-354 —
-  tombstones whose batch `baseTimestamp` predates the cutoff are dropped
-  even if latest for their key; default 0 = tombstones live forever).
-  Tombstone-expiry granularity is **per-batch** in kaas, where Apache is
-  per-record — a deliberate consequence of never opening batches.
+- **`DeleteRecords`** (API key 21) is the one working reclamation path: it
+  advances `logStartOffset` and unlinks closed segments the purge fully
+  covers (the active segment is never reclaimed). Being a leader-side
+  unlink, it actually frees disk per the
+  [file-handle ownership rule](./file-handles.md). Topic deletion is the
+  other.
+- **Size-based retention** exists as code (`RetentionCleaner` in
+  `crates/kaas-storage/src/cleaner.rs`, exercised by its unit tests) but
+  is **not instantiated by the broker** — the interval loop its docstring
+  promises is an open follow-up (gh #158), as are time-based retention
+  and the compactor.
+- **Compaction knobs** `min.compaction.lag.ms` (KIP-58) and
+  `delete.retention.ms` (KIP-354) round-trip through CRs and
+  DescribeConfigs but gate nothing yet. When the compactor lands,
+  tombstone expiry will be **per-batch** (Apache is per-record) — a
+  deliberate consequence of never opening batches. Status is tracked
+  honestly on the [KIP-58](../compat/kip/kip-58.md) and
+  [KIP-354](../compat/kip/kip-354.md) pages.

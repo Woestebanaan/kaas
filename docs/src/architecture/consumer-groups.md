@@ -57,9 +57,11 @@ v0.1.53 (gh #92).
 `GroupTakeoverDriver` (`crates/kaas-broker/src/group_takeover.rs`) runs on
 every assignment change and does two things:
 
-1. **prev→next diff** — groups this broker gained are loaded (offsets read
-   from `/data/__cluster/__consumer_offsets/<groupID>.json`); groups it lost
-   are dropped from memory.
+1. **prev→next diff** — groups this broker *lost* are dropped from memory.
+   Gained groups are not eagerly migrated: the new coordinator's first
+   `JoinGroup` creates the group via `Manager::get_or_create`, which lazily
+   loads the persisted offsets from
+   `/data/__cluster/__consumer_offsets/<groupID>.json`.
 2. **Orphan sweep** — any group still in `Manager::local_groups()` that the
    *current* assignment doesn't route here is evicted, regardless of what the
    diff said.

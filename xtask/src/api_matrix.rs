@@ -393,6 +393,62 @@ pub fn generate(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Verify every registered API key's `## <Name>` heading exists
+/// exactly once across the Part II domain pages. mdbook-linkcheck
+/// 0.7.7 does not validate fragments, so without this check a renamed
+/// heading would silently break every matrix deep-link to it.
+pub fn check_api_anchors(repo_root: &Path) -> Result<()> {
+    let api_dir = repo_root.join("docs/src/compat/api");
+    let mut headings: Vec<(String, String)> = Vec::new(); // (page, heading)
+    for entry in fs::read_dir(&api_dir).with_context(|| format!("reading {}", api_dir.display()))? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        let page = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        for line in fs::read_to_string(&path)?.lines() {
+            if let Some(h) = line.strip_prefix("## ") {
+                headings.push((page.clone(), h.trim().to_owned()));
+            }
+        }
+    }
+    let mut bad = Vec::new();
+    for doc in API_DOCS {
+        let hits: Vec<_> = headings.iter().filter(|(_, h)| h == doc.name).collect();
+        match hits.len() {
+            1 if hits[0].0 == doc.page => {}
+            1 => bad.push(format!(
+                "key {} ({}) documented on page {:?}, matrix links to {:?}",
+                doc.key, doc.name, hits[0].0, doc.page
+            )),
+            0 => bad.push(format!(
+                "key {} ({}): no `## {}` heading on any compat/api page (matrix links to {}.md#{})",
+                doc.key,
+                doc.name,
+                doc.name,
+                doc.page,
+                doc.name.to_lowercase()
+            )),
+            n => bad.push(format!(
+                "key {} ({}): `## {}` appears {n} times (must be exactly once)",
+                doc.key, doc.name, doc.name
+            )),
+        }
+    }
+    if !bad.is_empty() {
+        bail!("API anchor check failed:\n  {}", bad.join("\n  "));
+    }
+    eprintln!(
+        "check-docs-drift: API anchor check clean ({} keys)",
+        API_DOCS.len()
+    );
+    Ok(())
+}
+
 /// Scan every book page for `crates/…`, `bins/…`, `scripts/…`,
 /// `deploy/…`, `proto/…`, `xtask/…` citations and fail on paths that
 /// don't exist. A citation is a match ending in a known source-file

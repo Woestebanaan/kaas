@@ -41,7 +41,7 @@ KIP-360 contract. Two mechanisms make the bump stick everywhere:
   epoch and clears its dedupe window — so a zombie batch from the old
   session is fenced even on partitions the new session hasn't touched yet.
 - **Cross-broker fence broadcast** (gh #108 phase 2): the bump is appended
-  to a per-broker fence log under `/data/__cluster/fence_log/`
+  to a per-broker fence log under `/data/__cluster/producer_fences/`
   (`crates/kaas-coordinator/src/fence_log.rs`); every peer's `FenceWatcher`
   (`crates/kaas-broker/src/fence_watcher.rs`) polls and applies it. Same
   shared-volume pattern as the marker queue below — no new RPC surface.

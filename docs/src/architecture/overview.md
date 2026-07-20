@@ -14,7 +14,7 @@ flowchart TB
             b1["kaas-1"]
             b2["kaas-2"]
         end
-        pvc[("Shared RWX PVC — NFSv4<br/>/data/__cluster/<br/>assignment.json · credentials.json · acls.json<br/>txn_state/ · fence_log/ · marker_queue/<br/>__consumer_offsets/<br/>/data/&lt;topic&gt;/&lt;partition&gt;/<br/>segments · manifest.json · producer-state.snapshot")]
+        pvc[("Shared RWX PVC — NFSv4<br/>/data/__cluster/<br/>assignment.json · credentials.json · acls.json<br/>txn_state/ · producer_fences/ · marker_queue/<br/>__consumer_offsets/<br/>/data/&lt;topic&gt;/&lt;partition&gt;/<br/>segments · manifest.json · producer-state.snapshot")]
     end
 
     operator -- "reconcile CRs" --> k8s

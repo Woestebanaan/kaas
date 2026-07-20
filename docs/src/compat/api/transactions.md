@@ -2,6 +2,356 @@
 
 Per-API reference — see the [API support matrix](../api-matrix.md) for the generated version table.
 
-## InitProducerId AddPartitionsToTxn AddOffsetsToTxn EndTxn WriteTxnMarkers TxnOffsetCommit
+These six keys are the [KIP-98](../kip/kip-98.md) transactional-producer
+surface plus the [KIP-447](../kip/kip-447.md) (EOS v2) offset-commit path.
+The machinery behind them — the slot-file state store that replaces
+Apache's `__transaction_state` topic, the shared-volume marker queue that
+replaces coordinator-to-leader RPCs, and the timeout reaper — is described
+in [Transactions & idempotence](../../architecture/transactions.md)
+(including the state diagram); this page sticks to the wire contracts.
 
-*(Reference content lands with book-plan phase 5.)*
+Four facts are shared by everything below:
+
+- **Routing.** The transaction coordinator for a `transactional.id` is a
+  pure function: `hash(transactional.id)` into the sorted full broker
+  set, with a deterministic fallback into the alive subset when the
+  preferred broker is down (`pick_txn_coordinator`,
+  `crates/kaas-broker/src/group_hash.rs`). Clients resolve it via
+  `FindCoordinator` with `key_type = 1`
+  (`crates/kaas-coordinator/src/manager.rs`); the coordinator-side
+  handlers (keys 22, 24, 25, 26) re-check ownership and answer
+  `NOT_COORDINATOR` (16) from any other broker. Dev mode owns every id.
+- **State.** Per-`transactional.id` state lives in
+  `/data/__cluster/txn_state/slot-N.json`, sharded
+  `fnv1a32(transactional.id) % 50` — Apache's
+  `transaction.state.log.num.partitions=50` default
+  (`crates/kaas-coordinator/src/txn_state.rs`). Every mutation re-reads
+  the slot file and writes back atomically (tmp + fsync + rename), so
+  coordinator failover is just the new owner reading the same file — no
+  log replay. The `Prepare*` states exist in the enum but are never
+  visited; `EndTxn` collapses prepare-then-complete into one atomic
+  transition.
+- **Errors.** The store's failures map identically in every
+  coordinator-side handler: unknown id or PID mismatch →
+  `INVALID_PRODUCER_ID_MAPPING` (49); epoch mismatch → `PRODUCER_FENCED`
+  (90, the txn-coordinator convention — the Produce path keeps
+  `INVALID_PRODUCER_EPOCH` 47); transition already in flight →
+  `CONCURRENT_TRANSACTIONS` (51); store not yet wired at boot →
+  `COORDINATOR_NOT_AVAILABLE` (15, retryable); empty `transactional.id`
+  → `INVALID_REQUEST` (42). One honest wart: invalid transitions are
+  answered with wire code **50**, but Apache's `INVALID_TXN_STATE` is
+  **48** (50 is `INVALID_TRANSACTION_TIMEOUT`), so a Java client raises
+  `InvalidTxnTimeoutException` where Apache raises
+  `InvalidTxnStateException`. Off by label, not by behaviour.
+- **Reaper.** A per-broker task fires every 10 s (Apache's
+  `transaction.abort.timed.out.transaction.cleanup.interval.ms` default)
+  and transitions `Ongoing` entries past
+  `ongoingSinceMs + transactionTimeoutMs` to `CompleteAbort` with an
+  epoch bump, discarding their staged offsets (`run_txn_reaper`,
+  `bins/kaas/src/cluster.rs`). The production sweep is currently
+  **ungated by slot ownership** — every broker walks every slot — a
+  known multi-broker sharp edge; see the architecture page.
+
+One cross-cutting deviation up front: Apache 3.7 gates this surface on
+`WRITE` for the `TransactionalId` resource (plus `CLUSTER_ACTION` for
+`WriteTxnMarkers`). The kaas txn handlers perform no ACL checks — with
+`authorization.type: simple` enabled, Produce and Fetch enforce ACLs but
+the transactional APIs do not. Open gap, not a design decision.
+
+## InitProducerId
+
+Allocates the `(producer id, producer epoch)` pair — the entry point for
+both idempotent and transactional producers. The Java client enables
+idempotence by default since Kafka 3.0, so every producer sends this at
+startup.
+
+**Versions**: v0–v4 (flexible from v2).
+
+**Handling** — a null or empty `transactional.id` is the idempotent
+path: any broker answers locally with a fresh PID from its in-memory
+counter and epoch 0, no coordinator gate. A non-empty `transactional.id`
+hits the coordinator gate, then the state store: the first call for an
+id allocates a fresh PID at epoch 0; **every reconnect returns the same
+PID with `epoch + 1`** — fencing is the monotonic epoch, the KIP-98
+contract as amended by [KIP-360](../kip/kip-360.md). Epoch overflow at
+`i16::MAX` rotates to a fresh PID at epoch 0. The request's
+`transaction_timeout_ms` is recorded on the entry as the reaper's
+deadline input.
+
+After every `epoch > 0` bump the handler fences the old session twice
+over: an in-process walk advances the PID's epoch and clears its dedupe
+window on every partition this broker leads, and the bump is appended to
+this broker's outbound fence file
+(`/data/__cluster/producer_fences/from-<broker>.json`) so peer brokers'
+`FenceWatcher` applies it within its 2 s poll. During the boot window
+before the store is wired, the handler degrades gracefully: fresh PID,
+epoch 0, and a one-shot warning that the rejoin fence is disabled.
+
+**Deviations from Apache 3.7**:
+
+- The v3+ request fields `producer_id` / `producer_epoch` (KIP-360) are
+  decoded but ignored. Apache validates the caller's current epoch and
+  fences stale producers with `PRODUCER_FENCED`; kaas bumps the epoch
+  for any caller — a zombie that re-calls `InitProducerId` is handed a
+  new valid epoch instead of an error (each rejoin fences the *other*
+  session, so mutual fencing still converges, but not Apache's answer).
+- A rejoin during an `Ongoing` transaction does not abort it. Apache
+  aborts the in-flight transaction first (answering
+  `CONCURRENT_TRANSACTIONS` until done); kaas bumps the epoch and leaves
+  the entry `Ongoing` for the timeout reaper to sweep.
+- `transaction_timeout_ms` is not validated against a
+  `transaction.max.timeout.ms` ceiling (Apache rejects oversized values
+  with `INVALID_TRANSACTION_TIMEOUT`); kaas records whatever is sent.
+- Idempotent (non-transactional) PIDs come from a per-broker counter
+  that starts at 1 and resets on restart — not the cluster-unique,
+  persisted block allocation Apache uses. PID collisions across brokers
+  or restarts are possible; PID-keyed state (dedupe windows, the fence
+  broadcast) can cross-talk in that case. Transactional PIDs survive via
+  the slot file, but two `transactional.id`s coordinated by different
+  brokers can still be handed the same PID.
+
+**Source**: `crates/kaas-broker/src/handlers/init_producer_id.rs`
+(handler), `crates/kaas-codec/src/api/init_producer_id.rs` (codec),
+`crates/kaas-coordinator/src/txn_state.rs` (store),
+`crates/kaas-coordinator/src/fence_log.rs` +
+`crates/kaas-broker/src/fence_watcher.rs` (cross-broker fence),
+`crates/kaas-storage/src/idempotence.rs` (dedupe window it seeds).
+
+**Verified by**: handler unit tests (same-PID/epoch-bump rejoin,
+fence-log broadcast, empty-string id treated as non-transactional);
+`first_call_allocates_epoch_zero_rejoin_bumps` and
+`epoch_overflow_rotates_to_fresh_pid` in
+`crates/kaas-coordinator/src/txn_state.rs`; `bins/kaas/tests/eos_v2.rs`;
+`scripts/kafka-txn-coordinator.sh` and `scripts/kafka-txn-timeout.sh`
+(wire-surface probes — the Kafka 4.x CLI dropped
+`--transactional-id` from the verifiable producer, so shell coverage is
+ApiVersions plus on-PVC state checks).
+
+## AddPartitionsToTxn
+
+Declares the partitions a transaction will produce to, before the first
+transactional batch lands there. The first successful `Add*` call is
+what actually starts the transaction.
+
+**Versions**: v0–v3 (flexible from v3).
+
+**Handling** — after the shared gates, the store unions the requested
+`(topic, partition)` tuples into the entry's partition list. Validation
+order matches Apache: missing entry → 49, PID mismatch → 49, epoch
+mismatch → 90, `Prepare*` in flight → 51. From `Empty` or a `Complete*`
+state the entry transitions to `Ongoing` and **stamps `ongoingSinceMs`**
+— the timeout reaper's deadline clock. Re-adding already-recorded
+partitions with no state change is an idempotent no-op (no slot-file
+rewrite). The v0–v3 response has no top-level error field, so a
+top-level rejection (wrong coordinator, empty id, boot window) is
+repeated on every requested partition; the Java client picks any one.
+
+**Deviations from Apache 3.7**:
+
+- Apache 3.7 additionally serves v4 — the KIP-890 phase-1 batched shape
+  its brokers use for server-side verification. kaas stops at v3, which
+  is the version client producers negotiate; nothing client-visible is
+  missing.
+- None known otherwise, beyond the shared warts in the preamble (wire
+  code 50 for invalid transitions is unreachable here — bad states map
+  to 49/90/51).
+
+**Source**: `crates/kaas-broker/src/handlers/add_partitions_to_txn.rs`
+(handler), `crates/kaas-codec/src/api/add_partitions_to_txn.rs` (codec),
+`crates/kaas-coordinator/src/txn_state.rs` (`add_partitions`).
+
+**Verified by**: handler unit tests (per-partition error fan-out, happy
+path); `add_partitions_happy_path_then_idempotent`,
+`add_partitions_unions_across_calls`, `epoch_mismatch_fences`, and
+`add_partitions_concurrent_transition_rejected` in
+`crates/kaas-coordinator/src/txn_state.rs`; `bins/kaas/tests/eos_v2.rs`;
+`scripts/kafka-txn-coordinator.sh` (ApiVersions advertisement).
+
+## AddOffsetsToTxn
+
+Declares the consumer group whose offsets the transaction will commit —
+what the Java client sends when `sendOffsetsToTransaction()` is called,
+before the `TxnOffsetCommit` itself.
+
+**Versions**: v0–v3 (flexible from v3).
+
+**Handling** — after the shared gates, the store appends `group_id` to
+the entry's group list (deduplicated; re-adding is a no-op). Exactly
+like `AddPartitionsToTxn`, a call from `Empty` or `Complete*`
+transitions the entry to `Ongoing` and stamps `ongoingSinceMs` — either
+`Add*` API can open the transaction. The recorded group list is what
+`EndTxn`'s offset hook later walks to commit or discard the pending
+offsets staged by `TxnOffsetCommit`. The response is a single top-level
+error code. An empty `group_id` is rejected through the
+invalid-transition mapping (wire 50 — see the preamble wart).
+
+**Deviations from Apache 3.7**:
+
+- None known beyond the shared warts in the preamble (no
+  `TransactionalId` ACL gate; wire 50 where Apache uses 48).
+
+**Source**: `crates/kaas-broker/src/handlers/add_offsets_to_txn.rs`
+(handler), `crates/kaas-codec/src/api/add_offsets_to_txn.rs` (codec),
+`crates/kaas-coordinator/src/txn_state.rs` (`add_offsets_to_txn`).
+
+**Verified by**: handler unit tests (group recorded on happy path,
+unknown producer → 49); `end_txn_happy_commit_clears_partitions_and_fires_hook`
+in `crates/kaas-coordinator/src/txn_state.rs` (group list consumed by
+the hook); `bins/kaas/tests/eos_v2.rs`;
+`scripts/kafka-txn-coordinator.sh` (ApiVersions advertisement).
+
+## EndTxn
+
+Commits or aborts the transaction (`committed` boolean in the request).
+This is where kaas diverges most visibly from Apache's internals while
+keeping the client-visible contract.
+
+**Versions**: v0–v3 (flexible from v3).
+
+**Handling** — after the shared gates, the store performs
+`Ongoing → CompleteCommit` / `CompleteAbort` as **one atomic slot-file
+transition** — the `Prepare*` states are never visited. The partition
+and group lists are snapshotted before being cleared, `ongoingSinceMs`
+is zeroed, and the offset hook fires per recorded group: commit
+materialises the pending offsets `TxnOffsetCommit` staged, abort
+discards them. A retried `EndTxn` in the matching `Complete*` state is
+answered idempotently (error 0, no second marker); a direction mismatch
+or `EndTxn` against `Empty` returns wire 50 (intended
+`INVALID_TXN_STATE`); an epoch mismatch returns `PRODUCER_FENCED`.
+
+Marker dispatch then splits by partition leader (from
+`assignment.json` via the broker `Coordinator`): **self-led partitions**
+get the COMMIT/ABORT control batch built and appended directly with
+`acks = -1`, *before* any queue writes, so a coordinator crash
+mid-dispatch never loses the local marker; **peer-led partitions** get
+one queue file per target broker under
+`/data/__cluster/marker_queue/to-<broker>/<pid>-<epoch>.json`. The
+response returns success **as soon as the queue entries are durably
+written** — each peer's `MarkerWatcher` polls its own inbox every 2 s,
+appends the marker to the partitions it leads, and deletes the file.
+The file name makes producer retries overwrite rather than pile up.
+
+**Deviations from Apache 3.7**:
+
+- **Peer markers are applied asynchronously.** Apache's coordinator
+  drives `WriteTxnMarkers` RPCs and completes the transaction when every
+  marker is written; kaas acks once the queue entries land, so
+  `read_committed` visibility (LSO advance) on peer-led partitions
+  trails the `commitTransaction()` return by up to the 2 s poll.
+- **Failed marker appends are not re-driven.** A local append failure is
+  logged and `EndTxn` still answers 0; because retries are idempotent
+  no-ops once the state is `Complete*`, nothing rewrites the missing
+  marker and that partition's LSO stays pinned. Apache holds
+  `PrepareCommit` and retries markers until they succeed. Known sharp
+  edge.
+- `CoordinatorEpoch` in emitted markers is always 0 (kaas tracks no txn
+  coordinator epoch distinct from the assignment epoch); consumers do
+  not act on the field.
+- Wire 50 where Apache answers `INVALID_TXN_STATE` (48) — see preamble.
+
+**Source**: `crates/kaas-broker/src/handlers/end_txn.rs` (handler),
+`crates/kaas-codec/src/api/end_txn.rs` (codec),
+`crates/kaas-broker/src/control_batch.rs` (marker batch),
+`crates/kaas-coordinator/src/txn_state.rs` (`end_txn`),
+`crates/kaas-coordinator/src/marker_queue.rs` +
+`crates/kaas-broker/src/marker_watcher.rs` (cross-broker dispatch).
+
+**Verified by**: handler unit tests (commit appends a marker and
+advances the HWM, idempotent retry writes no second marker, epoch
+mismatch → 90, `Empty` → invalid); `end_txn_idempotent_retry_returns_ok`
+and `end_txn_against_empty_is_invalid` in
+`crates/kaas-coordinator/src/txn_state.rs`; queue round-trip and
+overwrite-on-retry tests in `crates/kaas-coordinator/src/marker_queue.rs`;
+`bins/kaas/tests/eos_v2.rs` (commit path visible to `read_committed`,
+abort path populates `AbortedTransactions[]`).
+
+## WriteTxnMarkers
+
+Apache's inter-broker API: the transaction coordinator tells each
+partition leader to write COMMIT/ABORT control batches. kaas serves the
+**receiver side** for wire compatibility — but no kaas broker ever sends
+it; cross-broker markers travel the shared-volume queue instead (see
+`EndTxn` above).
+
+**Versions**: v0–v1 (flexible from v1).
+
+**Handling** — for each marker in the request the handler builds a
+control batch from `(producer_id, producer_epoch, transaction_result,
+coordinator_epoch)` and, per partition: checks leadership against the
+assignment (`NOT_LEADER_OR_FOLLOWER`, 6, if this broker doesn't lead
+it), runs an idempotent `create_partition` safety net, and appends with
+`acks = -1`. Append failures map to `UNKNOWN_SERVER_ERROR` (-1)
+per partition. Dev mode (no `Coordinator`) treats every partition as
+self-led. An external coordinator or test harness driving this API gets
+exactly Apache's receiver behaviour.
+
+**Deviations from Apache 3.7**:
+
+- The sender side does not exist: kaas coordinators dispatch markers via
+  `/data/__cluster/marker_queue/`, never via this RPC. Invisible to
+  clients (the API is broker-internal in Apache), but relevant when
+  tracing a cluster on the wire.
+- No `CLUSTER_ACTION` authorization gate. Apache restricts this API to
+  brokers; in kaas any authenticated client on any listener can append
+  control markers to partitions this broker leads. Sharp edge of the
+  missing txn-surface ACLs (see preamble).
+
+**Source**: `crates/kaas-broker/src/handlers/write_txn_markers.rs`
+(handler), `crates/kaas-codec/src/api/write_txn_markers.rs` (codec),
+`crates/kaas-broker/src/control_batch.rs` (marker batch).
+
+**Verified by**: handler unit tests (per-partition append advances the
+HWM, empty marker list → empty response). No shell script drives it —
+the Apache CLI tools never send this API, and kaas brokers don't either;
+the queue path it replaces is exercised end to end by
+`bins/kaas/tests/eos_v2.rs` and the marker-queue tests.
+
+## TxnOffsetCommit
+
+The transactional counterpart of `OffsetCommit`: stages the consume-side
+offsets of a consume-process-produce cycle so they become visible
+atomically with the transaction — the [KIP-447](../kip/kip-447.md)
+(EOS v2) contract.
+
+**Versions**: v0–v3 (flexible from v3).
+
+**Handling** — this handler runs on the **group** coordinator
+(`hash(group.id)`), not the transaction coordinator; a broker that
+doesn't coordinate the group answers `NOT_COORDINATOR` on every
+partition, as does the boot window before the manager is wired. Offsets
+are flattened to the same key shape `OffsetCommit` uses and staged in
+the offset store's **pending layer keyed by `(group_id, producer_id)`**
+— invisible to `OffsetFetch` until `EndTxn(commit)` fires
+`commit_pending`; abort (or a reaper sweep) fires `discard_pending`.
+The pending layer is memory-only by design: staged offsets of an
+unfinished transaction dying with the broker is abort-equivalent, which
+is the correct outcome.
+
+**Deviations from Apache 3.7**:
+
+- `producer_epoch`, `generation_id`, and `member_id` are decoded but not
+  validated. Apache fences zombies at this API with
+  `INVALID_PRODUCER_EPOCH` / `ILLEGAL_GENERATION` /
+  `UNKNOWN_MEMBER_ID`; kaas keys staging purely on
+  `(group_id, producer_id)`.
+- **Cross-broker gap**: the `EndTxn` offset hook fires on the *txn*
+  coordinator's local offset store. When `hash(transactional.id)` and
+  `hash(group.id)` resolve to different brokers, the pending entry
+  staged here is never materialised — the group replays from its last
+  committed offset, which breaks exactly-once (duplicates, not loss)
+  for that group. Single-broker deployments and hash-coinciding cases
+  are complete; cross-broker completion is tracked as open follow-up in
+  the handler (gh #114).
+
+**Source**: `crates/kaas-broker/src/handlers/txn_offset_commit.rs`
+(handler), `crates/kaas-codec/src/api/txn_offset_commit.rs` (codec),
+`crates/kaas-coordinator/src/offset_store.rs` (pending layer),
+`crates/kaas-coordinator/src/txn_state.rs` (`TxnOffsetHook` seam).
+
+**Verified by**: handler unit tests (pending staged and invisible until
+commit, `NOT_COORDINATOR` without a manager);
+`pending_invisible_to_fetch_until_commit_pending` and
+`discard_pending_drops_unmaterialised_offsets` in
+`crates/kaas-coordinator/src/offset_store.rs`;
+`bins/kaas/tests/eos_v2.rs` (staged offsets across commit and abort);
+`scripts/kafka-txn-coordinator.sh` (ApiVersions advertisement).

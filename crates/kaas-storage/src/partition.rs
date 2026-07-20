@@ -709,8 +709,9 @@ impl Partition {
     /// dropped while `cumulative_size <= surplus`. The returned
     /// offset is the `base_offset` of the first segment we KEEP,
     /// or the active segment's `base_offset` if all closed segments
-    /// would be dropped (active is never touched here —
-    /// `DeleteRecords` handles active-segment reclaim).
+    /// would be dropped (the active segment is never reclaimed —
+    /// neither here nor by `DeleteRecords`, which also unlinks
+    /// closed segments only).
     pub fn cleanup_target_for_size_bytes(&self, retention_bytes: u64) -> Option<i64> {
         let snap = self.snapshot.load();
         let active_size = snap.active_meta.size;

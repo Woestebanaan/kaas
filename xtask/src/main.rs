@@ -94,6 +94,7 @@ fn check_docs_drift() -> Result<()> {
         "--exit-code",
         "docs/src/compat/api-matrix.md",
     ])?;
+    api_matrix::check_api_anchors(&root)?;
     api_matrix::scan_source_paths(&root)
 }
 
