@@ -33,6 +33,19 @@ plane. If the API server goes away, the current controller keeps its Lease
 view, `assignment.json` stays where it is, and partition leadership simply
 stops *changing* until the API server returns. Clients notice nothing.
 
+"Until the API server returns" is load-bearing, and it costs the topic watch
+real machinery to honour (gh #202). `run_topic_watch` rebuilds its stream on
+end with exponential backoff rather than returning, because kube ends watch
+streams for entirely routine reasons — relist, apiserver rollout, network
+blip — and a watch that exits on the first one stops tracking topics
+*permanently*, with no error to log. It also treats each relist as a full
+reconcile: the topic set carried by `Event::InitApply` is diffed against what
+the watch last reported, and anything missing is retracted. Without that
+diff, a topic deleted while the watch was disconnected would never produce a
+`Delete` event and would linger in the registry forever — the broker serving
+Metadata for a topic that no longer exists, and the controller assigning its
+partitions to brokers that then fail to open them.
+
 ## Admin writes go through CRs — deliberately
 
 The broker isn't strictly read-only against Kubernetes: two admin handlers
