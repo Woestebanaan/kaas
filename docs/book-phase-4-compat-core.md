@@ -2,10 +2,12 @@
 
 Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 4).
 
-- **Status**: **done** (2026-07-19, commit `b06655d`). One deviation from the plan
-  below: the KIP index ships **15 implemented / 6 partial** (not 16/5) — KIP-516 moved
+- **Status**: **done** (2026-07-19, commit `b06655d`). Deviations from the plan
+  below: the KIP index ships **12 implemented / 9 partial** (not 16/5) — KIP-516 moved
   to partial after the phase-3 sweep found broker-side wire propagation unshipped
-  (all-zero topic IDs on the wire; operator-side minting is fine). Verification all
+  (all-zero topic IDs on the wire), and the phase-5 source verification moved KIP-32
+  (no LogAppendTime, no timestamp lookup), KIP-58, and KIP-354 (compaction knobs are
+  config plumbing; no cleaner/compactor is wired — gh #158) to partial as well. Verification all
   green: gen-api-matrix idempotent, drift gate fails on diff + on bogus source
   citations (66 pages scanned), matrix = 36 rows + 5 gap rows, KIP index = 29 rows,
   linkcheck green. Baseline cited is `v0.2.4-preview` 21/20/0 (the plan's 21/20/0 on

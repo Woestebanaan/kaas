@@ -2,7 +2,16 @@
 
 Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 5).
 
-- **Status**: not started
+- **Status**: **done** (2026-07-20, commits `4e15000` / `dc7f558` / 5c). Deviations
+  from plan: the KIP split landed as **12 implemented / 9 partial** — source
+  verification moved KIP-32 (no LogAppendTime, timestamp lookup stubbed), KIP-58 +
+  KIP-354 (no cleaner/compactor wired at all, gh #158), and KIP-516 (all-zero topic
+  IDs on the wire) to partial. `check-docs-drift` grew an API-anchor check
+  (mdbook-linkcheck 0.7.7 doesn't validate fragments). Wire-correctness bugs found
+  while verifying were filed as issues rather than fixed (per the out-of-scope rule):
+  INVALID_TXN_STATE mapped to wire code 50 instead of 48; no authorization on the
+  txn + several admin surfaces; acks=0 Produce still answered on the wire;
+  InitProducerId v3+ ignoring the claimed producer id/epoch.
 - **Depends on**: [Phase 4](./book-phase-4-compat-core.md) (matrix + KIP index provide the
   link targets and the drift gate)
 - **Delivers as**: **2–3 commits** on `main` (the one exception to one-commit-per-milestone;

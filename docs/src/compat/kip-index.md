@@ -8,24 +8,23 @@ behaviour ships and is exercised by tests or the
 *missing*; non-goals get a rationale in [Non-goals](non-goals.md), not
 silence.
 
-> One correction relative to earlier planning documents: **KIP-516 is listed
-> as partial, not implemented.** The operator mints and preserves topic IDs
-> correctly, but the broker currently serves the all-zero sentinel on the
-> wire — see the [KIP-516 page](kip/kip-516.md).
+> Three corrections relative to earlier planning documents, all found by
+> source-verifying during the book build: **KIP-516, KIP-32, KIP-58, and
+> KIP-354 are partial, not implemented.** Topic IDs are minted but not
+> propagated to the wire; LogAppendTime and timestamp lookup don't exist;
+> and the two compaction knobs are config plumbing without an enforcing
+> compactor (no background cleaner runs at all — gh #158).
 
-## Implemented (15)
+## Implemented (12)
 
 | KIP | What it is | kaas page |
 |---|---|---|
 | KIP-13 | Per-broker client quotas (byte-rate throttling) | [KIP-13](kip/kip-13.md) |
-| KIP-32 | Record timestamps (`CreateTime` / `LogAppendTime`) | [KIP-32](kip/kip-32.md) |
-| KIP-58 | `min.compaction.lag.ms` compaction gate | [KIP-58](kip/kip-58.md) |
 | KIP-98 | Exactly-once: idempotent producer + transactions | [KIP-98](kip/kip-98.md) |
 | KIP-107 | `DeleteRecords` admin API (key 21) | [KIP-107](kip/kip-107.md) |
 | KIP-195 | `CreatePartitions` admin API (key 37) | [KIP-195](kip/kip-195.md) |
 | KIP-290 | Prefixed ACL resource patterns | [KIP-290](kip/kip-290.md) |
 | KIP-339 | `IncrementalAlterConfigs` (key 44) | [KIP-339](kip/kip-339.md) |
-| KIP-354 | Bounded tombstone retention (`delete.retention.ms`) | [KIP-354](kip/kip-354.md) |
 | KIP-360 | Producer epoch bump on re-initialization | [KIP-360](kip/kip-360.md) |
 | KIP-371 | mTLS principal mapping (`ssl.principal.mapping.rules`) | [KIP-371](kip/kip-371.md) |
 | KIP-447 | EOS v2: producer-scalable transactional offsets | [KIP-447](kip/kip-447.md) |
@@ -33,16 +32,19 @@ silence.
 | KIP-546 | Client-quota admin APIs (keys 48/49) | [KIP-546](kip/kip-546.md) |
 | KIP-800 | Join/leave reason strings | [KIP-800](kip/kip-800.md) |
 
-## Partial (6)
+## Partial (9)
 
 Each page leads with the "what's missing" block — these are the book's
 credibility test.
 
 | KIP | Landed | Missing | kaas page |
 |---|---|---|---|
+| KIP-32 | CreateTime timestamps round-trip byte-identically; batch `MaxTimestamp` tracked per segment | LogAppendTime entirely; timestamp→offset ListOffsets lookup (`(-1,-1)` sentinel) | [KIP-32](kip/kip-32.md) |
+| KIP-58 | `min.compaction.lag.ms` config plumbing (CR → `.config.json` → DescribeConfigs) | the compactor that would enforce it — no background cleaner runs (gh #158) | [KIP-58](kip/kip-58.md) |
 | KIP-101 | segment filenames carry the leader epoch | leader-epoch cache + lookup (`offset_for_leader_epoch` returns the `(-1,-1)` sentinel); wire key 23 unregistered | [KIP-101](kip/kip-101.md) |
 | KIP-219 | `throttle_time_ms` computed (debt-carry) and returned | the broker never mutes the channel after responding — throttling relies on client cooperation | [KIP-219](kip/kip-219.md) |
 | KIP-345 | `group.instance.id` plumbed through join/sync; static members survive the eviction sweep | `FENCED_INSTANCE_ID` fencing of duplicate static members | [KIP-345](kip/kip-345.md) |
+| KIP-354 | `delete.retention.ms` config plumbing | tombstone-expiry enforcement (same missing compactor); upstream's `max.compaction.lag.ms` doesn't exist anywhere | [KIP-354](kip/kip-354.md) |
 | KIP-394 | `MEMBER_ID_REQUIRED` error code defined | the v4+ two-step join handshake — `join()` still takes the legacy assign-inline path | [KIP-394](kip/kip-394.md) |
 | KIP-516 | operator mints `Status.TopicID` (v4 UUID, never rotated) | broker-side wire propagation — the production topic watch inserts the all-zero sentinel, so Metadata serves nil topic IDs | [KIP-516](kip/kip-516.md) |
 | KIP-554 | operator-side SCRAM credential rotation path | wire keys 50/51 entirely — no codec modules, no dispatch | [KIP-554](kip/kip-554.md) |
