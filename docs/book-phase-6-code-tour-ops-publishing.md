@@ -2,7 +2,17 @@
 
 Part of the [mdbook documentation plan](./book-plan.md) (§6, milestone 6).
 
-- **Status**: not started
+- **Status**: **done** (2026-07-20). Part III: workspace chapter + 14 crate/bin
+  chapters (written to current source truth, not the stale `//!` phase language —
+  several lib docs still carry it). Part IV: helm / storage / releasing (RELEASING.md
+  stays canonical, chapter links out) / performance (built on the 2026-07-15
+  head-to-head: kaas 3.7× Strimzi throughput at flushIntervalMessages=10000, honest
+  single-run + substrate caveats). Introduction + getting-started filled.
+  `docs-publish.yml` deploys on every push to `main`; Pages enabled via API
+  (`build_type=workflow`) at <https://woestebanaan.github.io/kaas/>; README +
+  ARCHITECTURE stub point at the live site. Also fixed while porting: chart README's
+  pre-rename `sk-controller` reference, its stale finalizer uninstall note (the
+  operator has no finalizers), and its pre-gh #126 listener values table.
 - **Depends on**: [Phase 5](./book-phase-5-kip-api-pages.md) (publishing an incomplete
   compatibility section would undercut the book's whole pitch)
 - **Delivers as**: one commit on `main` (publishing workflow may be a small follow-up commit

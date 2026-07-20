@@ -1,8 +1,13 @@
 # Documentation Book Plan — mdbook + mdbook-mermaid
 
-Status: **proposed** (not started). Fact-checked against the tree on 2026-07-18
-(`main`, post-`v0.2.3-preview`); per-phase execution breakdowns live in
-`docs/book-phase-{1..6}-*.md`.
+Status: **done** (all six phases landed 2026-07-19/20; published at
+<https://woestebanaan.github.io/kaas/>, rebuilt on every push to `main`).
+Per-phase execution breakdowns and their outcome notes live in
+`docs/book-phase-{1..6}-*.md`. Two standing deviations from the plan as
+written: the KIP index ships **12 implemented / 9 partial / 8 non-goals**
+(not 16/5/8 — KIP-32/58/354/516 were demoted to partial by source
+verification), and `check-docs-drift` additionally validates per-API anchors
+because mdbook-linkcheck 0.7.7 does not check fragments.
 
 > **Rename executed** (see [rename plan](./rename-plan.md)): the project renamed before
 > phase 1 so the book (published URL, README, every chapter) is born under the final name.

@@ -83,7 +83,7 @@ support `ReadWriteMany` and provide NFSv4-class semantics: atomic same-directory
 rename, fsync durability, and close-to-open consistency.
 
 Single-writer enforcement comes from epoch-prefixed segment filenames + the
-broker coordinator's ownership decision (see `crates/sk-controller`), so the
+broker coordinator's ownership decision (see `crates/kaas-controller`), so the
 StorageClass does not need to support `flock()`. Any RWX volume that meets
 NFSv4-class semantics works.
 
@@ -164,10 +164,10 @@ See `values.yaml` for the full set of tunables. Common overrides:
 | `storage.size` | 500Gi | PVC capacity |
 | `auth.enabled` | true | Enable credentials.json/acls.json loading |
 | `auth.requireSasl` | false | Reject non-SASL requests |
-| `auth.tls.enabled` | false | Bind TLS listener on port 9093 |
-| `listeners.external.enabled` | false | Enable per-broker external TLS listener |
-| `listeners.external.tls.clientCA.enabled` | false | Require every TLS client to present a cert (mTLS) |
-| `listeners.external.tls.clientCA.existingSecret` | `""` | Secret holding the CA bundle for client cert verification |
+| `listeners[]` | plain/external/authed | Strimzi-shape listener array (gh #126): per-entry `name`, `port`, `type`, `tls`, `authentication.type`, `enabled` — see values.yaml comments |
+| `authorization.type` | `""` | Cluster-wide authorization: `""` (off) or `simple` (ACL-based) |
+| `authorization.superUsers` | `[]` | Principals that bypass ACL evaluation |
+| `broker.flushIntervalMessages` | 1 | `KAAS_FLUSH_INTERVAL_MESSAGES` durability dial |
 | `broker.controllerLease.durationSeconds` | 15 | Cluster-controller Lease lifetime; lower = faster failover, more etcd writes |
 | `podDisruptionBudget.maxUnavailable` | 1 | Equivalent to Kafka min-ISR guarantee |
 
@@ -206,14 +206,8 @@ annotation). Delete it manually if you want to reclaim the storage:
 kubectl -n kafka delete pvc my-kaas-kaas-data
 ```
 
-**Note:** the `KafkaCluster` CR has a finalizer that the operator must
-process to clean up the cert-manager Certificate and Gateway TLSRoutes.
-Because `helm uninstall` deletes the operator Deployment in parallel
-with the `KafkaCluster` CR, the operator may terminate before the
-finalizer fires, leaving the CR stuck in `Terminating`. Delete the CR
-explicitly first:
-
-```bash
-kubectl -n kafka delete kafkacluster my-kaas --wait
-helm uninstall my-kaas -n kafka
-```
+**Note:** the operator uses **no cleanup finalizers** — deleting CRs never
+hangs on the operator being alive. Owned resources (Certificates, Services,
+TLSRoutes, credential Secrets) carry `OwnerReferences`, so Kubernetes GC
+removes them with their CR; on-disk leftovers are reclaimed by the
+operator's leader-elected startup sweep on its next start.

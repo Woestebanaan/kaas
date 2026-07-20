@@ -2,6 +2,24 @@
 
 Twelve library crates, two binaries, and an xtask runner — who depends on whom, and why the layering looks the way it does.
 
+The workspace root carries `Cargo.toml`, `rust-toolchain.toml` (pinned
+toolchain, auto-installed by rustup), `proto/` (the heartbeat gRPC schema),
+`deploy/` (Helm chart + generated CRDs), `scripts/` (the Apache shell-tool
+parity suite), and `docs/` (this book). `protoc` is vendored via the
+broker's build script — a fresh checkout needs nothing beyond rustup.
+
+The layering rule that shapes the graph: **`kaas-codec` knows nothing about
+storage, storage knows nothing about Kubernetes, and nothing below
+`kaas-broker` knows about request handling.** Wire bytes stay byte-opaque
+from codec through storage (the invariant Part II's
+[wire-protocol chapter](../compat/wire-protocol.md) documents), and the
+Kubernetes-facing crates (`kaas-k8s`, `kaas-operator-*`) sit off the hot
+path entirely ([runtime
+independence](../architecture/runtime-independence.md)).
+
+Each crate has its own short chapter in this part — what it owns, the
+invariants callers must hold, and where to start reading.
+
 ## Crate dependency graph
 
 An arrow reads "depends on". Verified against each crate's `Cargo.toml`
