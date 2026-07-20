@@ -43,6 +43,24 @@ operator:
 broker:
   replicaCount: 3
   clusterID: kaas-local
+  # gh #208 mitigation. During a rolling update the StatefulSet must
+  # observe a pod continuously Ready for this many seconds before it
+  # proceeds to the next pod. Today /readyz flips at listener-bind
+  # (~20 ms), well before the pod has taken over its assigned
+  # partitions, so without this the controller kills pod N+1 while
+  # pod N is still recovering — two brokers effectively out at once.
+  #
+  # Because the (dishonest) readiness lands the pod in the alive set
+  # immediately, the pod DOES get assigned and take over during this
+  # window — so the wait is what actually lets takeover finish before
+  # the next pod dies. A readiness flap (e.g. the probe timing out
+  # under takeover load) resets the timer, which is the intended
+  # behaviour. This is a mitigation, not the fix: honest readiness
+  # gated on takeover completion is the real work (gh #208).
+  #
+  # 60 s covers takeover of a normal partition set on healthy storage.
+  # Raise it on slow shared storage where recovery scans take longer.
+  minReadySeconds: 60
   ports:
     kafka: 9092
     tls: 9093
