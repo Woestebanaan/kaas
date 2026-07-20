@@ -617,6 +617,9 @@ pub fn read_batches(
     }
     let mut out = Vec::new();
     let mut header = [0u8; 12];
+    // Enough of the batch body to reach `lastOffsetDelta` (absolute
+    // bytes 23..27), which is what decides whether we want the batch.
+    let mut body_head = [0u8; 15];
     while out.len() < max_bytes {
         if f.read_exact(&mut header).is_err() {
             break;
@@ -631,20 +634,45 @@ pub fn read_batches(
             Ok(n) => n,
             Err(_) => break,
         };
-        let mut batch = vec![0u8; 12 + body_len];
-        batch[..12].copy_from_slice(&header);
-        if f.read_exact(&mut batch[12..]).is_err() {
+        // A body too short to carry lastOffsetDelta is a torn tail.
+        // (The pre-gh #209 code indexed batch[23..27] unconditionally
+        // and would panic here.)
+        if body_len < body_head.len() {
+            break;
+        }
+        if f.read_exact(&mut body_head).is_err() {
             break;
         }
         let mut o8 = [0u8; 8];
-        o8.copy_from_slice(&batch[0..8]);
+        o8.copy_from_slice(&header[0..8]);
         let base_offset = i64::from_be_bytes(o8);
         let mut d4 = [0u8; 4];
-        d4.copy_from_slice(&batch[23..27]);
+        d4.copy_from_slice(&body_head[11..15]);
         let last_offset_delta = i32::from_be_bytes(d4);
         let batch_last_offset = base_offset + i64::from(last_offset_delta);
+        let rest = body_len - body_head.len();
+
         if batch_last_offset < start_offset {
+            // gh #209: seek past the body instead of reading and
+            // heap-allocating it. Skipping used to cost a full read +
+            // `vec![0u8; 12 + body_len]` per batch, and because `out`
+            // never grew, the `out.len() < max_bytes` condition could
+            // not terminate the loop — a fetch near the log head read
+            // the entire segment before returning anything.
+            let Ok(rest_i64) = i64::try_from(rest) else {
+                break;
+            };
+            if f.seek(SeekFrom::Current(rest_i64)).is_err() {
+                break;
+            }
             continue;
+        }
+
+        let mut batch = vec![0u8; 12 + body_len];
+        batch[..12].copy_from_slice(&header);
+        batch[12..12 + body_head.len()].copy_from_slice(&body_head);
+        if f.read_exact(&mut batch[12 + body_head.len()..]).is_err() {
+            break;
         }
         out.extend_from_slice(&batch);
     }
@@ -1009,6 +1037,160 @@ mod tests {
         let got = read_batches(&fs, &log_path, 0, 2, max_bytes).unwrap();
         let expected: Vec<u8> = raws[2..].iter().flatten().copied().collect();
         assert_eq!(got, expected);
+    }
+
+    use std::sync::Arc;
+
+    /// Wraps [`RealFs`], counting bytes actually pulled off disk so a
+    /// test can assert read *amplification*, not just output bytes.
+    struct CountingFs {
+        inner: RealFs,
+        bytes: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    struct CountingRead {
+        inner: Box<dyn FileRead>,
+        bytes: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Read for CountingRead {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.bytes.fetch_add(
+                u64::try_from(n).unwrap_or(u64::MAX),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            Ok(n)
+        }
+    }
+    impl Seek for CountingRead {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+    impl FileRead for CountingRead {}
+
+    impl Fs for CountingFs {
+        fn open_read(&self, p: &Path) -> io::Result<Box<dyn FileRead>> {
+            Ok(Box::new(CountingRead {
+                inner: self.inner.open_read(p)?,
+                bytes: self.bytes.clone(),
+            }))
+        }
+        fn open_write(&self, p: &Path, append: bool) -> io::Result<Box<dyn crate::fs::FileWrite>> {
+            self.inner.open_write(p, append)
+        }
+        fn create(&self, p: &Path) -> io::Result<Box<dyn crate::fs::FileWrite>> {
+            self.inner.create(p)
+        }
+        fn fsync(&self, f: &mut dyn crate::fs::FileWrite) -> io::Result<()> {
+            self.inner.fsync(f)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn remove(&self, p: &Path) -> io::Result<()> {
+            self.inner.remove(p)
+        }
+        fn mkdir_all(&self, p: &Path) -> io::Result<()> {
+            self.inner.mkdir_all(p)
+        }
+        fn readdir(&self, p: &Path) -> io::Result<Vec<PathBuf>> {
+            self.inner.readdir(p)
+        }
+        fn stat(&self, p: &Path) -> io::Result<std::fs::Metadata> {
+            self.inner.stat(p)
+        }
+    }
+
+    /// gh #209: a fetch positioned near the end of a segment must not
+    /// materialise the batches it skips over. Before the fix,
+    /// `read_batches` heap-allocated and read the full body of every
+    /// skipped batch — and because `out` never grew while skipping,
+    /// the `out.len() < max_bytes` loop condition could not terminate
+    /// it, so the whole segment was read before anything was returned.
+    #[test]
+    fn read_batches_seeks_past_skipped_batches_instead_of_reading_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let fs = CountingFs {
+            inner: RealFs::new(),
+            bytes: counter.clone(),
+        };
+        let mut seg = ActiveSegment::create(&fs, tmp.path(), 0, 1).unwrap();
+        // 200 fat batches; the one we want is dead last.
+        let raws: Vec<Vec<u8>> = (0..200).map(|i| build_batch(i, 0, 1_000, 4_000)).collect();
+        for r in &raws {
+            seg.append_batch(r, 1 << 30).unwrap();
+        }
+        seg.sync_log().unwrap();
+        let log_path = seg.meta.log_path.clone();
+        seg.close_handles();
+        drop(seg);
+
+        let total: usize = raws.iter().map(Vec::len).sum();
+        counter.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // Read from the very last offset, without an index hint — the
+        // worst case, and exactly what kafbat-ui's `mode=LATEST` does.
+        let got = read_batches(&fs, &log_path, 0, 199, total + 100).unwrap();
+        assert_eq!(got, raws[199], "should return exactly the last batch");
+
+        let read = usize::try_from(counter.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(usize::MAX);
+        assert!(
+            read < total / 4,
+            "read {read} bytes to return {} — skipped bodies are still being read \
+             (segment is {total} bytes)",
+            got.len()
+        );
+    }
+
+    /// The skip path must not corrupt the batches it does return.
+    #[test]
+    fn read_batches_skip_path_preserves_batch_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = RealFs::new();
+        let mut seg = ActiveSegment::create(&fs, tmp.path(), 0, 1).unwrap();
+        // Varying body sizes so a mis-sized seek would desynchronise
+        // the reader and surface as garbage.
+        let raws: Vec<Vec<u8>> = (0..8)
+            .map(|i| build_batch(i, 0, 1_000, 16 + (usize::try_from(i).unwrap() * 37)))
+            .collect();
+        for r in &raws {
+            seg.append_batch(r, 1 << 30).unwrap();
+        }
+        seg.sync_log().unwrap();
+        let log_path = seg.meta.log_path.clone();
+        seg.close_handles();
+        drop(seg);
+
+        let total: usize = raws.iter().map(Vec::len).sum::<usize>() + 100;
+        for start in 0..8i64 {
+            let got = read_batches(&fs, &log_path, 0, start, total).unwrap();
+            let idx = usize::try_from(start).unwrap();
+            let expected: Vec<u8> = raws[idx..].iter().flatten().copied().collect();
+            assert_eq!(got, expected, "mismatch reading from offset {start}");
+        }
+    }
+
+    /// A torn tail too short to carry `lastOffsetDelta` must stop the
+    /// scan, not panic. The pre-fix code indexed `batch[23..27]`
+    /// unconditionally.
+    #[test]
+    fn read_batches_stops_on_body_too_short_for_last_offset_delta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = RealFs::new();
+        let log_path = tmp.path().join("00000000-00000000000000000000.log");
+        let mut bytes = build_batch(0, 0, 1_000, 32);
+        // Append a header claiming a 4-byte body, then only 4 bytes.
+        bytes.extend_from_slice(&0i64.to_be_bytes());
+        bytes.extend_from_slice(&4i32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        std::fs::write(&log_path, &bytes).unwrap();
+
+        let got = read_batches(&fs, &log_path, 0, 0, 1 << 20).unwrap();
+        assert_eq!(got, build_batch(0, 0, 1_000, 32));
     }
 
     #[test]

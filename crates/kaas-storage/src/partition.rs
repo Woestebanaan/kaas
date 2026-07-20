@@ -93,6 +93,77 @@ pub struct ReadSnapshot {
     pub active_meta: SegmentMeta,
 }
 
+/// Blocking half of [`Partition::read`] — runs on a `spawn_blocking`
+/// thread (gh #209).
+///
+/// Two things make this O(bytes returned) rather than O(bytes in the
+/// partition), and both were missing before gh #209:
+///
+/// 1. **Segments that cannot contain `effective_start` are skipped**
+///    outright. A closed segment covers `[base_offset, next_base)`,
+///    where `next_base` is the following segment's base — or the
+///    active segment's base for the last closed one.
+/// 2. **The offset index picks the start position.** `search_index`
+///    returns a file position at or before the target offset; passing
+///    `0` instead (the old behaviour) made `read_batches` walk the
+///    segment from byte zero. The `.index` files were written and
+///    fsynced on the append path and then never read.
+fn read_snapshot(
+    fs: &dyn Fs,
+    snap: &ReadSnapshot,
+    start_offset: i64,
+    max_bytes: usize,
+) -> Result<Bytes, StorageError> {
+    let effective_start = start_offset.max(snap.log_start);
+    let mut out = bytes::BytesMut::new();
+
+    for (i, seg) in snap.closed.iter().enumerate() {
+        if out.len() >= max_bytes {
+            break;
+        }
+        let next_base = snap
+            .closed
+            .get(i + 1)
+            .map_or(snap.active_meta.base_offset, |n| n.base_offset);
+        if next_base <= effective_start {
+            continue;
+        }
+        let pos = segment::search_index(fs, &seg.index_path, seg.base_offset, effective_start);
+        let chunk = segment::read_batches(
+            fs,
+            &seg.log_path,
+            pos,
+            effective_start,
+            max_bytes.saturating_sub(out.len()),
+        )?;
+        out.extend_from_slice(&chunk);
+    }
+
+    if out.len() < max_bytes {
+        let pos = segment::search_index(
+            fs,
+            &snap.active_meta.index_path,
+            snap.active_meta.base_offset,
+            effective_start,
+        );
+        let chunk = segment::read_batches(
+            fs,
+            &snap.active_meta.log_path,
+            pos,
+            effective_start,
+            max_bytes.saturating_sub(out.len()),
+        )?;
+        out.extend_from_slice(&chunk);
+    }
+
+    // Cap to max_bytes (read_batches may overshoot the last batch).
+    if out.len() > max_bytes {
+        out.truncate(max_bytes);
+    }
+
+    Ok(out.freeze())
+}
+
 struct PartitionInner {
     dir: PathBuf,
     active: ActiveSegment,
@@ -530,53 +601,18 @@ impl Partition {
         // Capture the segment list under the snapshot (lock-free) so
         // a concurrent roll doesn't move the active segment under us.
         let snap = self.snapshot.load_full();
-        let log_start = snap.log_start;
-        let effective_start = start_offset.max(log_start);
-
-        let mut out = bytes::BytesMut::new();
-
-        // Closed segments first.
-        for seg in snap.closed.iter() {
-            if out.len() >= max_bytes {
-                break;
-            }
-            // Skip segments whose last offset (== next base - 1) is
-            // entirely before the read start. We approximate "last
-            // offset" as just-before-the-next-segment's base; for the
-            // last closed segment we use HWM.
-            // Conservative path: read every segment with
-            // base_offset <= effective_start || effective_start <
-            // base_offset + segment_records. For Phase 2 simplicity,
-            // read from each segment that could contribute and let
-            // read_batches filter.
-            let chunk = segment::read_batches(
-                self.fs.as_ref(),
-                &seg.log_path,
-                0,
-                effective_start,
-                max_bytes.saturating_sub(out.len()),
-            )?;
-            out.extend_from_slice(&chunk);
-        }
-
-        // Active segment.
-        if out.len() < max_bytes {
-            let chunk = segment::read_batches(
-                self.fs.as_ref(),
-                &snap.active_meta.log_path,
-                0,
-                effective_start,
-                max_bytes.saturating_sub(out.len()),
-            )?;
-            out.extend_from_slice(&chunk);
-        }
-
-        // Cap to max_bytes (read_batches may overshoot the last batch).
-        if out.len() > max_bytes {
-            out.truncate(max_bytes);
-        }
-
-        Ok(out.freeze())
+        let fs = self.fs.clone();
+        // gh #209: segment reads are synchronous `std::io` against a
+        // (typically NFS) log file, with unbounded latency. Running
+        // them inline on a scheduler worker starved the whole runtime
+        // — with `limits.cpu: 2` tokio sizes the pool to two workers,
+        // so a single large fetch took the process off the air:
+        // no accepts, no /readyz, no background tasks.
+        tokio::task::spawn_blocking(move || {
+            read_snapshot(fs.as_ref(), &snap, start_offset, max_bytes)
+        })
+        .await
+        .map_err(|e| StorageError::Io(std::io::Error::other(e)))?
     }
 
     /// Advance the log-start offset to (at least) `target_offset`.
