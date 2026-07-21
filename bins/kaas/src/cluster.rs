@@ -51,7 +51,7 @@ use kaas_k8s::kube_watchers::{run_endpoint_watch, run_lease_watch, KubeLeaseEpoc
 use kaas_k8s::{BrokerIdentity, BrokerRegistry};
 use kaas_storage::StorageEngine;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use kaas_broker::TopicRegistry;
 
@@ -63,6 +63,11 @@ const CONTROLLER_LEASE_NAME: &str = "kaas-controller";
 /// `transaction.abort.timed.out.transaction.cleanup.interval.ms`
 /// default.
 const TXN_REAPER_INTERVAL: Duration = Duration::from_secs(10);
+
+/// gh #215: cadence of the takeover reconcile backstop. Fast enough to
+/// un-stick a rollout within a couple of ticks, slow enough not to
+/// churn — `take_over` is idempotent so an extra pass is cheap.
+const TAKEOVER_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// What was installed. Returned so `main.rs` can drop the handles
 /// on shutdown.
@@ -264,6 +269,36 @@ pub fn install(
             coordinator.on_assignment_change(takeover.as_handler());
             let group_takeover = GroupTakeoverDriver::new(manager.clone(), self_id.clone());
             coordinator.on_assignment_change(group_takeover.as_handler());
+
+            // gh #215: takeover reconcile backstop. on_assignment_change
+            // only re-fires take_over on an epoch change, so a transient
+            // failure (the gh #203 ENOENT race) is never retried — the
+            // partition stays unopened and, under honest readiness
+            // (gh #208), wedges the broker NotReady and stalls the
+            // rollout. This loop re-drives take_over for any
+            // assigned-but-unopened partition (idempotent — NFS rule 2).
+            {
+                let takeover_rec = takeover.clone();
+                let coord_rec = coordinator.clone();
+                let cancel_rec = cancel.clone();
+                tasks.push(tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(TAKEOVER_RECONCILE_INTERVAL);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tokio::select! {
+                            () = cancel_rec.cancelled() => break,
+                            _ = tick.tick() => {
+                                if let Some(a) = coord_rec.snapshot() {
+                                    let n = takeover_rec.reconcile(a.as_ref());
+                                    if n > 0 {
+                                        debug!(redriven = n, "takeover reconcile re-drove partitions");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
 
             tasks.push(coordinator.spawn_watcher());
             info!(
