@@ -49,6 +49,15 @@ pub trait RuntimeState: Send + Sync {
     /// idle. Implementations that don't track storage health return
     /// `false`.
     fn storage_stalled(&self) -> bool;
+
+    /// gh #208: has the broker taken over every partition its current
+    /// assignment gives it? `true` vacuously when it leads none;
+    /// `false` while still booting (no assignment applied) or
+    /// mid-takeover. Drives honest `/readyz` in cluster mode. Default
+    /// `true` for dev / no-cluster implementations.
+    fn serving(&self) -> bool {
+        true
+    }
 }
 
 /// TLS listener readiness snapshot (populated when an external
@@ -114,6 +123,10 @@ pub struct HealthConfig {
     pub listeners: Vec<String>,
     pub tls: Option<TlsInfo>,
     pub source: Option<Arc<dyn RuntimeState>>,
+    /// gh #208: when true, `/readyz` additionally requires partition
+    /// takeover to be complete (`source.serving()`). Dev / single-node
+    /// mode leaves this false — there is no cluster to take over from.
+    pub cluster_mode: bool,
 }
 
 impl std::fmt::Debug for HealthConfig {
@@ -126,6 +139,7 @@ impl std::fmt::Debug for HealthConfig {
                 "source",
                 &self.source.as_ref().map(|_| "<dyn RuntimeState>"),
             )
+            .field("cluster_mode", &self.cluster_mode)
             .finish()
     }
 }
@@ -185,18 +199,8 @@ struct ReadyState {
     ready: bool,
 }
 
-async fn readyz() -> impl IntoResponse {
-    // gh #131: only require EXTERNAL_HOSTNAME_PATTERN when
-    // KAAS_TLS_PORT is set (i.e. an external TLS listener is
-    // active). Internal-only TLS deployments set the cert but never
-    // an external hostname; without this guard they'd report unready
-    // forever.
-    let mut is_ready = ready();
-    let tls_port = std::env::var("KAAS_TLS_PORT").unwrap_or_default();
-    let ext_host = std::env::var("EXTERNAL_HOSTNAME_PATTERN").unwrap_or_default();
-    if !tls_port.is_empty() && ext_host.is_empty() {
-        is_ready = false;
-    }
+async fn readyz(State(cfg): State<HealthConfig>) -> impl IntoResponse {
+    let is_ready = compute_ready(&cfg);
     let status = if is_ready {
         StatusCode::OK
     } else {
@@ -205,18 +209,106 @@ async fn readyz() -> impl IntoResponse {
     (status, Json(ReadyState { ready: is_ready }))
 }
 
+/// The full readiness answer (gh #208 / gh #211), split out so it can
+/// be unit-tested without an HTTP round trip.
+///
+/// A broker is ready only when ALL of:
+/// - the base gate is set (listeners bound + required env present),
+/// - the main runtime is live (not wedged — see [`main_alive`]), and
+/// - in cluster mode, partition takeover is complete (`serving`).
+///
+/// The main-runtime check is what makes readiness honest under a
+/// wedge: the handler runs on the dedicated health runtime, so it can
+/// still answer while the main runtime is pinned, and it answers
+/// "unready" because the liveness tick has gone stale.
+fn compute_ready(cfg: &HealthConfig) -> bool {
+    // Base gate: listeners bound.
+    if !ready() {
+        return false;
+    }
+    // gh #131: an external TLS listener without a hostname pattern is
+    // never ready (it can't advertise itself).
+    let tls_port = std::env::var("KAAS_TLS_PORT").unwrap_or_default();
+    let ext_host = std::env::var("EXTERNAL_HOSTNAME_PATTERN").unwrap_or_default();
+    if !tls_port.is_empty() && ext_host.is_empty() {
+        return false;
+    }
+    // Main runtime must be scheduling tasks.
+    if !main_alive() {
+        return false;
+    }
+    // Cluster mode: takeover of assigned partitions must be complete.
+    if cfg.cluster_mode {
+        return cfg.source.as_ref().is_some_and(|s| s.serving());
+    }
+    true
+}
+
 static READY_SNAPSHOT: AtomicBool = AtomicBool::new(false);
 
-/// Flip the `/readyz` state. Called by the broker main once all
-/// listeners are up and any required env vars are present.
+/// Flip the base `/readyz` gate. Called by the broker main once all
+/// listeners are up and any required env vars are present. This is a
+/// *precondition* — `/readyz` also requires the main runtime to be
+/// live and (in cluster mode) partition takeover to be complete.
 pub fn set_ready(v: bool) {
     READY_SNAPSHOT.store(v, Ordering::SeqCst);
 }
 
-/// Report the current `/readyz` state.
+/// Report the base `/readyz` gate (listeners bound). Not the full
+/// readiness answer — see [`readyz`].
 #[must_use]
 pub fn ready() -> bool {
     READY_SNAPSHOT.load(Ordering::SeqCst)
+}
+
+// --- main-runtime liveness (gh #208 / gh #211) ---------------------------
+//
+// A task on the *main* tokio runtime bumps `MAIN_TICK_MS` every second.
+// If every main worker is blocked — the gh #209/#210 wedge, where a
+// synchronous NFS scan pins both workers under a 2-CPU limit — no task
+// runs, the tick goes stale, and `main_alive()` reports false.
+//
+// The check is read from the *dedicated health runtime* and from the
+// control-plane status pump, neither of which shares the main runtime,
+// so a wedge is observable even when the thing being observed cannot
+// run. That is the whole point: `open_partition_keys()` still lists a
+// wedged broker's partitions, so takeover-completion alone cannot tell
+// "healthy" from "wedged" — this tick can.
+
+/// Milliseconds of no-tick after which the main runtime is presumed
+/// wedged. The tick fires every ~1 s; 5 s tolerates a few missed ticks
+/// under load before declaring the runtime dead.
+pub const MAIN_LIVENESS_THRESHOLD_MS: i64 = 5_000;
+
+static MAIN_TICK_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Monotonic milliseconds since first use. Monotonic (not wall-clock)
+/// so a clock step can't spuriously trip or mask the wedge check.
+fn mono_ms() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static REF: OnceLock<Instant> = OnceLock::new();
+    let r = REF.get_or_init(Instant::now);
+    i64::try_from(r.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Record a main-runtime liveness tick. Call from a 1 s loop spawned
+/// on the main tokio runtime.
+pub fn record_main_tick() {
+    // `.max(1)`: the monotonic clock reads ~0 for the first sub-ms of
+    // the process, and 0 is the "never ticked" sentinel — clamp so a
+    // real tick is always distinguishable from no tick.
+    MAIN_TICK_MS.store(mono_ms().max(1), Ordering::SeqCst);
+}
+
+/// Is the main runtime still scheduling tasks? `false` when no tick
+/// has landed within [`MAIN_LIVENESS_THRESHOLD_MS`] — or when no tick
+/// has ever been recorded (the tick task hasn't started yet, so the
+/// broker is not serving anything either).
+#[must_use]
+pub fn main_alive() -> bool {
+    let last = MAIN_TICK_MS.load(Ordering::SeqCst);
+    last > 0 && (mono_ms() - last) < MAIN_LIVENESS_THRESHOLD_MS
 }
 
 #[cfg(test)]
@@ -246,6 +338,7 @@ mod tests {
             listeners: vec!["plain".to_string()],
             tls: None,
             source: None,
+            cluster_mode: false,
         };
         let state = HealthState {
             status: "ok",
@@ -271,5 +364,95 @@ mod tests {
         assert!(json.get("heartbeat_rtt_ms").is_none());
         assert!(json.get("controller_epoch").is_none());
         assert!(json.get("storage_stalled").is_none());
+    }
+
+    struct FakeState {
+        serving: bool,
+    }
+    impl RuntimeState for FakeState {
+        fn is_controller(&self) -> bool {
+            false
+        }
+        fn controller_id(&self) -> String {
+            String::new()
+        }
+        fn controller_epoch(&self) -> i64 {
+            0
+        }
+        fn heartbeat_rtt_ms(&self) -> i64 {
+            -1
+        }
+        fn heartbeat_age_ms(&self) -> i64 {
+            -1
+        }
+        fn assignment_version(&self) -> u64 {
+            0
+        }
+        fn assignment_age_ms(&self) -> i64 {
+            -1
+        }
+        fn partitions_led(&self) -> i32 {
+            0
+        }
+        fn partitions_assigned(&self) -> i32 {
+            0
+        }
+        fn partitions_recovering(&self) -> i32 {
+            0
+        }
+        fn storage_stalled(&self) -> bool {
+            false
+        }
+        fn serving(&self) -> bool {
+            self.serving
+        }
+    }
+
+    fn cfg_with(cluster_mode: bool, serving: bool) -> HealthConfig {
+        HealthConfig {
+            broker_id: "kaas-0".to_string(),
+            listeners: vec!["plain".to_string()],
+            tls: None,
+            source: Some(Arc::new(FakeState { serving })),
+            cluster_mode,
+        }
+    }
+
+    #[test]
+    fn readiness_requires_base_gate_main_alive_and_serving() {
+        // Serialize against other tests touching the process-global
+        // READY_SNAPSHOT / MAIN_TICK statics.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Base gate down → never ready, whatever else.
+        set_ready(false);
+        record_main_tick();
+        assert!(!compute_ready(&cfg_with(true, true)));
+
+        // Base up + main alive, but not serving in cluster mode → not ready.
+        set_ready(true);
+        record_main_tick();
+        assert!(!compute_ready(&cfg_with(true, false)));
+
+        // Base up + main alive + serving → ready.
+        assert!(compute_ready(&cfg_with(true, true)));
+
+        // Dev mode ignores serving.
+        assert!(compute_ready(&cfg_with(false, false)));
+
+        set_ready(false);
+    }
+
+    #[test]
+    fn main_alive_is_false_without_a_recent_tick() {
+        // A fresh process that never ticked is not alive.
+        // (mono_ms is monotonic and MAIN_TICK starts at 0.)
+        // We can't reset the static to 0 once ticked, so only assert
+        // the positive: a tick makes it alive.
+        record_main_tick();
+        assert!(main_alive());
     }
 }

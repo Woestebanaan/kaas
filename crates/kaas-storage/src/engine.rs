@@ -127,6 +127,23 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// Release write ownership.
     async fn relinquish(&self, topic: &str, partition: i32) -> Result<(), StorageError>;
 
+    /// Keys of the partitions this engine currently holds open — i.e.
+    /// the ones it has taken over (`take_over` opened; `relinquish`
+    /// closed). Used to compute the gh #208 "serving" readiness
+    /// signal: a broker is serving once every partition
+    /// `assignment.json` assigns to it appears here.
+    ///
+    /// NOTE this reflects "handles are open", not "requests are being
+    /// processed" — a wedged main runtime keeps its partitions open.
+    /// Wedge detection is a separate liveness signal (the main-runtime
+    /// tick); this method only answers "has takeover completed".
+    ///
+    /// Default returns empty (a fake that never takes anything over
+    /// holds nothing open).
+    fn open_partition_keys(&self) -> Vec<(String, i32)> {
+        Vec::new()
+    }
+
     /// SIGTERM-time drain: close every open partition so the next
     /// leader doesn't hit NFS silly-rename pain on takeover
     /// (gh #61 + gh #139). Default impl is a no-op — `MemoryStorage`

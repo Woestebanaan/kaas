@@ -310,6 +310,10 @@ impl StorageEngine for DiskStorageEngine {
         Ok(())
     }
 
+    fn open_partition_keys(&self) -> Vec<(String, i32)> {
+        self.iter_partition_keys()
+    }
+
     async fn drain(&self) -> Result<(), StorageError> {
         self.relinquish_all().await
     }

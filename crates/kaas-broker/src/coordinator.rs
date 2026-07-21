@@ -381,6 +381,30 @@ fn record_poll(change_detected: bool) {
     );
 }
 
+/// gh #208: has this broker taken over every partition the current
+/// assignment gives it?
+///
+/// - `true` vacuously when the broker is assigned no partitions.
+/// - `false` while no assignment has been applied yet (still booting).
+///
+/// This is the *serving* half of honest readiness — "is takeover
+/// complete". It is deliberately NOT a request-path liveness check: a
+/// wedged main runtime keeps its partitions open, so `open_partition_keys`
+/// still lists them. Pair this with the main-runtime liveness tick
+/// (`kaas_observability::health::main_alive`) for the full picture.
+#[must_use]
+pub fn is_serving(coordinator: &Coordinator, engine: &dyn kaas_storage::StorageEngine) -> bool {
+    let Some(a) = coordinator.snapshot() else {
+        return false;
+    };
+    let open: std::collections::HashSet<(String, i32)> =
+        engine.open_partition_keys().into_iter().collect();
+    a.partitions
+        .iter()
+        .filter(|p| p.broker == coordinator.self_id())
+        .all(|p| open.contains(&(p.topic.clone(), p.partition)))
+}
+
 /// Canonical `"topic/partition"` cache key used by both ownership
 /// and leader lookups.
 pub fn partition_key(topic: &str, partition: i32) -> String {

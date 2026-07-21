@@ -37,5 +37,5 @@ pub use balancer::{
     GroupSpec, TopicSpec,
 };
 pub use election::{LeaseElection, LocalElection};
-pub use heartbeat_server::{HeartbeatServer, HeartbeatService};
+pub use heartbeat_server::{BrokerLiveness, HeartbeatServer, HeartbeatService};
 pub use k8s_mirror::{CrMirror, NoopMirror};

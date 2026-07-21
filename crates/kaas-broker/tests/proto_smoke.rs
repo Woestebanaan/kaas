@@ -16,6 +16,7 @@ fn broker_status_is_constructible() {
             high_watermark: 0,
         }],
         active_groups: vec![],
+        healthy: true,
     };
     assert_eq!(status.broker_id, "kaas-0");
     assert_eq!(status.partitions.len(), 1);

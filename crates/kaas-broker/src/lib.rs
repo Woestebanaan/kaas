@@ -37,7 +37,8 @@ pub use broker::{Broker, BrokerNode, ClusterBrokerView};
 pub use cli::{Cli, ListenerEntry, TlsConfig as CliTlsConfig};
 pub use control_batch::build_control_batch;
 pub use coordinator::{
-    partition_key, Coordinator, HeartbeatSource, LeaseEpochSource, LocalHeartbeat, LocalLeaseEpoch,
+    is_serving, partition_key, Coordinator, HeartbeatSource, LeaseEpochSource, LocalHeartbeat,
+    LocalLeaseEpoch,
 };
 pub use fence_watcher::{FenceWatcher, ProducerEpochFencer, DEFAULT_POLL as FENCE_POLL_DEFAULT};
 pub use group_hash::{

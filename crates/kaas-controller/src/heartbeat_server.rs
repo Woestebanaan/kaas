@@ -44,6 +44,17 @@ const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(1);
 /// up the change via the 1 s file poll.
 const SEND_BUFFER: usize = 4;
 
+/// gh #208: a connected broker's liveness, as the controller sees it.
+#[derive(Debug, Clone)]
+pub struct BrokerLiveness {
+    pub id: String,
+    /// Latest reported `healthy` (main runtime scheduling tasks).
+    pub healthy: bool,
+    /// Has this broker ever reported `healthy=true`? False for an
+    /// image that predates the field — see [`ClientState::ever_healthy`].
+    pub ever_healthy: bool,
+}
+
 /// State the server keeps per connected broker.
 struct ClientState {
     send: mpsc::Sender<ControllerCommand>,
@@ -51,6 +62,16 @@ struct ClientState {
     last_seen_assignment_version: u64,
     active_groups: Vec<String>,
     last_broker_ts_ms: i64,
+    /// gh #208: latest `BrokerStatus.healthy` — is the broker's main
+    /// (request) runtime scheduling tasks?
+    healthy: bool,
+    /// Sticky: set once this broker has ever reported `healthy=true`.
+    /// A broker running an image that predates the `healthy` field
+    /// always reports false (proto3 default), so we must NOT treat its
+    /// false as "wedged" — only a broker that has proven it speaks the
+    /// field (ever_healthy) can be evicted for reporting false. This is
+    /// what keeps a rolling upgrade from reassigning every old broker.
+    ever_healthy: bool,
 }
 
 impl std::fmt::Debug for ClientState {
@@ -144,6 +165,27 @@ impl HeartbeatServer {
         self.clients.lock().keys().cloned().collect()
     }
 
+    /// gh #208: per-connected-broker liveness — `(id, healthy,
+    /// ever_healthy)`. The alive-set computation in `bins/kaas` uses
+    /// this to include booting brokers (healthy, not yet
+    /// EndpointSlice-ready) and exclude wedged ones (proven to speak
+    /// `healthy`, now reporting false) without depending on pod
+    /// readiness. See `BrokerLiveness`.
+    pub fn broker_liveness(&self) -> Vec<BrokerLiveness> {
+        self.clients
+            .lock()
+            .iter()
+            .map(|(id, st)| {
+                let s = st.lock();
+                BrokerLiveness {
+                    id: id.clone(),
+                    healthy: s.healthy,
+                    ever_healthy: s.ever_healthy,
+                }
+            })
+            .collect()
+    }
+
     /// Union of consumer-group IDs every connected broker reports
     /// in `BrokerStatus.active_groups`. Feeds the assignment loop's
     /// `GroupSource`.
@@ -220,6 +262,8 @@ impl ControllerHeartbeat for HeartbeatService {
             last_seen_assignment_version: first.last_seen_assignment_version,
             active_groups: first.active_groups.clone(),
             last_broker_ts_ms: first.timestamp_ms,
+            healthy: first.healthy,
+            ever_healthy: first.healthy,
         }));
         // Replace any prior stream for the same broker — reconnect
         // wins.
@@ -251,6 +295,10 @@ impl ControllerHeartbeat for HeartbeatService {
                 s.last_seen_assignment_version = msg.last_seen_assignment_version;
                 s.active_groups = msg.active_groups;
                 s.last_broker_ts_ms = msg.timestamp_ms;
+                s.healthy = msg.healthy;
+                if msg.healthy {
+                    s.ever_healthy = true;
+                }
             }
             // Remove this client on stream end, but only if we're
             // still the registered state — a reconnect during this

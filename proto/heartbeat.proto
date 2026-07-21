@@ -32,6 +32,22 @@ message BrokerStatus {
   // for assignment computation. Brokers populate this from the Manager's
   // in-memory group set.
   repeated string active_groups = 5;
+
+  // gh #208: is this broker's request-processing (main) runtime live?
+  // Bumped from a 1s tick task ON THE MAIN RUNTIME, so it goes false
+  // when every main worker is wedged (e.g. a synchronous NFS scan
+  // pinning both workers under a 2-CPU limit). The controller uses this
+  // as the liveness input to its alive-broker set instead of pod
+  // EndpointSlice readiness: a broker whose main runtime is dead must
+  // have its partitions reassigned even though its heartbeat — which
+  // runs on a separate control-plane runtime — is still connected.
+  //
+  // Distinct from "serving": a healthy booting broker reports
+  // healthy=true while it is still taking over (so it stays assignable),
+  // whereas a wedged broker reports healthy=false. Proto3 default is
+  // false, which is the safe reading for an old client that never sets
+  // it (treated as not-alive → its partitions move).
+  bool healthy = 6;
 }
 
 message PartitionStatus {

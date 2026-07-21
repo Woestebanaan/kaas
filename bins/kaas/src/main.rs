@@ -350,24 +350,70 @@ async fn main() -> Result<()> {
         // request, so wiring order vs cluster bring-up doesn't
         // matter — dev mode simply renders the zero-value shape.
         source: Some(Arc::new(BrokerRuntimeState(broker.clone()))),
+        // gh #208: gate /readyz on takeover completion whenever a data
+        // dir is configured (i.e. a Coordinator exists). Dev/in-memory
+        // mode (no data dir) skips the serving gate.
+        cluster_mode: cli.data_dir.is_some(),
     };
-    let health_cancel = cancel.clone();
-    tokio::spawn(async move {
-        let router = kaas_observability::health::health_router(health_cfg);
-        match tokio::net::TcpListener::bind(&health_addr).await {
-            Ok(listener) => {
-                info!(addr = %health_addr, "health server listening");
-                let _ = axum::serve(listener, router)
-                    .with_graceful_shutdown(async move { health_cancel.cancelled().await })
-                    .await;
-            }
-            Err(err) => warn!(%err, %health_addr, "health server bind failed"),
-        }
-    });
 
-    // Flip /readyz once the accept loop is up. The chart's
-    // readinessProbe gates on this. If a listener fails to bind, we
-    // never call this and the pod stays unready until SIGTERM.
+    // gh #211: run the health server on its OWN thread + current-thread
+    // runtime, never the main tokio runtime it reports on. A wedged
+    // main runtime (gh #209/#210) must still answer /readyz — and it
+    // answers "unready", because the main-liveness tick has gone stale.
+    let health_cancel = cancel.clone();
+    let health_thread = std::thread::Builder::new()
+        .name("kaas-health".to_owned())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(err) => {
+                    warn!(%err, "health runtime build failed; /readyz + /healthz DOWN");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let router = kaas_observability::health::health_router(health_cfg);
+                match tokio::net::TcpListener::bind(&health_addr).await {
+                    Ok(listener) => {
+                        info!(addr = %health_addr, "health server listening (dedicated runtime)");
+                        let _ = axum::serve(listener, router)
+                            .with_graceful_shutdown(async move { health_cancel.cancelled().await })
+                            .await;
+                    }
+                    Err(err) => warn!(%err, %health_addr, "health server bind failed"),
+                }
+            });
+        });
+    if let Err(err) = health_thread {
+        warn!(%err, "health server thread spawn failed; /readyz + /healthz DOWN");
+    }
+
+    // gh #208: main-runtime liveness tick. Bumps a monotonic timestamp
+    // every second FROM THE MAIN RUNTIME; if every main worker wedges,
+    // this task stops running and /readyz (read off the dedicated
+    // health runtime) reports unready. Spawned unconditionally so dev
+    // mode is live too.
+    {
+        let tick_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = tick_cancel.cancelled() => break,
+                    _ = tick.tick() => kaas_observability::record_main_tick(),
+                }
+            }
+        });
+    }
+
+    // Flip the base /readyz gate once the accept loop is up. Readiness
+    // now ALSO requires main-runtime liveness and (in cluster mode)
+    // takeover completion — see health::compute_ready. If a listener
+    // fails to bind we never call this and the pod stays unready.
     kaas_observability::set_ready(true);
 
     wait_for_shutdown_signal().await?;
@@ -847,6 +893,25 @@ impl kaas_observability::health::RuntimeState for BrokerRuntimeState {
             .unwrap_or(-1)
     }
     fn partitions_led(&self) -> i32 {
+        // gh #208: "led" now means *actually taken over* — assigned to
+        // us AND open in the engine — not merely assigned. Diverges
+        // from `partitions_assigned` while a takeover is mid-recovery.
+        let Some(c) = self.0.coordinator() else {
+            return 0;
+        };
+        let Some(a) = c.snapshot() else { return 0 };
+        let open: std::collections::HashSet<(String, i32)> =
+            self.0.engine.open_partition_keys().into_iter().collect();
+        i32::try_from(
+            a.partitions
+                .iter()
+                .filter(|p| p.broker == c.self_id())
+                .filter(|p| open.contains(&(p.topic.clone(), p.partition)))
+                .count(),
+        )
+        .unwrap_or(i32::MAX)
+    }
+    fn partitions_assigned(&self) -> i32 {
         let Some(c) = self.0.coordinator() else {
             return 0;
         };
@@ -859,17 +924,20 @@ impl kaas_observability::health::RuntimeState for BrokerRuntimeState {
         )
         .unwrap_or(i32::MAX)
     }
-    fn partitions_assigned(&self) -> i32 {
-        // Single-writer-per-partition: assigned == led (they diverge
-        // only while a takeover is mid-recovery).
-        self.partitions_led()
-    }
     fn partitions_recovering(&self) -> i32 {
-        0
+        // Assigned but not yet taken over.
+        (self.partitions_assigned() - self.partitions_led()).max(0)
     }
     fn storage_stalled(&self) -> bool {
         // The engine exposes stall only via per-append errors today;
         // the gh #95 healthz surface is still a follow-up.
         false
+    }
+    fn serving(&self) -> bool {
+        // gh #208: takeover of every assigned partition is complete.
+        match self.0.coordinator() {
+            Some(c) => kaas_broker::is_serving(&c, self.0.engine.as_ref()),
+            None => true, // dev / no-cluster: nothing to take over
+        }
     }
 }

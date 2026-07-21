@@ -232,6 +232,10 @@ impl HeartbeatClient {
             last_seen_assignment_version: 0,
             partitions: Vec::new(),
             active_groups: Vec::new(),
+            // gh #208: the controller registers this broker's health
+            // from the FIRST message, so carry it here rather than
+            // wait for the pump's first tick.
+            healthy: kaas_observability::main_alive(),
         };
         let _ = tx.try_send(initial);
         *self.outbox.lock() = Some(tx);
@@ -331,6 +335,7 @@ mod tests {
             last_seen_assignment_version: 0,
             partitions: Vec::new(),
             active_groups: Vec::new(),
+            healthy: false,
         });
         assert!(r.is_err());
     }

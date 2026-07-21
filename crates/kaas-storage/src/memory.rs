@@ -250,6 +250,10 @@ impl StorageEngine for MemoryStorage {
     async fn relinquish(&self, _topic: &str, _partition: i32) -> Result<(), StorageError> {
         Ok(())
     }
+
+    fn open_partition_keys(&self) -> Vec<(String, i32)> {
+        self.partitions.iter().map(|kv| kv.key().clone()).collect()
+    }
 }
 
 #[cfg(test)]
