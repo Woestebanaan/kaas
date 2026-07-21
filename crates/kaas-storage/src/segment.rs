@@ -194,10 +194,27 @@ pub fn parse_batch_offsets(raw: &[u8]) -> Result<(i64, i32, i64), io::Error> {
 /// [`BufReader`] so NFS substrates open large logs in MB/s, not
 /// RPCs/s.
 pub fn scan_high_watermark<R: Read + Seek>(f: &mut R, segment_base_offset: i64) -> io::Result<i64> {
-    f.seek(SeekFrom::Start(0))?;
+    // Whole-segment scan: start at byte 0, seed the running HWM with
+    // the segment's base offset (an empty segment has HWM == base).
+    scan_high_watermark_from(f, 0, segment_base_offset)
+}
+
+/// Like [`scan_high_watermark`] but resumes a partial scan: start at
+/// byte `start_byte` (a batch boundary the recovery checkpoint recorded
+/// as fsynced) with the running HWM seeded to `start_hwm` (the
+/// log-end-offset at that boundary). Everything before `start_byte` is
+/// trusted; only the tail is read. gh #recovery-checkpoint turns
+/// takeover recovery from O(active segment) into O(bytes since the last
+/// checkpoint).
+pub fn scan_high_watermark_from<R: Read + Seek>(
+    f: &mut R,
+    start_byte: u64,
+    start_hwm: i64,
+) -> io::Result<i64> {
+    f.seek(SeekFrom::Start(start_byte))?;
     let mut br = BufReader::with_capacity(SCAN_HWM_BUF_SIZE, f);
 
-    let mut hwm = segment_base_offset;
+    let mut hwm = start_hwm;
     let mut header = [0u8; 12];
     let mut body_head = [0u8; 16];
 
@@ -877,6 +894,43 @@ mod tests {
         let mut f = std::fs::File::open(&log_path).unwrap();
         let hwm = scan_high_watermark(&mut f, 0).unwrap();
         assert_eq!(hwm, 2, "torn batch 2 dropped; HWM points just past batch 1");
+    }
+
+    /// gh #recovery-checkpoint: resuming the scan from a mid-log byte
+    /// position (with the HWM seed for that boundary) yields the same
+    /// answer as a full scan — and a checkpoint at EOF reads nothing.
+    #[test]
+    fn scan_from_checkpoint_matches_full_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = RealFs::new();
+        let mut seg = ActiveSegment::create(&fs, tmp.path(), 0, 1).unwrap();
+        let mut pos_after_2 = 0u64;
+        for offset in 0..5i64 {
+            seg.append_batch(&build_batch(offset, 0, 1_000, 32), 4096)
+                .unwrap();
+            if offset == 2 {
+                pos_after_2 = seg.log_size();
+            }
+        }
+        seg.sync_log().unwrap();
+        let log_path = seg.meta.log_path.clone();
+        let eof = seg.log_size();
+        seg.close_handles();
+        drop(seg);
+
+        // Baseline: full scan from byte 0.
+        let mut f = std::fs::File::open(&log_path).unwrap();
+        let full = scan_high_watermark(&mut f, 0).unwrap();
+        assert_eq!(full, 5);
+
+        // Resume after batch 2 (HWM there = 3) → same result, tail only.
+        let mut f = std::fs::File::open(&log_path).unwrap();
+        let resumed = scan_high_watermark_from(&mut f, pos_after_2, 3).unwrap();
+        assert_eq!(resumed, full, "checkpoint resume must equal full scan");
+
+        // Checkpoint at EOF (HWM 5) → nothing to read, returns the seed.
+        let mut f = std::fs::File::open(&log_path).unwrap();
+        assert_eq!(scan_high_watermark_from(&mut f, eof, 5).unwrap(), 5);
     }
 
     #[test]

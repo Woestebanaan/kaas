@@ -50,8 +50,17 @@ use crate::idempotence::{
 };
 use crate::manifest::{self, Manifest, ReadResult};
 use crate::producer_snapshot::{read_producer_snapshot, write_producer_snapshot};
+use crate::recovery_checkpoint::{self, RecoveryCheckpoint};
 use crate::segment::{self, parse_batch_offsets, ActiveSegment, SegmentMeta};
 use crate::txn_index::{AbortedTxn, AbortedTxnIndex, OpenTxnIndex};
+
+/// gh #recovery-checkpoint: the committer writes a fresh recovery
+/// checkpoint once the fsynced log has grown this far past the last one.
+/// Bounds crash-recovery scan to at most this many bytes; a clean close
+/// checkpoints at EOF regardless, so graceful restarts re-scan nothing.
+/// 64 MiB keeps checkpoint writes rare (one per 64 MiB of throughput)
+/// while capping the worst-case re-scan at ~64 MiB.
+const CHECKPOINT_INTERVAL_BYTES: i64 = 64 * 1024 * 1024;
 
 /// Per-partition tuning knobs.
 #[derive(Debug, Clone)]
@@ -220,20 +229,34 @@ fn open_blocking(fs: &dyn Fs, dir: &std::path::Path) -> Result<OpenedState, Stor
         ActiveSegment::create(fs, dir, hwm, epoch)?
     };
 
-    // Recover: scan the active segment forward from its base
-    // offset, stopping at the first torn batch. The log file is
-    // authoritative; the manifest is best-effort.
+    // Recover the high-watermark by scanning the active segment
+    // forward, stopping at the first torn batch. The log is
+    // authoritative; the manifest HWM is best-effort and the scan
+    // result overrides it (advancing when the manifest lagged, or
+    // rewinding a phantom HWM the manifest claimed but the log
+    // doesn't back).
     //
-    // - `recovered_hwm > manifest_hwm`: manifest was lagging the
-    //   log (normal — the manifest is rewritten only on roll /
-    //   close / takeover). Advance to the real value.
-    // - `recovered_hwm < manifest_hwm`: phantom HWM. Manifest
-    //   claims durable records that aren't actually in the log
-    //   (operator hand-deleted segments, partial roll). Rewind
-    //   so we never serve nonexistent offsets.
+    // gh #recovery-checkpoint: if a durable checkpoint refers to *this*
+    // active segment and its byte position is within the log, resume
+    // the scan from there — everything before it was fsynced and is
+    // trusted, so a graceful restart (checkpoint at EOF) reads nothing.
+    // Otherwise — no checkpoint, or a roll happened since it was
+    // written, or the log was truncated below it — fall back to a full
+    // scan of the active segment, which is always correct and, with a
+    // bounded segment size, cheap.
+    let (scan_start, scan_seed) = match recovery_checkpoint::read(fs, dir) {
+        Some(cp)
+            if cp.segment_base == active.meta.base_offset
+                && cp.byte_pos >= 0
+                && u64::try_from(cp.byte_pos).unwrap_or(u64::MAX) <= active.log_size() =>
+        {
+            (u64::try_from(cp.byte_pos).unwrap_or(0), cp.high_watermark)
+        }
+        _ => (0, active.meta.base_offset),
+    };
     let hwm = {
         let mut f = fs.open_read(&active.meta.log_path)?;
-        segment::scan_high_watermark(&mut f, active.meta.base_offset)?
+        segment::scan_high_watermark_from(&mut f, scan_start, scan_seed)?
     };
 
     // Restore the idempotence window.
@@ -283,6 +306,12 @@ struct PartitionInner {
     /// on send (not on completion) so we don't enqueue redundant
     /// flushes for the same batch tail.
     pending_flush_records: i64,
+    /// gh #recovery-checkpoint: byte position of the active segment
+    /// covered by the most recently written recovery checkpoint. The
+    /// committer writes a new checkpoint once the fsynced log has grown
+    /// [`CHECKPOINT_INTERVAL_BYTES`] past this, bounding how much of the
+    /// tail a crash has to re-scan.
+    last_checkpoint_byte: i64,
     /// Monotonic counter incremented every time append decides to
     /// trigger a flush. Each appender's local copy of this value is
     /// what `acks=all` waits on `completed_flush_seq` to cover.
@@ -385,6 +414,7 @@ impl Partition {
             high_water: hwm,
             epoch,
             pending_flush_records: 0,
+            last_checkpoint_byte: 0,
             requested_flush_seq: 0,
             completed_flush_seq: 0,
             flush_err: None,
@@ -400,8 +430,13 @@ impl Partition {
         let (req_tx, req_rx) = mpsc::channel::<()>(1);
         let cond = Arc::new(Notify::new());
 
-        let committer_handle =
-            spawn_committer(inner.clone(), cond.clone(), req_rx, cfg.fsync_max_latency);
+        let committer_handle = spawn_committer(
+            inner.clone(),
+            cond.clone(),
+            req_rx,
+            cfg.fsync_max_latency,
+            fs.clone(),
+        );
 
         Ok(Self {
             inner,
@@ -440,7 +475,29 @@ impl Partition {
         {
             let mut guard = self.inner.lock();
             persist_state_locked(self.fs.as_ref(), &mut guard)?;
+            // gh #recovery-checkpoint: sync the log tail and checkpoint
+            // the whole active segment as durable, so the next open
+            // (this broker or the next leader, off the shared volume)
+            // re-scans nothing — the graceful-restart fast path. Only
+            // on a successful sync; if the log can't be flushed, skip
+            // the checkpoint and let the next open fall back to a scan.
+            let checkpoint = if guard.active.sync_log().is_ok() {
+                let durable = i64::try_from(guard.active.log_size()).unwrap_or(i64::MAX);
+                guard.last_checkpoint_byte = durable;
+                Some(RecoveryCheckpoint {
+                    segment_base: guard.active.meta.base_offset,
+                    byte_pos: durable,
+                    high_watermark: guard.high_water,
+                })
+            } else {
+                None
+            };
+            let dir = guard.dir.clone();
             guard.active.close_handles();
+            drop(guard);
+            if let Some(cp) = checkpoint {
+                let _ = recovery_checkpoint::write(self.fs.as_ref(), &dir, &cp);
+            }
         }
 
         // Drop the channel sender via Arc/internal swap... can't,
@@ -878,6 +935,7 @@ fn spawn_committer(
     cond: Arc<Notify>,
     mut req_rx: mpsc::Receiver<()>,
     fsync_max_latency: Duration,
+    fs: Arc<dyn Fs>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while req_rx.recv().await.is_some() {
@@ -890,9 +948,40 @@ fn spawn_committer(
             }
 
             let inner_clone = inner.clone();
-            let fsync_handle = tokio::task::spawn_blocking(move || {
-                let mut guard = inner_clone.lock();
-                guard.active.sync_log().map(|()| guard.requested_flush_seq)
+            let fs_c = fs.clone();
+            let fsync_handle = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
+                // Sync under the lock, then decide whether a fresh
+                // recovery checkpoint is due — but write it OFF the lock
+                // so the tmp+rename doesn't stall appenders.
+                let (seq, checkpoint) = {
+                    let mut guard = inner_clone.lock();
+                    guard.active.sync_log()?;
+                    let seq = guard.requested_flush_seq;
+                    let durable = i64::try_from(guard.active.log_size()).unwrap_or(i64::MAX);
+                    let cp = if durable.saturating_sub(guard.last_checkpoint_byte)
+                        >= CHECKPOINT_INTERVAL_BYTES
+                    {
+                        // Advance optimistically: a failed write just
+                        // defers the next attempt one interval, and
+                        // recovery falls back to a full scan regardless.
+                        guard.last_checkpoint_byte = durable;
+                        Some((
+                            RecoveryCheckpoint {
+                                segment_base: guard.active.meta.base_offset,
+                                byte_pos: durable,
+                                high_watermark: guard.high_water,
+                            },
+                            guard.dir.clone(),
+                        ))
+                    } else {
+                        None
+                    };
+                    (seq, cp)
+                };
+                if let Some((cp, dir)) = checkpoint {
+                    let _ = recovery_checkpoint::write(fs_c.as_ref(), &dir, &cp);
+                }
+                Ok(seq)
             });
 
             let outcome = tokio::time::timeout(fsync_max_latency, fsync_handle).await;
@@ -1549,6 +1638,98 @@ mod tests {
                 .unwrap();
             assert_eq!(p2.high_watermark(), 5);
             assert_eq!(p2.log_start_offset(), 2);
+            p2.close().await.unwrap();
+        });
+    }
+
+    /// gh #recovery-checkpoint: a clean close checkpoints the active
+    /// segment at EOF, and reopen recovers the HWM from it.
+    #[test]
+    fn close_writes_checkpoint_at_eof_and_reopen_recovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs.clone(),
+                "t".into(),
+                0,
+                dir.clone(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            for _ in 0..5 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            p.close().await.unwrap();
+
+            // The checkpoint exists, sits at EOF, and carries the HWM.
+            let cp = recovery_checkpoint::read(fs.as_ref(), &dir)
+                .expect("clean close writes a recovery checkpoint");
+            assert_eq!(cp.high_watermark, 5);
+            assert_eq!(cp.segment_base, 0);
+            let log_len = std::fs::metadata(dir.join("00000000-00000000000000000000.log"))
+                .unwrap()
+                .len();
+            assert_eq!(
+                u64::try_from(cp.byte_pos).unwrap(),
+                log_len,
+                "checkpoint at EOF"
+            );
+
+            let p2 = Partition::open(fs, "t".into(), 0, dir.clone(), PartitionConfig::default())
+                .await
+                .unwrap();
+            assert_eq!(p2.high_watermark(), 5);
+            p2.close().await.unwrap();
+        });
+    }
+
+    /// The checkpoint guard: a checkpoint that names a *different*
+    /// active segment is ignored, and recovery falls back to a correct
+    /// full scan.
+    #[test]
+    fn stale_checkpoint_for_other_segment_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs.clone(),
+                "t".into(),
+                0,
+                dir.clone(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            for _ in 0..3 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            p.close().await.unwrap();
+
+            // Poison the checkpoint: claim a segment base that doesn't
+            // match, with a bogus HWM. Recovery must ignore it.
+            recovery_checkpoint::write(
+                fs.as_ref(),
+                &dir,
+                &RecoveryCheckpoint {
+                    segment_base: 999,
+                    byte_pos: 0,
+                    high_watermark: 12345,
+                },
+            )
+            .unwrap();
+
+            let p2 = Partition::open(fs, "t".into(), 0, dir.clone(), PartitionConfig::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                p2.high_watermark(),
+                3,
+                "fell back to a full scan, not the bogus HWM"
+            );
             p2.close().await.unwrap();
         });
     }

@@ -30,6 +30,7 @@ pub mod manifest;
 pub mod memory;
 pub mod partition;
 pub mod producer_snapshot;
+pub mod recovery_checkpoint;
 pub mod segment;
 pub mod topicconfig;
 pub mod txn_index;
@@ -52,8 +53,8 @@ pub use producer_snapshot::{
 };
 pub use segment::{
     legacy_segment_log_path, list_segments, parse_batch_offsets, parse_segment_stem, read_batches,
-    scan_high_watermark, search_index, search_index_bytes, segment_index_path, segment_log_path,
-    ActiveSegment, RolledTail, SegmentMeta, INDEX_ENTRY_SIZE,
+    scan_high_watermark, scan_high_watermark_from, search_index, search_index_bytes,
+    segment_index_path, segment_log_path, ActiveSegment, RolledTail, SegmentMeta, INDEX_ENTRY_SIZE,
 };
 pub use topicconfig::{read_topic_config, write_topic_config, TopicConfigFile};
 pub use txn_index::{AbortedTxn, AbortedTxnIndex, OpenTxnIndex};
