@@ -25,14 +25,45 @@ use crate::errors::ControllerError;
 /// fence_log/, __consumer_offsets/). The topic sweep MUST skip it.
 const CLUSTER_FILES_DIR: &str = "__cluster";
 
-/// Remove `/data/<topic>/` directories that no longer have a
-/// matching `KafkaTopic` CR. Returns the names removed, sorted for
-/// deterministic logging.
+/// Prefix for a topic directory that has been atomically renamed aside
+/// for deletion (gh #203). The `KafkaTopic` reconciler's NotFound path
+/// renames `<data_dir>/<topic>` → `<data_dir>/.deleting-<topic>.<n>`
+/// (a single same-parent rename — the one atomic NFS primitive) so the
+/// destructive `remove_dir_all` never runs on the live path a broker
+/// might be mid-`Partition::open` on. The sweep is what actually
+/// reclaims these: it retries their removal every pass, which also
+/// mops up any that couldn't be removed inline because a broker still
+/// held an FD (gh #76). The leading `.` keeps them out of the
+/// orphan-topic keep-set logic.
+pub const STAGED_DELETE_PREFIX: &str = ".deleting-";
+
+/// Outcome of a topic-sweep pass.
+///
+/// gh #205 / NFS rule 2 (see `docs/src/architecture/nfs-substrate.md`):
+/// a single un-removable directory must NOT abort the whole pass. A
+/// `remove_dir_all` can fail with `ENOTEMPTY` while a broker still
+/// holds an FD inside it (the gh #76 silly-rename window); that dir
+/// goes into `failed` and a later pass retries it once the handles
+/// close, while every other orphan is still reclaimed this pass.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Directories successfully removed this pass, sorted.
+    pub removed: Vec<String>,
+    /// Directories that could not be removed this pass (retried
+    /// later), sorted.
+    pub failed: Vec<String>,
+}
+
+/// Remove `/data/<topic>/` directories that no longer have a matching
+/// `KafkaTopic` CR. Per-directory failures are collected into
+/// [`SweepReport::failed`] rather than aborting the pass. The outer
+/// `Err` is reserved for failures that make the whole pass impossible
+/// (listing CRs, reading the data dir).
 pub async fn sweep_topics(
     client: &Client,
     namespace: &str,
     data_dir: &Path,
-) -> Result<Vec<String>, ControllerError> {
+) -> Result<SweepReport, ControllerError> {
     let api: Api<KafkaTopic> = Api::namespaced(client.clone(), namespace);
     let topics =
         kaas_observability::record_k8s_call("List", "KafkaTopic", api.list(&ListParams::default()))
@@ -47,13 +78,24 @@ pub async fn sweep_topics(
         keep.insert(t.effective_topic_name().to_string());
     }
 
+    reclaim_orphan_dirs(data_dir, &keep)
+}
+
+/// Remove every immediate child directory of `data_dir` whose name is
+/// not in `keep`. Per-directory failures land in [`SweepReport::failed`]
+/// (gh #205 — never aborts the pass); a missing `data_dir` is an empty
+/// report, not an error.
+fn reclaim_orphan_dirs(
+    data_dir: &Path,
+    keep: &HashSet<String>,
+) -> Result<SweepReport, ControllerError> {
     let entries = match std::fs::read_dir(data_dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SweepReport::default()),
         Err(e) => return Err(ControllerError::Io(e)),
     };
 
-    let mut removed = Vec::new();
+    let mut report = SweepReport::default();
     for entry in entries.flatten() {
         let Ok(meta) = entry.file_type() else {
             continue;
@@ -64,18 +106,32 @@ pub async fn sweep_topics(
         let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
             continue;
         };
+        if name.starts_with(STAGED_DELETE_PREFIX) {
+            // gh #203: a topic dir renamed aside for deletion. Always
+            // retry its removal — it has no CR and is never a topic.
+            remove_orphan(&entry.path(), name, &mut report);
+            continue;
+        }
         if name.starts_with('.') || keep.contains(&name) {
             continue;
         }
-        let path = entry.path();
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => removed.push(name),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(ControllerError::Io(e)),
-        }
+        remove_orphan(&entry.path(), name, &mut report);
     }
-    removed.sort();
-    Ok(removed)
+    report.removed.sort();
+    report.failed.sort();
+    Ok(report)
+}
+
+/// `remove_dir_all` one orphan, folding the outcome into `report`.
+/// gh #205: a failure (ENOTEMPTY while a broker holds an FD, gh #76)
+/// is recorded in `failed`, never aborts the pass — a later pass
+/// retries once the handles close.
+fn remove_orphan(path: &Path, name: String, report: &mut SweepReport) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => report.removed.push(name),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_e) => report.failed.push(name),
+    }
 }
 
 /// Remove entries from `credentials.json` whose `KafkaUser` CR no
@@ -124,7 +180,7 @@ mod tests {
     // We still want a smoke test for `sweep_topics`' filesystem
     // walk + the `__cluster` skip; isolate that path by calling the
     // internal helper directly.
-    use super::CLUSTER_FILES_DIR;
+    use super::{SweepReport, CLUSTER_FILES_DIR, STAGED_DELETE_PREFIX};
     use std::collections::HashSet;
     use std::fs;
 
@@ -198,5 +254,78 @@ mod tests {
             std::fs::read_dir(&missing),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound
         ));
+    }
+
+    /// gh #203: `.deleting-*` staged dirs are always reclaimed by the
+    /// sweep (they have no CR and are never in the keep-set), so a
+    /// staged delete that couldn't finish inline is retried here.
+    #[test]
+    fn reclaim_removes_staged_delete_dirs_regardless_of_keep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(format!("{STAGED_DELETE_PREFIX}old-topic.123"))).unwrap();
+        fs::create_dir(root.join(".hidden")).unwrap(); // other dot-dir: skipped
+        fs::create_dir(root.join("keep-me")).unwrap();
+
+        let mut keep = HashSet::new();
+        keep.insert("keep-me".to_string());
+
+        let report = super::reclaim_orphan_dirs(root, &keep).unwrap();
+        assert_eq!(
+            report.removed,
+            vec![format!("{STAGED_DELETE_PREFIX}old-topic.123")]
+        );
+        assert!(
+            root.join(".hidden").exists(),
+            "non-staged dot-dir untouched"
+        );
+        assert!(root.join("keep-me").exists());
+    }
+
+    #[test]
+    fn reclaim_missing_data_dir_is_empty_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope");
+        assert_eq!(
+            super::reclaim_orphan_dirs(&missing, &HashSet::new()).unwrap(),
+            SweepReport::default()
+        );
+    }
+
+    /// gh #205: one un-removable directory must not abort the pass —
+    /// it lands in `failed` while the others are still reclaimed.
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_isolates_a_failed_dir_and_still_removes_the_rest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join("keep-me")).unwrap();
+        fs::create_dir(root.join("orphan-ok")).unwrap();
+
+        // Make "orphan-locked" un-removable: a child under a dir with
+        // no write permission → remove_dir_all can't unlink the child.
+        let locked = root.join("orphan-locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("child"), b"x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut keep = HashSet::new();
+        keep.insert("keep-me".to_string());
+
+        let report = super::reclaim_orphan_dirs(root, &keep).unwrap();
+
+        // Restore perms so tempdir cleanup succeeds regardless.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(report.removed, vec!["orphan-ok"]);
+        assert_eq!(report.failed, vec!["orphan-locked"]);
+        assert!(root.join("keep-me").exists(), "keep-set survives");
+        assert!(!root.join("orphan-ok").exists(), "removable orphan is gone");
+        assert!(
+            root.join("orphan-locked").exists(),
+            "failed orphan is left for a later pass"
+        );
     }
 }

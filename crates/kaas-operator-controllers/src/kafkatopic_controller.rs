@@ -152,22 +152,27 @@ impl KafkaTopicReconciler {
         Ok(Action::requeue(Duration::from_secs(300)))
     }
 
-    /// NotFound branch: remove the topic dir best-effort.
+    /// NotFound branch: reclaim the topic dir.
     ///
-    /// We only have `metadata.name` here (the watch's tombstone
-    /// carries that, never `spec.topic_name`). For the common case
-    /// where `metadata.name == effective_topic_name`, the directory
-    /// is at `<data_dir>/<name>` and `remove_dir_all` succeeds.
-    /// For gh #86 synthetic-name CRs the directory is at the
-    /// `spec.topic_name` path which we no longer know — the
-    /// `sweep_topics` startup pass catches those.
+    /// gh #203 / NFS rule 1+3 (see `docs/src/architecture/nfs-substrate.md`):
+    /// do NOT `remove_dir_all` the live `<data_dir>/<name>` path — a
+    /// broker may be mid-`Partition::open` on it, and a concurrent
+    /// recursive delete races its file opens into ENOENT. Instead
+    /// **atomically rename** the dir aside to
+    /// `<data_dir>/.deleting-<name>.<nanos>` (a same-parent rename is
+    /// the one atomic NFS primitive), then recurse on the staged copy,
+    /// which no broker will ever open. If a broker still holds an FD
+    /// the inline `remove_dir_all` may leave `.nfsXXXX` entries — that
+    /// is fine: the staged dir is retried by the resumable
+    /// [`sweep_topics`](crate::sweep::sweep_topics) pass once handles
+    /// close.
+    ///
+    /// We only have `metadata.name` here (the watch's tombstone carries
+    /// that, never `spec.topic_name`). For gh #86 synthetic-name CRs
+    /// the directory is at the `spec.topic_name` path we no longer
+    /// know — the sweep catches those.
     pub fn handle_not_found(&self, name: &str) -> Result<(), ControllerError> {
-        let path = self.data_dir.join(name);
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(ControllerError::Io(e)),
-        }
+        stage_and_delete_topic_dir(&self.data_dir, name)
     }
 
     async fn patch_status(
@@ -242,11 +247,89 @@ pub fn topic_dir_for(data_dir: &Path, topic: &KafkaTopic) -> PathBuf {
     data_dir.join(topic.effective_topic_name())
 }
 
+/// gh #203: reclaim a deleted topic's directory without racing a
+/// broker's `Partition::open`.
+///
+/// Atomically renames `<data_dir>/<name>` aside to a
+/// `.deleting-<name>.<nanos>` sibling (a same-parent rename is the one
+/// atomic NFS primitive), then best-effort recurses on the staged
+/// copy — which no broker will ever open. The destructive
+/// `remove_dir_all` therefore never runs on the live path. Any staged
+/// dir the inline delete can't finish (FDs still held, gh #76) is
+/// retried by the resumable sweep. See
+/// `docs/src/architecture/nfs-substrate.md`.
+pub(crate) fn stage_and_delete_topic_dir(
+    data_dir: &Path,
+    name: &str,
+) -> Result<(), ControllerError> {
+    let path = data_dir.join(name);
+    if !path.exists() {
+        return Ok(());
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let staged = data_dir.join(format!(
+        "{}{name}.{nanos}",
+        crate::sweep::STAGED_DELETE_PREFIX
+    ));
+    match std::fs::rename(&path, &staged) {
+        Ok(()) => {}
+        // Already gone (a concurrent actor moved/removed it) → done.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(ControllerError::Io(e)),
+    }
+    // Best-effort recurse on the staged copy. A failure here (FDs
+    // still open) is not fatal — the sweep retries `.deleting-*`.
+    let _ = std::fs::remove_dir_all(&staged);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kaas_operator_api::{KafkaTopic, KafkaTopicConfig, KafkaTopicSpec, KafkaTopicStatus};
     use kube::api::ObjectMeta;
+
+    /// gh #203: deleting a topic dir frees the LIVE path immediately
+    /// (atomic rename) so a concurrent broker open can't race the
+    /// recursive delete. With no open FDs the staged copy is fully
+    /// gone afterwards.
+    #[test]
+    fn stage_and_delete_frees_live_path_and_removes_staged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let topic = root.join("doomed");
+        std::fs::create_dir_all(topic.join("0")).unwrap();
+        std::fs::write(topic.join("0").join("manifest.json"), b"{}").unwrap();
+
+        stage_and_delete_topic_dir(root, "doomed").unwrap();
+
+        // Live path is free — a broker mkdir on it now creates a fresh
+        // dir instead of racing a delete-in-progress.
+        assert!(!topic.exists(), "live topic path freed by the rename");
+        std::fs::create_dir_all(&topic).unwrap();
+        assert!(topic.exists());
+
+        // No FDs were held, so the staged copy is fully reclaimed.
+        let staged: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(crate::sweep::STAGED_DELETE_PREFIX)
+            })
+            .collect();
+        assert!(staged.is_empty(), "staged copy removed when no FDs held");
+    }
+
+    #[test]
+    fn stage_and_delete_missing_dir_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(stage_and_delete_topic_dir(tmp.path(), "never-existed").is_ok());
+    }
 
     #[test]
     fn generate_topic_uuid_matches_v4_pattern() {

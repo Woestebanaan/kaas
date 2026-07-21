@@ -48,4 +48,4 @@ pub use kafkauser_controller::{
     error_policy as kafkauser_error_policy, reconcile_user, KafkaUserReconciler,
 };
 pub use observer::ReconcileObserver;
-pub use sweep::{sweep_credentials, sweep_topics};
+pub use sweep::{sweep_credentials, sweep_topics, SweepReport};

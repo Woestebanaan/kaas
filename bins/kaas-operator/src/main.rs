@@ -49,6 +49,11 @@ const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_PROBE_ADDR: &str = "0.0.0.0:8081";
 const LEADER_LEASE: &str = "kaas-operator-leader";
 const LEASE_DURATION: Duration = Duration::from_secs(15);
+/// gh #205: cadence of the resumable orphan sweep re-run. Slow — the
+/// steady-state reclaim is reconcile-time; this only mops up orphans a
+/// prior pass couldn't remove (FDs held) or that the operator missed
+/// while down.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 const RENEW_DEADLINE: Duration = Duration::from_secs(10);
 const RETRY_PERIOD: Duration = Duration::from_secs(2);
 
@@ -151,25 +156,39 @@ async fn main() -> Result<()> {
     let epoch = election.acquire().await;
     info!(%epoch, %identity, "elected leader; starting reconcilers");
 
-    // Startup sweep: one-shot pass that drops orphans (CRs were
-    // deleted while the operator was down).
+    // Orphan sweep: an initial pass at leader-election, then a slow
+    // periodic re-run. gh #205 / NFS rule 2: the sweep is resumable —
+    // a directory that can't be removed this pass (ENOTEMPTY while a
+    // broker still holds an FD, gh #76) lands in `failed` and is
+    // retried on the next tick once the handles close, instead of
+    // aborting the whole pass and stranding every other orphan until
+    // the next operator restart.
     let sweep_client = client.clone();
     let sweep_ns = namespace.clone();
     let sweep_dir = data_dir.clone();
     tokio::spawn(async move {
-        match sweep::sweep_topics(&sweep_client, &sweep_ns, &sweep_dir).await {
-            Ok(removed) if !removed.is_empty() => {
-                info!(?removed, "removed orphan topic dirs")
+        let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            match sweep::sweep_topics(&sweep_client, &sweep_ns, &sweep_dir).await {
+                Ok(r) => {
+                    if !r.removed.is_empty() {
+                        info!(removed = ?r.removed, "removed orphan topic dirs");
+                    }
+                    if !r.failed.is_empty() {
+                        warn!(failed = ?r.failed, "orphan topic dirs not reclaimed this pass; will retry");
+                    }
+                }
+                Err(e) => error!(error = ?e, "topic sweep failed"),
             }
-            Ok(_) => {}
-            Err(e) => error!(error = ?e, "topic sweep failed"),
-        }
-        match sweep::sweep_credentials(&sweep_client, &sweep_ns, &sweep_dir).await {
-            Ok(removed) if !removed.is_empty() => {
-                info!(?removed, "removed orphan credentials")
+            match sweep::sweep_credentials(&sweep_client, &sweep_ns, &sweep_dir).await {
+                Ok(removed) if !removed.is_empty() => {
+                    info!(?removed, "removed orphan credentials")
+                }
+                Ok(_) => {}
+                Err(e) => error!(error = ?e, "credentials sweep failed"),
             }
-            Ok(_) => {}
-            Err(e) => error!(error = ?e, "credentials sweep failed"),
         }
     });
 
