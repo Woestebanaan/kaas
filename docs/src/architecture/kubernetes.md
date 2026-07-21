@@ -107,3 +107,9 @@ Broker pods declare the `kaas.rs/PartitionsReady` readiness gate; the broker
 patches its own pod condition (`crates/kaas-k8s/src/readiness.rs`) once the
 partition directories it needs exist on the volume — keeping a broker out of
 Service endpoints until the storage it serves from is actually in place.
+
+That gate is the *storage-provisioned* precondition. The full readiness answer
+— `/readyz` returning 200 only once the broker is actually serving its
+assigned partitions, and the controller's alive set tracking main-runtime
+liveness rather than pod readiness — is its own topic: see [Honest readiness &
+rollout pacing](./readiness-rollout.md).

@@ -15,6 +15,7 @@
 - [Transactions & idempotence](architecture/transactions.md)
 - [Listeners, authentication, authorization](architecture/listeners-auth.md)
 - [Kubernetes integration](architecture/kubernetes.md)
+- [Honest readiness & rollout pacing](architecture/readiness-rollout.md)
 - [Observability](architecture/observability.md)
 
 # Part II — Kafka Compatibility
