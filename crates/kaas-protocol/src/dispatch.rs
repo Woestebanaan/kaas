@@ -162,6 +162,13 @@ impl Dispatcher {
         let api_key = header.api_key;
         let spec = registry::lookup(api_key);
         let out = self.dispatch_inner(conn, header, body, spec, api_key).await;
+        // gh #217: a completed dispatch proves the main runtime is still
+        // scheduling tasks, so refresh the liveness timestamp here — a
+        // broker saturated with produce/fetch work stays `healthy`
+        // *because* it is serving, not in spite of it. Only a true wedge
+        // (no completions here AND the 1 s idle tick starved) goes stale.
+        // Cost is one atomic store per request; negligible on the hot path.
+        kaas_observability::record_main_tick();
         // Label by numeric api_key to cap cardinality — the API name
         // is one lookup away in dashboards. Cross-hairs with the
         // `request.latency` histogram (workspace metric name).
@@ -315,6 +322,20 @@ mod tests {
         assert_eq!(&body[2..], b"hello");
         // ApiVersions response header is always V0 (the documented exception).
         assert!(matches!(hv, HeaderVersion::V0));
+    }
+
+    #[tokio::test]
+    async fn dispatch_refreshes_main_liveness() {
+        // gh #217: a completed dispatch must refresh the main-runtime
+        // liveness signal, so a busy-but-serving runtime stays `healthy`
+        // instead of being falsely evicted under produce load. Even the
+        // fast unknown-key error path counts as progress.
+        let d = Dispatcher::new();
+        let _ = d.dispatch(&conn(), header(99, 0), Bytes::new()).await;
+        assert!(
+            kaas_observability::main_alive(),
+            "dispatch should refresh main-runtime liveness"
+        );
     }
 
     #[tokio::test]

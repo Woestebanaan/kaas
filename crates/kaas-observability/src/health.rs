@@ -261,12 +261,27 @@ pub fn ready() -> bool {
     READY_SNAPSHOT.load(Ordering::SeqCst)
 }
 
-// --- main-runtime liveness (gh #208 / gh #211) ---------------------------
+// --- main-runtime liveness (gh #208 / gh #211 / gh #217) -----------------
 //
-// A task on the *main* tokio runtime bumps `MAIN_TICK_MS` every second.
-// If every main worker is blocked — the gh #209/#210 wedge, where a
-// synchronous NFS scan pins both workers under a 2-CPU limit — no task
-// runs, the tick goes stale, and `main_alive()` reports false.
+// `MAIN_TICK_MS` holds the last time the *main* tokio runtime made
+// progress. Two sources refresh it, both running on the main runtime:
+//   1. a 1 s idle-keepalive loop (so an idle broker stays live), and
+//   2. every completed request dispatch (gh #217) — so a broker
+//      saturated with produce/fetch work stays live *because* it is
+//      serving, not in spite of it.
+//
+// If every main worker is truly wedged — the gh #209/#210 case where a
+// synchronous NFS scan pins both workers under a 2-CPU limit — neither
+// source fires: no task runs and no request completes, the tick goes
+// stale, and `main_alive()` reports false.
+//
+// Earlier the tick came *only* from the 1 s loop. Under a heavy produce
+// flood that loop could starve for >5 s while the runtime was perfectly
+// alive (just busy), flipping `main_alive()` false and — via the
+// control-plane `healthy` bit feeding `decide_alive` — evicting a live
+// broker from the cluster, which churned partition leadership and fenced
+// producers (gh #217). Sourcing the tick from actual request completions
+// is the fix: busy == alive.
 //
 // The check is read from the *dedicated health runtime* and from the
 // control-plane status pump, neither of which shares the main runtime,
@@ -275,9 +290,11 @@ pub fn ready() -> bool {
 // wedged broker's partitions, so takeover-completion alone cannot tell
 // "healthy" from "wedged" — this tick can.
 
-/// Milliseconds of no-tick after which the main runtime is presumed
-/// wedged. The tick fires every ~1 s; 5 s tolerates a few missed ticks
-/// under load before declaring the runtime dead.
+/// Milliseconds of no-progress after which the main runtime is presumed
+/// wedged. Refreshed by the 1 s idle keepalive AND by every completed
+/// request (gh #217), so a busy-but-serving runtime never crosses this;
+/// only a genuine wedge (no completions and no idle tick) does. 5 s
+/// tolerates a brief idle-tick miss before declaring the runtime dead.
 pub const MAIN_LIVENESS_THRESHOLD_MS: i64 = 5_000;
 
 static MAIN_TICK_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
@@ -292,8 +309,10 @@ fn mono_ms() -> i64 {
     i64::try_from(r.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Record a main-runtime liveness tick. Call from a 1 s loop spawned
-/// on the main tokio runtime.
+/// Record a main-runtime progress signal. Called from the 1 s idle
+/// keepalive loop AND from every completed request dispatch (gh #217),
+/// both on the main tokio runtime — so a saturated-but-serving runtime
+/// stays live and only a true wedge goes stale.
 pub fn record_main_tick() {
     // `.max(1)`: the monotonic clock reads ~0 for the first sub-ms of
     // the process, and 0 is the "never ticked" sentinel — clamp so a
@@ -316,8 +335,20 @@ pub fn main_alive() -> bool {
 mod tests {
     use super::*;
 
+    // Serialize tests that mutate the process-global READY_SNAPSHOT /
+    // MAIN_TICK statics; under the default multi-threaded test runner
+    // they race each other's reads (e.g. one test's `set_ready(false)`
+    // clobbering another's base gate) and flake.
+    static SHARED_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn lock_shared() -> std::sync::MutexGuard<'static, ()> {
+        SHARED_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn set_ready_round_trips() {
+        let _g = lock_shared();
         set_ready(true);
         assert!(ready());
         set_ready(false);
@@ -420,12 +451,7 @@ mod tests {
 
     #[test]
     fn readiness_requires_base_gate_main_alive_and_serving() {
-        // Serialize against other tests touching the process-global
-        // READY_SNAPSHOT / MAIN_TICK statics.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = lock_shared();
 
         // Base gate down → never ready, whatever else.
         set_ready(false);
@@ -448,6 +474,7 @@ mod tests {
 
     #[test]
     fn main_alive_is_false_without_a_recent_tick() {
+        let _g = lock_shared();
         // A fresh process that never ticked is not alive.
         // (mono_ms is monotonic and MAIN_TICK starts at 0.)
         // We can't reset the static to 0 once ticked, so only assert
