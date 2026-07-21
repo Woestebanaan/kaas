@@ -173,6 +173,26 @@ on close/relinquish — **not** on segment roll and not per append — so its
 authoritative and reconciles on open by scanning the active segment to the
 first malformed batch boundary.
 
+### Recovery checkpoint — scanning only the tail
+
+Re-scanning the whole active segment on every takeover is the dominant cost of
+broker startup on NFS (O(active segment) at the substrate's read bandwidth). A
+per-partition **recovery checkpoint** — Kafka's recovery-point idea —
+bounds it. `recovery-checkpoint.json` records `{segment_base, byte_pos,
+high_watermark}`: everything up to `byte_pos` of the named active segment is
+fsynced, with that log-end-offset. The committer refreshes it once the fsynced
+log grows a threshold (64 MiB) past the last one, and a clean close writes it
+at EOF. On open, recovery resumes the scan from `byte_pos` instead of byte 0
+whenever the checkpoint still names the current active segment; if it doesn't
+(a roll happened since, or the file is missing/stale/truncated) it falls back
+to a full scan — always correct, and cheap with a bounded segment size.
+
+The clean-shutdown fast path falls out for free and on **one** code path: a
+graceful close leaves the checkpoint at EOF, so "scan from checkpoint to EOF"
+reads zero bytes — the same path a crash takes, which scans only the gap. The
+checkpoint is a pure optimization hint: because a missing or wrong one just
+triggers a full scan, it never has to be correct, only usually-present.
+
 The index is **sparse**: one `(rel_offset: i32, file_pos: i32)` entry every
 `index.interval.bytes` of log data (4 KiB default). Lookup binary-searches to
 the closest entry ≤ the target offset, then scans the log forward. The index
