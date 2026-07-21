@@ -18,8 +18,9 @@
 //! [`HeartbeatServer::active_groups`]:
 //!     crate::heartbeat_server::HeartbeatServer::active_groups
 
+use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -238,13 +239,43 @@ where
             })
             .unwrap_or_default();
 
+        // gh #216: seed a per-partition epoch floor from the on-disk
+        // manifest for any partition not already tracked in the current
+        // assignment. A partition that dropped out and is being re-added
+        // would otherwise reconcile as "new" and reset its leader epoch
+        // to 1 — below its persisted epoch — and the storage append
+        // fence would reject every write as stale. Read off the recompute
+        // path (spawn_blocking) since it touches the shared volume; the
+        // at-risk set is empty in steady state, so this is usually free.
+        let epoch_floor = {
+            let data_dir = self.data_dir.clone();
+            let topic_dims: Vec<(String, i32)> = topics
+                .iter()
+                .map(|t| (t.name.clone(), t.partition_count))
+                .collect();
+            let prev_dims: Vec<(String, i32)> = self
+                .snapshot()
+                .map(|a| {
+                    a.partitions
+                        .iter()
+                        .map(|p| (p.topic.clone(), p.partition))
+                        .collect()
+                })
+                .unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                compute_epoch_floor(&data_dir, &topic_dims, &prev_dims)
+            })
+            .await
+            .unwrap_or_default()
+        };
+
         let (assignment, version) = {
             let mut s = self.state.lock();
             let prev_parts: Option<Vec<PartitionAssignment>> =
                 s.current.as_ref().map(|a| a.partitions.clone());
             let prev_groups: Option<Vec<ConsumerGroupAssignment>> =
                 s.current.as_ref().map(|a| a.consumer_groups.clone());
-            let parts = balance(prev_parts.as_deref(), &brokers, &topics);
+            let parts = balance(prev_parts.as_deref(), &brokers, &topics, &epoch_floor);
             let groups = balance_groups(prev_groups.as_deref(), &brokers, &group_specs);
             s.version_counter += 1;
             let version = s.version_counter;
@@ -295,6 +326,44 @@ where
             .add(1, &[kaas_observability::KeyValue::new("result", "ok")]);
         Ok(version)
     }
+}
+
+/// Read the on-disk manifest epoch for every `(topic, partition)` in
+/// `topic_dims` that is NOT already tracked in `prev_dims`, returning a
+/// `partition_key` → epoch floor map (gh #216). Absent, unreadable, or
+/// epoch-0 manifests contribute no floor. Synchronous file I/O — call
+/// via `spawn_blocking`.
+fn compute_epoch_floor(
+    data_dir: &Path,
+    topic_dims: &[(String, i32)],
+    prev_dims: &[(String, i32)],
+) -> HashMap<String, u32> {
+    let prev_keys: HashSet<String> = prev_dims
+        .iter()
+        .map(|(t, p)| kaas_broker::partition_key(t, *p))
+        .collect();
+    let fs = kaas_storage::RealFs;
+    let mut floor = HashMap::new();
+    for (name, count) in topic_dims {
+        for partition in 0..*count {
+            let key = kaas_broker::partition_key(name, partition);
+            if prev_keys.contains(&key) {
+                continue;
+            }
+            let dir = data_dir.join(name).join(partition.to_string());
+            let epoch = match kaas_storage::manifest::read(&fs, &dir) {
+                Ok(kaas_storage::manifest::ReadResult::Present(m)) => m.epoch,
+                Ok(kaas_storage::manifest::ReadResult::Legacy(m)) => m.epoch,
+                _ => 0,
+            };
+            if let Ok(e) = u32::try_from(epoch) {
+                if e > 0 {
+                    floor.insert(key, e);
+                }
+            }
+        }
+    }
+    floor
 }
 
 fn build_broker_entries(brokers: &[String], now: &str) -> Vec<BrokerAssignment> {

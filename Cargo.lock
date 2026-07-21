@@ -1440,6 +1440,7 @@ dependencies = [
  "kaas-broker",
  "kaas-coordinator",
  "kaas-observability",
+ "kaas-storage",
  "kube",
  "parking_lot",
  "prost",

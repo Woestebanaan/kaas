@@ -21,6 +21,7 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 kaas-broker        = { path = "../kaas-broker" }
 kaas-coordinator   = { path = "../kaas-coordinator" }
+kaas-storage       = { path = "../kaas-storage" }
 kaas-observability = { workspace = true }
 thiserror    = { workspace = true }
 tokio        = { workspace = true }

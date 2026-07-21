@@ -131,10 +131,21 @@ pub fn partition_key(topic: &str, partition: i32) -> String {
 /// `prev` is the previously written assignment's partition list (or
 /// `None` on a fresh controller takeover). `brokers` is the alive
 /// set the controller currently sees. `topics` is the catalog.
+///
+/// `epoch_floor` maps `partition_key` → a minimum leader epoch. It
+/// exists for gh #216: the per-partition epoch normally increases
+/// monotonically, but a partition that drops out of the assignment and
+/// is re-added reconciles as "new" and would reset to epoch 1 — while
+/// its persisted on-disk epoch (the storage append fence's reference)
+/// stayed higher, so every append would be rejected as stale. The
+/// writer seeds the floor from the on-disk manifest epoch for any
+/// partition not already in `prev`, so a re-add can never regress below
+/// what a broker has already committed. An empty map is a no-op.
 pub fn balance(
     prev: Option<&[PartitionAssignment]>,
     brokers: &[String],
     topics: &[TopicSpec],
+    epoch_floor: &HashMap<String, u32>,
 ) -> Vec<PartitionAssignment> {
     if brokers.is_empty() {
         return Vec::new();
@@ -160,18 +171,25 @@ pub fn balance(
     // Phase 2: deterministic smoothing pass.
     smooth_partitions(&mut slots, &alive);
 
-    // Phase 3: reconcile with prev for stable epochs.
+    // Phase 3: reconcile with prev for stable epochs, never dropping
+    // below the on-disk floor (gh #216 — see the fn doc).
     let mut out = Vec::with_capacity(slots.len());
     for s in slots {
         let key = partition_key(&s.topic, s.partition);
         let prev_entry = prev_map.get(&key);
+        let floor = epoch_floor.get(&key).copied().unwrap_or(0);
         if let Some(pa) = prev_entry {
-            if alive_set.contains(&pa.broker) && pa.broker == s.broker {
+            // Stable leader whose epoch already clears the floor: keep
+            // it untouched (no takeover, no epoch bump).
+            if alive_set.contains(&pa.broker) && pa.broker == s.broker && pa.epoch >= floor {
                 out.push(pa.clone());
                 continue;
             }
         }
-        let epoch = prev_entry.map(|pa| pa.epoch + 1).unwrap_or(1);
+        // New / re-added / leader-changed: bump from prev (or start at
+        // 1), but never below the partition's persisted epoch.
+        let base = prev_entry.map(|pa| pa.epoch + 1).unwrap_or(1);
+        let epoch = base.max(floor);
         out.push(PartitionAssignment {
             topic: s.topic,
             partition: s.partition,
@@ -305,7 +323,7 @@ mod tests {
             name: "t1".to_owned(),
             partition_count: 4,
         }];
-        let parts = balance(None, &[], &topics);
+        let parts = balance(None, &[], &topics, &HashMap::new());
         assert!(parts.is_empty());
     }
 
@@ -337,7 +355,7 @@ mod tests {
                 partition_count: 3,
             },
         ];
-        let parts = balance(None, &b, &topics);
+        let parts = balance(None, &b, &topics, &HashMap::new());
         assert_eq!(parts.len(), 9);
         for p in &parts {
             assert!(
@@ -357,8 +375,8 @@ mod tests {
             name: "t1".to_owned(),
             partition_count: 6,
         }];
-        let first = balance(None, &b, &topics);
-        let second = balance(Some(&first), &b, &topics);
+        let first = balance(None, &b, &topics, &HashMap::new());
+        let second = balance(Some(&first), &b, &topics, &HashMap::new());
         assert_eq!(first, second, "stable inputs → identical assignment");
     }
 
@@ -369,7 +387,7 @@ mod tests {
             name: "t1".to_owned(),
             partition_count: 16,
         }];
-        let parts = balance(None, &b, &topics);
+        let parts = balance(None, &b, &topics, &HashMap::new());
         let mut counts: HashMap<&str, i32> = HashMap::new();
         for p in &parts {
             *counts.entry(p.broker.as_str()).or_insert(0) += 1;
@@ -389,10 +407,10 @@ mod tests {
             name: "t1".to_owned(),
             partition_count: 9,
         }];
-        let first = balance(None, &three, &topics);
+        let first = balance(None, &three, &topics, &HashMap::new());
         // kaas-2 goes down.
         let two = vec!["kaas-0".to_owned(), "kaas-1".to_owned()];
-        let second = balance(Some(&first), &two, &topics);
+        let second = balance(Some(&first), &two, &topics, &HashMap::new());
         for p in &first {
             if p.broker != "kaas-2" {
                 // Stable partition keeps epoch 1.
@@ -409,6 +427,57 @@ mod tests {
         for p in &second {
             assert!(p.broker == "kaas-0" || p.broker == "kaas-1");
         }
+    }
+
+    #[test]
+    fn epoch_floor_prevents_regression_on_readd() {
+        // gh #216: a partition re-added after dropping out of the
+        // assignment (prev has no entry for it) must adopt its on-disk
+        // floor, not reset to epoch 1 — else the append fence rejects
+        // every write as stale (assignment epoch < on-disk epoch).
+        let b = brokers(3);
+        let topics = vec![TopicSpec {
+            name: "t1".to_owned(),
+            partition_count: 4,
+        }];
+        let floor: HashMap<String, u32> = (0..4).map(|p| (partition_key("t1", p), 11u32)).collect();
+        let parts = balance(None, &b, &topics, &floor);
+        assert_eq!(parts.len(), 4);
+        for p in &parts {
+            assert_eq!(
+                p.epoch, 11,
+                "re-added partition must adopt the on-disk floor, not reset to 1"
+            );
+        }
+        // Control: without the floor, the same re-add resets to 1.
+        let no_floor = balance(None, &b, &topics, &HashMap::new());
+        assert!(no_floor.iter().all(|p| p.epoch == 1));
+    }
+
+    #[test]
+    fn epoch_floor_self_heals_but_never_lowers() {
+        let b = brokers(3);
+        let topics = vec![TopicSpec {
+            name: "t1".to_owned(),
+            partition_count: 4,
+        }];
+        let first = balance(None, &b, &topics, &HashMap::new()); // all epoch 1
+                                                                 // A floor above the current epoch bumps a stable partition up to
+                                                                 // the floor (self-heals an already-regressed assignment).
+        let high: HashMap<String, u32> = first
+            .iter()
+            .map(|p| (partition_key(&p.topic, p.partition), 9u32))
+            .collect();
+        let healed = balance(Some(&first), &b, &topics, &high);
+        assert!(healed.iter().all(|p| p.epoch == 9));
+        // A floor at or below the current epoch never perturbs a stable
+        // assignment.
+        let low: HashMap<String, u32> = first
+            .iter()
+            .map(|p| (partition_key(&p.topic, p.partition), 1u32))
+            .collect();
+        let unchanged = balance(Some(&first), &b, &topics, &low);
+        assert_eq!(first, unchanged);
     }
 
     #[test]
