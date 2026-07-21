@@ -135,17 +135,27 @@ impl StorageEngine for DiskStorageEngine {
     ) -> Result<i64, StorageError> {
         let started = std::time::Instant::now();
         let batch_len = batch.len();
+        // gh #218: derive the record count from the batch header
+        // (`lastOffsetDelta + 1`) before the batch is consumed. This is
+        // byte-opacity-safe — it reads header metadata, not record
+        // contents — and matches the offset accounting `Partition::append`
+        // does for the high-watermark, so the metric tracks the same
+        // records the log commits. A header too short to parse falls back
+        // to 1 (never a real produce batch).
+        let record_count = crate::segment::parse_batch_offsets(&batch)
+            .map(|(_base, last_offset_delta, _ts)| i64::from(last_offset_delta) + 1)
+            .unwrap_or(1);
         let p = self.ensure_open(topic, partition).await?;
         let out = p.append(epoch, acks, batch).await;
         let m = kaas_observability::metrics::global();
         m.write_latency.record(started.elapsed().as_secs_f64(), &[]);
-        // Bytes-per-Append is the Produce-side hot-path signal. Records
-        // count is not known here (the batch is opaque bytes), so
-        // approximate as 1 batch per Append — the topic-traffic
-        // gauge is bytes-first for that reason.
+        // Per-topic Produce accounting: real record count + real bytes.
         if out.is_ok() {
-            m.topic_traffic
-                .record_produce(topic, 1, i64::try_from(batch_len).unwrap_or(0));
+            m.topic_traffic.record_produce(
+                topic,
+                record_count,
+                i64::try_from(batch_len).unwrap_or(0),
+            );
         }
         out
     }
@@ -428,6 +438,40 @@ mod tests {
                 "MemoryStorage and DiskStorageEngine bytes diverged"
             );
             disk.relinquish_all().await.unwrap();
+        });
+    }
+
+    /// gh #218: the per-topic produce metric must count real records
+    /// (derived from the batch header), not 1 per batch (appends).
+    #[test]
+    fn produce_records_metric_counts_records_not_batches() {
+        rt().block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let e =
+                DiskStorageEngine::new(fs, tmp.path().to_path_buf(), PartitionConfig::default());
+            // Unique topic so the process-global counter isn't shared
+            // with other tests appending to "t".
+            let topic = "gh218-records-metric";
+            let tt = kaas_observability::metrics::global().topic_traffic.clone();
+            let before = tt.produce_records(topic);
+            // Three appends carrying 3 + 5 + 1 = 9 records. The old code
+            // counted 3 (one per batch); the fix must count 9.
+            e.append(topic, 0, 0, -1, build_batch(3, 1_000))
+                .await
+                .unwrap();
+            e.append(topic, 0, 0, -1, build_batch(5, 2_000))
+                .await
+                .unwrap();
+            e.append(topic, 0, 0, -1, build_batch(1, 3_000))
+                .await
+                .unwrap();
+            assert_eq!(
+                tt.produce_records(topic) - before,
+                9,
+                "metric must count 9 records across 3 batches, not 3 batches"
+            );
+            e.relinquish_all().await.unwrap();
         });
     }
 

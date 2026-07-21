@@ -70,6 +70,17 @@ impl TopicTrafficMeter {
         }
     }
 
+    /// Current cumulative produce record count for `topic` (0 if the
+    /// topic has no counter yet). Production reads go through the
+    /// observable-counter callback; this accessor is for assertions.
+    #[must_use]
+    pub fn produce_records(&self, topic: &str) -> i64 {
+        self.counters
+            .get(topic)
+            .map(|tc| tc.produce_records.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
     /// Hot-path from the Fetch handler. Auto-touches the topic.
     /// `bytes` may be 0 (empty Fetch response) — the accumulator still
     /// gets touched so idle topics keep emitting.
