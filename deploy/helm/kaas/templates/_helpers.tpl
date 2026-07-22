@@ -35,7 +35,7 @@ Common template helpers.
 {{- define "kaas.logDirsJSON" -}}
 {{- $dirs := list -}}
 {{- range .Values.storage.pool -}}
-{{- $dirs = append $dirs (dict "name" .name "path" (printf "/vols/%s" .name) "defaultEligible" (ne .defaultEligible false)) -}}
+{{- $dirs = append $dirs (dict "name" .name "path" (printf "/vols/%s" .name) "defaultEligible" (ne .defaultEligible false) "cordoned" (eq .cordoned true)) -}}
 {{- end -}}
 {{- toJson $dirs -}}
 {{- end -}}

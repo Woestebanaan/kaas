@@ -36,11 +36,11 @@ use kaas_auth::{
 };
 use kaas_broker::{
     AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
-    ApiVersionsHandler, Broker, Cli, CliTlsConfig, CreateAclsHandler, CreatePartitionsHandler,
-    CreateTopicsHandler, DeleteAclsHandler, DeleteGroupsHandler, DeleteRecordsHandler,
-    DeleteTopicsHandler, DescribeAclsHandler, DescribeClientQuotasHandler, DescribeConfigsHandler,
-    DescribeGroupsHandler, DescribeLogDirsHandler, EndTxnHandler, FetchHandler,
-    FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
+    AlterReplicaLogDirsHandler, ApiVersionsHandler, Broker, Cli, CliTlsConfig, CreateAclsHandler,
+    CreatePartitionsHandler, CreateTopicsHandler, DeleteAclsHandler, DeleteGroupsHandler,
+    DeleteRecordsHandler, DeleteTopicsHandler, DescribeAclsHandler, DescribeClientQuotasHandler,
+    DescribeConfigsHandler, DescribeGroupsHandler, DescribeLogDirsHandler, EndTxnHandler,
+    FetchHandler, FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
     InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,
     ListOffsetsHandler, ListenerEntry, MetadataHandler, OffsetCommitHandler, OffsetDeleteHandler,
     OffsetFetchHandler, ProduceHandler, SaslAuthenticateHandler, SaslHandshakeHandler,
@@ -735,9 +735,15 @@ fn build_dispatcher(
     d.register(30, 0, 3, Arc::new(CreateAclsHandler::new(broker.clone())));
     d.register(31, 0, 3, Arc::new(DeleteAclsHandler::new(broker.clone())));
     d.register(
+        34,
+        0,
+        2,
+        Arc::new(AlterReplicaLogDirsHandler::new(broker.clone())),
+    );
+    d.register(
         35,
         0,
-        1,
+        4,
         Arc::new(DescribeLogDirsHandler::new(broker.clone())),
     );
     d.register(17, 0, 1, Arc::new(SaslHandshakeHandler::new()));

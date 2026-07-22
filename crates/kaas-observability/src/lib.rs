@@ -26,7 +26,7 @@ pub use opentelemetry::{self, KeyValue};
 
 pub use bootstrap::{bootstrap, Providers};
 pub use byteopacity::{bump_codec_batch_reencode, bump_codec_record_decode};
-pub use gauges::{set_gauge_source, GaugeSource, PartitionGauge};
+pub use gauges::{set_gauge_source, GaugeSource, LogDirCapacityGauge, PartitionGauge};
 pub use health::{
     health_router, main_alive, ready, record_main_tick, set_ready, RuntimeState, TlsInfo,
 };

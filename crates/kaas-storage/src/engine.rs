@@ -48,6 +48,11 @@ pub struct LogDirInfo {
     pub path: PathBuf,
     #[serde(default = "default_true")]
     pub default_eligible: bool,
+    /// KIP-1066 vocabulary (Kafka 4.3): a cordoned log dir accepts no
+    /// NEW partition placements — existing partitions keep serving.
+    /// The drain primitive for pool shrink / volume decommission.
+    #[serde(default)]
+    pub cordoned: bool,
 }
 
 fn default_true() -> bool {
@@ -71,6 +76,23 @@ pub fn parse_log_dirs_json(json: &str) -> Result<Vec<LogDirInfo>, String> {
         ));
     }
     Ok(dirs)
+}
+
+/// KIP-827 capacity probe: `(total_bytes, usable_bytes)` of the
+/// filesystem hosting `path`, or `(-1, -1)` — the wire sentinel —
+/// when the statvfs fails (e.g. the sentinel `memory://` dir).
+/// Feeds `DescribeLogDirs` v4 and the per-log-dir capacity gauges.
+pub fn fs_capacity(path: &Path) -> (i64, i64) {
+    let Ok(st) = nix::sys::statvfs::statvfs(path) else {
+        return (-1, -1);
+    };
+    let frsize = st.fragment_size();
+    let total = st.blocks().saturating_mul(frsize);
+    let usable = st.blocks_available().saturating_mul(frsize);
+    (
+        i64::try_from(total).unwrap_or(i64::MAX),
+        i64::try_from(usable).unwrap_or(i64::MAX),
+    )
 }
 
 /// Resolves which log dir hosts a partition. Backed by the KafkaTopic
@@ -178,6 +200,7 @@ pub trait StorageEngine: Send + Sync + 'static {
             name: DEFAULT_LOG_DIR_NAME.to_owned(),
             path: self.data_dir().to_path_buf(),
             default_eligible: true,
+            cordoned: false,
         }]
     }
 
@@ -195,6 +218,21 @@ pub trait StorageEngine: Send + Sync + 'static {
 
     /// Release write ownership.
     async fn relinquish(&self, topic: &str, partition: i32) -> Result<(), StorageError>;
+
+    /// gh #221 phase 3: move a partition's files to another log dir
+    /// (`AlterReplicaLogDirs`, KIP-113). Closes the partition, copies
+    /// its directory to the target log dir, and returns the *source*
+    /// directory (the caller reclaims it after flipping the placement
+    /// record). Appends/reads during the copy fail with
+    /// [`StorageError::Migrating`] — a brief, retriable window.
+    async fn move_partition_to_log_dir(
+        &self,
+        _topic: &str,
+        _partition: i32,
+        _log_dir: &str,
+    ) -> Result<PathBuf, StorageError> {
+        Err(StorageError::Unsupported("log-dir moves"))
+    }
 
     /// gh #219: drop every open partition of `topic` **without
     /// persisting state**, and return how many were dropped.

@@ -19,6 +19,7 @@ pub mod acl_types;
 pub mod add_offsets_to_txn;
 pub mod add_partitions_to_txn;
 pub mod alter_client_quotas;
+pub mod alter_replica_log_dirs;
 pub mod api_versions;
 pub mod common;
 pub mod create_acls;

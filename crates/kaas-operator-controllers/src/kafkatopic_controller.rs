@@ -358,7 +358,7 @@ pub(crate) fn eligible_log_dirs(
         let mut set = vec![kaas_storage::DEFAULT_LOG_DIR_NAME.to_owned()];
         set.extend(
             pool.iter()
-                .filter(|d| d.default_eligible)
+                .filter(|d| d.default_eligible && !d.cordoned)
                 .map(|d| d.name.clone()),
         );
         return Ok(set);
@@ -367,10 +367,31 @@ pub(crate) fn eligible_log_dirs(
         let known =
             name == kaas_storage::DEFAULT_LOG_DIR_NAME || pool.iter().any(|d| &d.name == name);
         if !known {
-            return Err(name.clone());
+            return Err(format!(
+                "spec.storage.volumes references unknown log dir '{name}'"
+            ));
         }
     }
-    Ok(requested)
+    // KIP-1066 cordon semantics: a cordoned member accepts no new
+    // placements even when named explicitly — existing partitions
+    // stay put (placement is sticky), new ones go to the remaining
+    // eligible members. All members cordoned → loud failure.
+    let uncordoned: Vec<String> = requested
+        .iter()
+        .filter(|name| {
+            pool.iter()
+                .find(|d| &&d.name == name)
+                .is_none_or(|d| !d.cordoned)
+        })
+        .cloned()
+        .collect();
+    if uncordoned.is_empty() {
+        return Err(format!(
+            "every volume in spec.storage.volumes is cordoned ({})",
+            requested.join(", ")
+        ));
+    }
+    Ok(uncordoned)
 }
 
 /// Generate a canonical hyphenated v4-shape UUID. Mirrors
@@ -814,11 +835,13 @@ mod tests {
                 name: "fast".into(),
                 path: "/vols/fast".into(),
                 default_eligible: true,
+                cordoned: false,
             },
             kaas_storage::LogDirInfo {
                 name: "premium".into(),
                 path: "/vols/premium".into(),
-                default_eligible: false, // reserved: explicit binding only
+                default_eligible: false, // reserved: explicit binding only,
+                cordoned: false,
             },
         ]
     }
@@ -845,7 +868,7 @@ mod tests {
     #[test]
     fn unknown_name_fails_loudly() {
         let err = eligible_log_dirs(&pool(), Some(&storage_spec(&["fast", "typo"]))).unwrap_err();
-        assert_eq!(err, "typo");
+        assert!(err.contains("'typo'"), "{err}");
     }
 
     #[test]
@@ -883,5 +906,23 @@ mod tests {
             })
             .count();
         assert_eq!(outside, 4, "the four original placements are drift");
+    }
+
+    #[test]
+    fn cordoned_member_excluded_from_default_set_and_explicit_sets() {
+        let mut p = pool();
+        p[0].cordoned = true; // fast
+
+        // Default set: cordoned member drops out.
+        let set = eligible_log_dirs(&p, None).unwrap();
+        assert_eq!(set, vec!["default".to_string()]);
+
+        // Explicit set: cordoned member is skipped, remainder used.
+        let set = eligible_log_dirs(&p, Some(&storage_spec(&["fast", "premium"]))).unwrap();
+        assert_eq!(set, vec!["premium".to_string()]);
+
+        // Everything cordoned → loud failure.
+        let err = eligible_log_dirs(&p, Some(&storage_spec(&["fast"]))).unwrap_err();
+        assert!(err.contains("cordoned"), "{err}");
     }
 }

@@ -45,6 +45,17 @@ pub enum StorageError {
     #[error("partition closed")]
     Closed,
 
+    /// gh #221 phase 3: the partition is mid-move between log dirs
+    /// (AlterReplicaLogDirs). Brief window; clients see a retriable
+    /// error and come back after the cutover.
+    #[error("partition migrating between log dirs")]
+    Migrating,
+
+    /// The engine doesn't implement this operation (e.g. log-dir
+    /// moves on the in-memory dev engine).
+    #[error("unsupported: {0}")]
+    Unsupported(&'static str),
+
     /// Producer snapshot or manifest decoded as a future schema version
     /// that this binary doesn't understand. Recoverable — the caller
     /// starts fresh.

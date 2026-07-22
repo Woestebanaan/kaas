@@ -4,7 +4,7 @@
 `cargo xtask check-docs-drift` (CI) fails when this file drifts from
 crates/kaas-codec/src/api/registry.rs. -->
 
-kaas registers **36 Kafka API keys**. This table is generated from the
+kaas registers **37 Kafka API keys**. This table is generated from the
 `ApiSpec` registry (`crates/kaas-codec/src/api/registry.rs`) — the same table
 that builds the ApiVersions response — so the version ranges below are the
 wire truth, not documentation aspiration. "Flexible" is the first version
@@ -40,7 +40,8 @@ using KIP-482 flexible encoding (see [Wire protocol & framing](wire-protocol.md)
 | 30 | CreateAcls | v0–v3 | v2+ | [KIP-290](kip/kip-290.md) | [CreateAcls](api/acls-quotas.md#createacls) |
 | 31 | DeleteAcls | v0–v3 | v2+ | [KIP-290](kip/kip-290.md) | [DeleteAcls](api/acls-quotas.md#deleteacls) |
 | 32 | DescribeConfigs | v0–v4 | v4+ | — | [DescribeConfigs](api/topics-configs.md#describeconfigs) |
-| 35 | DescribeLogDirs | v0–v1 | — | — | [DescribeLogDirs](api/cluster-misc.md#describelogdirs) |
+| 34 | AlterReplicaLogDirs | v0–v2 | v2+ | — | [AlterReplicaLogDirs](api/cluster-misc.md#alterreplicalogdirs) |
+| 35 | DescribeLogDirs | v0–v4 | v2+ | — | [DescribeLogDirs](api/cluster-misc.md#describelogdirs) |
 | 36 | SaslAuthenticate | v0–v2 | v2+ | — | [SaslAuthenticate](api/auth.md#saslauthenticate) |
 | 37 | CreatePartitions | v0–v3 | v2+ | [KIP-195](kip/kip-195.md) | [CreatePartitions](api/topics-configs.md#createpartitions) |
 | 42 | DeleteGroups | v0–v2 | v2+ | — | [DeleteGroups](api/consumer-groups.md#deletegroups) |

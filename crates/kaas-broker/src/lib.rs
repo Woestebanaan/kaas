@@ -49,9 +49,9 @@ pub use group_hash::{
 pub use group_takeover::GroupTakeoverDriver;
 pub use handlers::{
     AddOffsetsToTxnHandler, AddPartitionsToTxnHandler, AlterClientQuotasHandler,
-    ApiVersionsHandler, CreateAclsHandler, CreatePartitionsHandler, CreateTopicsHandler,
-    DeleteAclsHandler, DeleteGroupsHandler, DeleteRecordsHandler, DeleteTopicsHandler,
-    DescribeAclsHandler, DescribeClientQuotasHandler, DescribeConfigsHandler,
+    AlterReplicaLogDirsHandler, ApiVersionsHandler, CreateAclsHandler, CreatePartitionsHandler,
+    CreateTopicsHandler, DeleteAclsHandler, DeleteGroupsHandler, DeleteRecordsHandler,
+    DeleteTopicsHandler, DescribeAclsHandler, DescribeClientQuotasHandler, DescribeConfigsHandler,
     DescribeGroupsHandler, DescribeLogDirsHandler, EndTxnHandler, FetchHandler,
     FindCoordinatorHandler, HeartbeatHandler, IncrementalAlterConfigsHandler,
     InitProducerIdHandler, JoinGroupHandler, LeaveGroupHandler, ListGroupsHandler,

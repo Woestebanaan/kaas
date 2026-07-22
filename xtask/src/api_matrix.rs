@@ -208,6 +208,12 @@ const API_DOCS: &[ApiDoc] = &[
         kips: &[],
     },
     ApiDoc {
+        key: 34,
+        name: "AlterReplicaLogDirs",
+        page: "cluster-misc",
+        kips: &[],
+    },
+    ApiDoc {
         key: 35,
         name: "DescribeLogDirs",
         page: "cluster-misc",

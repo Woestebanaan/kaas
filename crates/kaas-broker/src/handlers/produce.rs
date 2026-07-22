@@ -247,6 +247,9 @@ fn map_error(topic: &str, index: i32, err: &StorageError) -> produce::PartitionR
         StorageError::InvalidProducerEpoch => ERR_INVALID_PRODUCER_EPOCH,
         StorageError::UnknownTopicOrPartition => ERR_UNKNOWN_TOPIC_OR_PARTITION,
         StorageError::Stalled => ERR_LEADER_NOT_AVAILABLE,
+        // Mid-migration (gh #221 phase 3): retriable; the client
+        // refreshes metadata and retries after the cutover.
+        StorageError::Migrating => ERR_LEADER_NOT_AVAILABLE,
         _ => ERR_GENERIC,
     };
     error_partition_bumped(topic, index, code)

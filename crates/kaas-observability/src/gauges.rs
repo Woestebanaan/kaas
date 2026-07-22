@@ -38,6 +38,21 @@ pub trait GaugeSource: Send + Sync + 'static {
     fn broker_count_assigned(&self) -> i64;
     fn assignment_file_size_bytes(&self) -> i64;
     fn partitions(&self) -> Vec<PartitionGauge>;
+    /// gh #221 phase 3: per-log-dir filesystem capacity (KIP-827
+    /// numbers, exported as gauges so the pool's headroom is
+    /// dashboardable). Default empty for sources predating the
+    /// volume pool.
+    fn log_dirs(&self) -> Vec<LogDirCapacityGauge> {
+        Vec::new()
+    }
+}
+
+/// One log dir's capacity sample (KIP-827 shape; `-1` = unknown).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogDirCapacityGauge {
+    pub name: String,
+    pub total_bytes: i64,
+    pub usable_bytes: i64,
 }
 
 fn source_slot() -> &'static ArcSwapOption<Box<dyn GaugeSource>> {
@@ -105,6 +120,40 @@ pub fn install_runtime_gauges(meter: &Meter) {
         .with_callback(|observer| match load_source() {
             Some(src) => observer.observe(src.assignment_file_size_bytes(), &[]),
             None => observer.observe(0, &[]),
+        })
+        .build();
+
+    meter
+        .i64_observable_gauge("kaas.log.dir.total.bytes")
+        .with_description("Filesystem capacity of each log dir (KIP-827 TotalBytes; -1 unknown)")
+        .with_unit("By")
+        .with_callback(|observer| {
+            if let Some(src) = load_source() {
+                for d in src.log_dirs() {
+                    observer.observe(
+                        d.total_bytes,
+                        &[opentelemetry::KeyValue::new("log_dir", d.name.clone())],
+                    );
+                }
+            }
+        })
+        .build();
+
+    meter
+        .i64_observable_gauge("kaas.log.dir.usable.bytes")
+        .with_description(
+            "Usable bytes remaining on each log dir (KIP-827 UsableBytes; -1 unknown)",
+        )
+        .with_unit("By")
+        .with_callback(|observer| {
+            if let Some(src) = load_source() {
+                for d in src.log_dirs() {
+                    observer.observe(
+                        d.usable_bytes,
+                        &[opentelemetry::KeyValue::new("log_dir", d.name.clone())],
+                    );
+                }
+            }
         })
         .build();
 

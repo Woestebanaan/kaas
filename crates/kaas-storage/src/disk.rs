@@ -38,6 +38,10 @@ pub struct DiskStorageEngine {
     placement: RwLock<Option<Arc<dyn PlacementResolver>>>,
     cfg: PartitionConfig,
     partitions: DashMap<(String, i32), Arc<Partition>>,
+    /// Partitions mid-move between log dirs (gh #221 phase 3).
+    /// `ensure_open` refuses them so a produce/fetch can't reopen the
+    /// source dir while the copy runs.
+    migrating: DashMap<(String, i32), ()>,
 }
 
 impl std::fmt::Debug for DiskStorageEngine {
@@ -61,6 +65,7 @@ impl DiskStorageEngine {
             placement: RwLock::new(None),
             cfg,
             partitions: DashMap::new(),
+            migrating: DashMap::new(),
         }
     }
 
@@ -119,6 +124,9 @@ impl DiskStorageEngine {
         partition: i32,
     ) -> Result<Arc<Partition>, StorageError> {
         let key = (topic.to_owned(), partition);
+        if self.migrating.contains_key(&key) {
+            return Err(StorageError::Migrating);
+        }
         if let Some(entry) = self.partitions.get(&key) {
             return Ok(entry.value().clone());
         }
@@ -357,6 +365,7 @@ impl StorageEngine for DiskStorageEngine {
             name: crate::engine::DEFAULT_LOG_DIR_NAME.to_owned(),
             path: self.data_dir.clone(),
             default_eligible: true,
+            cordoned: false,
         }];
         dirs.extend(self.extra_log_dirs.iter().cloned());
         dirs
@@ -387,6 +396,52 @@ impl StorageEngine for DiskStorageEngine {
         // Phase 5. For now take_over == ensure_open + report HWM.
         let p = self.ensure_open(topic, partition).await?;
         Ok(p.high_watermark())
+    }
+
+    async fn move_partition_to_log_dir(
+        &self,
+        topic: &str,
+        partition: i32,
+        log_dir: &str,
+    ) -> Result<PathBuf, StorageError> {
+        let target_root = if log_dir == crate::engine::DEFAULT_LOG_DIR_NAME {
+            self.data_dir.clone()
+        } else {
+            self.extra_log_dirs
+                .iter()
+                .find(|d| d.name == log_dir)
+                .map(|d| d.path.clone())
+                .ok_or(StorageError::Unsupported("unknown target log dir"))?
+        };
+        let key = (topic.to_owned(), partition);
+        let src_dir = self.partition_dir(topic, partition);
+        let dst_dir = target_root.join(topic).join(partition.to_string());
+        if src_dir == dst_dir {
+            return Ok(src_dir);
+        }
+        // Single mover per partition; a concurrent request sees the
+        // same retriable error producers do.
+        if self.migrating.insert(key.clone(), ()).is_some() {
+            return Err(StorageError::Migrating);
+        }
+        let moved: Result<(), StorageError> = async {
+            // Close (persist manifest + producer snapshot, drop FDs)
+            // exactly like a relinquish — the copy must see quiesced
+            // files.
+            if let Some((_, p)) = self.partitions.remove(&key) {
+                let _ = p.close().await;
+            }
+            let src = src_dir.clone();
+            let dst = dst_dir.clone();
+            tokio::task::spawn_blocking(move || copy_dir_fresh(&src, &dst))
+                .await
+                .map_err(|e| StorageError::Io(std::io::Error::other(e)))??;
+            Ok(())
+        }
+        .await;
+        self.migrating.remove(&key);
+        moved?;
+        Ok(src_dir)
     }
 
     async fn relinquish(&self, topic: &str, partition: i32) -> Result<(), StorageError> {
@@ -422,6 +477,39 @@ impl StorageEngine for DiskStorageEngine {
     async fn drain(&self) -> Result<(), StorageError> {
         self.relinquish_all().await
     }
+}
+
+/// Fresh recursive copy for a log-dir move: any half-copied target
+/// from a previous crashed attempt is discarded first, so the copy is
+/// all-or-nothing from the placement record's point of view (the
+/// record only flips after this returns Ok — NFS rule 2: the compound
+/// op is idempotent and re-drivable).
+fn copy_dir_fresh(src: &Path, dst: &Path) -> Result<(), StorageError> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    if !src.exists() {
+        // Empty partition (never opened): nothing to copy; the target
+        // dir is created so the opener finds a valid home.
+        std::fs::create_dir_all(dst)?;
+        return Ok(());
+    }
+    copy_dir_recursive(src, dst)?;
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)?.flatten() {
+        let ty = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -748,6 +836,7 @@ mod tests {
                     name: "fast".to_owned(),
                     path: fast_root.clone(),
                     default_eligible: true,
+                    cordoned: false,
                 }]);
             e.set_placement_resolver(Arc::new(Fixed));
 
@@ -770,6 +859,52 @@ mod tests {
             assert_eq!(dirs.len(), 2);
             assert_eq!(dirs[0].name, "default");
             assert_eq!(dirs[1].name, "fast");
+        });
+    }
+
+    /// gh #221 phase 3: AlterReplicaLogDirs move — files land on the
+    /// target root, the source path is returned for reclaim, and an
+    /// unknown target is refused.
+    #[test]
+    fn move_partition_between_log_dirs() {
+        use crate::engine::LogDirInfo;
+        rt().block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let default_root = tmp.path().join("data");
+            let fast_root = tmp.path().join("fast");
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let e = DiskStorageEngine::new(fs, default_root.clone(), PartitionConfig::default())
+                .with_extra_log_dirs(vec![LogDirInfo {
+                    name: "fast".to_owned(),
+                    path: fast_root.clone(),
+                    default_eligible: true,
+                    cordoned: false,
+                }]);
+
+            e.create_partition("t", 0).await.unwrap();
+            let src = default_root.join("t/0");
+            std::fs::write(src.join("sentinel"), b"x").unwrap();
+
+            let returned = e.move_partition_to_log_dir("t", 0, "fast").await.unwrap();
+            assert_eq!(returned, src);
+            assert!(fast_root.join("t/0/sentinel").is_file(), "files copied");
+            // Source is left for the caller to reclaim after the
+            // placement record flips.
+            assert!(src.join("sentinel").is_file());
+
+            // Unknown target refused.
+            let err = e
+                .move_partition_to_log_dir("t", 0, "nope")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, StorageError::Unsupported(_)));
+
+            // Same-dir move is a no-op Ok.
+            let same = e
+                .move_partition_to_log_dir("t", 0, "default")
+                .await
+                .unwrap();
+            assert_eq!(same, src);
         });
     }
 }

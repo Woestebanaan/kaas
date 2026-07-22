@@ -88,6 +88,36 @@ every volume (they're all RWX mounts), so binding a topic to one volume
 constrains where its *data* lives, never which broker leads it. This is
 a property JBOD-on-local-disk Kafka cannot have.
 
+## Cordon & migration (the drain runbook)
+
+Removing a pool member (or moving a hot topic off a shared volume) is a
+three-step, explicitly operator-driven flow — nothing here happens
+automatically:
+
+1. **Cordon the member**: set `cordoned: true` on its `storage.pool[]`
+   entry and upgrade. KIP-1066 semantics — the member stops receiving
+   *new* partition placements (even from topics that name it
+   explicitly); every existing partition keeps serving in place.
+2. **Move the partitions off** with `AlterReplicaLogDirs` (API 34) —
+   the destination is the target log dir's *path* as reported by
+   `kafka-log-dirs.sh --describe`. Per partition, the leader closes it,
+   fresh-copies the directory to the target volume, flips
+   `status.volumeAssignments` (the durable placement record), and
+   reclaims the source. Producers see a brief retriable
+   `LEADER_NOT_AVAILABLE` window during the copy; a failed flip rolls
+   the copy back, so data location and placement record never diverge.
+   Watch progress in `DescribeLogDirs` output — the cordoned dir's
+   partition list shrinks to empty — and in the per-log-dir capacity
+   gauges (`kaas.log.dir.usable.bytes`).
+3. **Remove the member** from `storage.pool[]` once it hosts nothing,
+   and delete its PVC.
+
+A topic whose `spec.storage.volumes` still names the removed member
+keeps its `Ready=False InvalidVolumeBinding` status until the spec is
+updated — placement records pointing at a vanished member resolve to
+the `default` dir (the engine's fail-safe), which is why draining
+*before* removal matters.
+
 ## Backend guidance
 
 - **FSx ONTAP / ANF** (incl. manual-QoS capacity pools): each member is

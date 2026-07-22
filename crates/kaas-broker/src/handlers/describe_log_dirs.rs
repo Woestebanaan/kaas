@@ -80,6 +80,10 @@ impl Handler for DescribeLogDirsHandler {
             .log_dirs()
             .into_iter()
             .map(|dir| {
+                // KIP-827 (v4+): per-dir filesystem capacity. The
+                // codec drops the fields below v4; (-1, -1) is the
+                // "unknown" sentinel (e.g. dev-mode memory://).
+                let (total_bytes, usable_bytes) = kaas_storage::fs_capacity(&dir.path);
                 let topics = wanted
                     .iter()
                     .filter_map(|(name, parts)| {
@@ -106,12 +110,15 @@ impl Handler for DescribeLogDirsHandler {
                     error_code: 0,
                     log_dir: dir.path.display().to_string(),
                     topics,
+                    total_bytes,
+                    usable_bytes,
                 }
             })
             .collect();
 
         let resp = describe_log_dirs::Response {
             throttle_time_ms: 0,
+            error_code: 0,
             results,
         };
         let mut out = BytesMut::new();

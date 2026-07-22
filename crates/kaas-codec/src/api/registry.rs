@@ -66,6 +66,7 @@ pub const ALL: &[ApiSpec] = &[
     crate::api::describe_acls::SPEC,
     crate::api::create_acls::SPEC,
     crate::api::delete_acls::SPEC,
+    crate::api::alter_replica_log_dirs::SPEC,
     crate::api::describe_log_dirs::SPEC,
 ];
 
@@ -113,14 +114,14 @@ mod tests {
         // needing it. gh #152 added the
         // admin keys 20, 21, 29, 30, 31, 35 (DeleteTopics,
         // DeleteRecords, the ACL trio, DescribeLogDirs).
-        assert_eq!(ALL.len(), 36);
+        assert_eq!(ALL.len(), 37);
         let mut keys: Vec<i16> = ALL.iter().map(|s| s.key).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
             vec![
                 0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26,
-                27, 28, 29, 30, 31, 32, 35, 36, 37, 42, 44, 47, 48, 49,
+                27, 28, 29, 30, 31, 32, 34, 35, 36, 37, 42, 44, 47, 48, 49,
             ]
         );
     }

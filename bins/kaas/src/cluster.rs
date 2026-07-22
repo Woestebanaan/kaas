@@ -1250,6 +1250,21 @@ struct RuntimeGaugeSource {
 }
 
 impl kaas_observability::GaugeSource for RuntimeGaugeSource {
+    fn log_dirs(&self) -> Vec<kaas_observability::LogDirCapacityGauge> {
+        self.engine
+            .log_dirs()
+            .into_iter()
+            .map(|d| {
+                let (total_bytes, usable_bytes) = kaas_storage::fs_capacity(&d.path);
+                kaas_observability::LogDirCapacityGauge {
+                    name: d.name,
+                    total_bytes,
+                    usable_bytes,
+                }
+            })
+            .collect()
+    }
+
     fn is_controller(&self) -> i64 {
         i64::from(self.is_controller.load(Ordering::Relaxed))
     }

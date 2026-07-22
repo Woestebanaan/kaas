@@ -203,6 +203,8 @@ storage:
   #     size: 50Gi
   #     className: premium-nfs
   #     defaultEligible: false
+  #     cordoned: false        # KIP-1066: true = no NEW placements
+  #                            # (drain primitive for decommission)
   pool: []
 
 auth:

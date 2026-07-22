@@ -143,6 +143,17 @@ pub trait TopicCRWriter: Send + Sync + 'static {
     /// partition dirs and the topic-watcher fires Deleted on every
     /// broker so open handles close before `remove_dir_all` swings.
     async fn delete_topic(&self, name: &str) -> Result<(), TopicWriteError>;
+
+    /// gh #221 phase 3: flip one partition's placement record
+    /// (`status.volumeAssignments[partition] = log_dir`) after an
+    /// `AlterReplicaLogDirs` copy completes. The reconciler's
+    /// or_insert-only stamping never fights the flipped value.
+    async fn set_partition_log_dir(
+        &self,
+        name: &str,
+        partition: i32,
+        log_dir: &str,
+    ) -> Result<(), TopicWriteError>;
 }
 
 /// Op + value pair the handler passes through to the writer. Kept
@@ -272,6 +283,16 @@ impl TopicCRWriter for NoopTopicCRWriter {
         ))
     }
     async fn delete_topic(&self, _name: &str) -> Result<(), TopicWriteError> {
+        Err(TopicWriteError::Forbidden(
+            "broker is not running in cluster mode".into(),
+        ))
+    }
+    async fn set_partition_log_dir(
+        &self,
+        _name: &str,
+        _partition: i32,
+        _log_dir: &str,
+    ) -> Result<(), TopicWriteError> {
         Err(TopicWriteError::Forbidden(
             "broker is not running in cluster mode".into(),
         ))
@@ -436,6 +457,32 @@ mod kube_impl {
             match self
                 .api()
                 .delete(&meta_name, &DeleteParams::default())
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(kube::Error::Api(e)) if e.code == 404 => {
+                    Err(TopicWriteError::NotFound(name.into()))
+                }
+                Err(e) => Err(map_kube_err(e)),
+            }
+        }
+
+        async fn set_partition_log_dir(
+            &self,
+            name: &str,
+            partition: i32,
+            log_dir: &str,
+        ) -> Result<(), TopicWriteError> {
+            // JSON merge patch on the status map: object fields merge,
+            // so only this partition's entry changes. Needs the
+            // kafkatopics/status RBAC verb (broker-rbac.yaml).
+            let mut assignments = serde_json::Map::new();
+            assignments.insert(partition.to_string(), Value::String(log_dir.to_owned()));
+            let patch = json!({ "status": { "volumeAssignments": assignments } });
+            let (meta_name, _) = super::name_for_cr(name);
+            match self
+                .api()
+                .patch_status(&meta_name, &PatchParams::default(), &Patch::Merge(&patch))
                 .await
             {
                 Ok(_) => Ok(()),

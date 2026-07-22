@@ -134,6 +134,17 @@ impl TopicRegistry {
         }
     }
 
+    /// Point one partition at a log dir (gh #221 phase 3 — the
+    /// AlterReplicaLogDirs cutover updates the local view immediately
+    /// instead of waiting for the CR-status watch echo).
+    pub fn set_volume_assignment(&self, topic: &str, partition: i32, log_dir: &str) {
+        self.volume_assignments
+            .write()
+            .entry(topic.to_owned())
+            .or_default()
+            .insert(partition.to_string(), log_dir.to_owned());
+    }
+
     /// Log-dir name hosting `(topic, partition)`, if explicitly
     /// placed. `None` → the default log dir.
     pub fn volume_assignment(&self, topic: &str, partition: i32) -> Option<String> {

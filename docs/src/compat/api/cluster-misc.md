@@ -56,16 +56,21 @@ round-trip tests in the source files above; dispatcher clamp tests in
 Reports log directories and per-partition sizes — `kafka-log-dirs.sh
 --describe` and Kafbat-UI's storage pane.
 
-**Versions**: v0–v1 (not flexible).
+**Versions**: v0–v4 (flexible from v2; matches Apache 3.7's range).
 
-**Handling**: kaas reports exactly **one log directory per broker** — the
-storage engine's data dir (the broker's mount of the shared volume, `/data` in
-production). A null topics filter expands to every topic in the broker's
-registry with all partitions; a named topic with an empty partition list
-expands to all its partitions; unknown topics are silently dropped (matching
-Apache, which omits partitions it doesn't host). Each partition row carries
-`partition_size` from the storage engine, `offset_lag = 0`, and
-`is_future_key = false`; the dir-level `error_code` is always 0.
+**Handling**: kaas reports **one log directory per pool member** — the
+default data dir plus every `storage.pool[]` volume (the gh #221 volume
+pool; single-volume deployments report exactly one dir, as before).
+Partitions group under the dir the placement record assigns them to. A
+null topics filter expands to every topic in the broker's registry with
+all partitions; a named topic with an empty partition list expands to
+all its partitions; unknown topics are silently dropped (matching
+Apache, which omits partitions it doesn't host). Each partition row
+carries `partition_size` from the storage engine, `offset_lag = 0`, and
+`is_future_key = false`; the dir-level `error_code` is always 0. v4
+responses carry per-dir `TotalBytes` / `UsableBytes` (KIP-827) from a
+`statvfs` of the dir's filesystem — `-1` when the probe fails (the
+dev-mode `memory://` sentinel).
 
 **Deviations from Apache 3.7**:
 
@@ -79,13 +84,50 @@ Apache, which omits partitions it doesn't host). Each partition row carries
 - `offset_lag` is hardwired to 0 and `is_future_key` to false — coherent for
   a broker with no followers and no intra-broker reassignment, but a client
   should not read fetch-lag meaning into it.
-- There is no JBOD story: one dir, always. AlterReplicaLogDirs and friends are
-  not served (see [Non-goals](../non-goals.md)).
-
 **Source**: `crates/kaas-broker/src/handlers/describe_log_dirs.rs`,
-`crates/kaas-storage/src/disk.rs` (`partition_size`, `data_dir`),
+`crates/kaas-storage/src/disk.rs` (`partition_size`, `log_dirs`),
 `crates/kaas-codec/src/api/describe_log_dirs.rs`.
 
 **Verified by**: `scripts/kafka-log-dirs.sh` (all-dirs describe plus
-topic-filtered describe); `partition_size_sums_segment_sizes` in
-`crates/kaas-storage/src/disk.rs`.
+topic-filtered describe); `partition_size_sums_segment_sizes` and
+`placement_resolver_routes_partition_dirs` in
+`crates/kaas-storage/src/disk.rs`; version roundtrips in the codec
+module.
+
+## AlterReplicaLogDirs
+
+Moves a partition between log dirs on the same broker (KIP-113) — in
+kaas, the volume-pool migration verb (gh #221 phase 3): the drain path
+for cordoned pool members.
+
+**Versions**: v0–v2 (flexible from v2; matches Apache 3.7's range).
+
+**Handling**: the destination is a log dir *path* as reported by
+DescribeLogDirs. Per partition, the current leader closes the
+partition, fresh-copies its directory to the destination volume, flips
+the placement record (`KafkaTopic.status.volumeAssignments`), updates
+its local registry, and reclaims the source directory. Produce/fetch
+during the copy window fail with the retriable `LEADER_NOT_AVAILABLE`.
+Error codes: unknown path → `LOG_DIR_NOT_FOUND` (57); cordoned member
+(KIP-1066: no new placements) → `INVALID_REQUEST` (42); not this
+broker's partition → `REPLICA_NOT_AVAILABLE` (9); failed copy or
+record flip → `KAFKA_STORAGE_ERROR` (56), with the copy rolled back so
+data location and placement record never diverge.
+
+**Deviations from Apache 3.7**:
+
+- Apache moves a replica live (future replica + catch-up, then swap);
+  kaas pauses the partition for the copy — a brief unavailability
+  window instead of a background reassignment, coherent with
+  single-writer-per-partition and no followers.
+- Only the partition's current **leader** accepts the move (it is the
+  only broker holding the files); Apache accepts on any broker hosting
+  a replica.
+
+**Source**: `crates/kaas-broker/src/handlers/alter_replica_log_dirs.rs`,
+`crates/kaas-storage/src/disk.rs` (`move_partition_to_log_dir`),
+`crates/kaas-codec/src/api/alter_replica_log_dirs.rs`.
+
+**Verified by**: `move_partition_between_log_dirs` in
+`crates/kaas-storage/src/disk.rs`; `all_versions_roundtrip` in the
+codec module; `scripts/kafka-log-dirs.sh`.

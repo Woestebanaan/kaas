@@ -44,6 +44,11 @@ rules:
   - apiGroups: [kaas.rs]
     resources: [kafkatopics]
     verbs: [get, list, watch, create, update, patch, delete]
+  # gh #221 phase 3: AlterReplicaLogDirs flips the placement record
+  # (status.volumeAssignments) after a partition move.
+  - apiGroups: [kaas.rs]
+    resources: [kafkatopics/status]
+    verbs: [get, update, patch]
   # KafkaClusterAssignments mirror: the elected controller broker
   # writes Status to it via crates/sk-controller/src/k8s_mirror.rs after every
   # assignment.json change. Read on every broker (debug/diag); update
