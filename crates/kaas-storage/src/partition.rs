@@ -199,6 +199,45 @@ struct OpenedState {
 /// fail the readiness probe — which dropped the broker from the
 /// controller's alive set, triggered reassignment, and caused *more*
 /// takeovers (gh #208).
+/// Number of [`open_blocking`] attempts before an ENOENT is surfaced.
+const OPEN_ENOENT_ATTEMPTS: u32 = 5;
+/// First backoff between those attempts; doubles each time (50 + 100 +
+/// 200 + 400 = 750 ms total).
+const OPEN_ENOENT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// [`open_blocking`], retried while the directory keeps vanishing under
+/// it (gh #220).
+///
+/// `open_blocking` starts with `mkdir_all`, so an ENOENT after that
+/// point never means "this path is wrong" — it means someone removed the
+/// tree between our mkdir and our first file open. In practice that
+/// someone is the operator reclaiming a previous incarnation of the
+/// topic: it renames the live directory aside and re-creates it, and an
+/// open landing inside that window fails on a path that is about to
+/// exist again.
+///
+/// Retrying is the right response because the whole prologue is
+/// idempotent — it re-creates the directory, re-lists segments, and
+/// re-scans. Failing instead pushes the problem onto callers that can
+/// only translate it into a produce error or a partition that stays
+/// closed until the next takeover reconcile.
+fn open_blocking_retrying(fs: &dyn Fs, dir: &std::path::Path) -> Result<OpenedState, StorageError> {
+    let mut backoff = OPEN_ENOENT_BACKOFF;
+    for _ in 1..OPEN_ENOENT_ATTEMPTS {
+        match open_blocking(fs, dir) {
+            // Silent by design — this crate carries no logger, and the
+            // caller already logs the error if every attempt fails.
+            Err(StorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::thread::sleep(backoff);
+                backoff *= 2;
+            }
+            other => return other,
+        }
+    }
+    // Last attempt: whatever it returns is the answer.
+    open_blocking(fs, dir)
+}
+
 fn open_blocking(fs: &dyn Fs, dir: &std::path::Path) -> Result<OpenedState, StorageError> {
     fs.mkdir_all(dir)?;
 
@@ -394,9 +433,11 @@ impl Partition {
             closed,
             active,
             producer_states,
-        } = tokio::task::spawn_blocking(move || open_blocking(fs_open.as_ref(), &dir_open))
-            .await
-            .map_err(|e| StorageError::Io(std::io::Error::other(e)))??;
+        } = tokio::task::spawn_blocking(move || {
+            open_blocking_retrying(fs_open.as_ref(), &dir_open)
+        })
+        .await
+        .map_err(|e| StorageError::Io(std::io::Error::other(e)))??;
 
         let initial_snapshot = ReadSnapshot {
             high_water: hwm,
@@ -1078,6 +1119,62 @@ mod tests {
         delay: Duration,
     }
 
+    /// [`RealFs`] whose first `n` `create` calls fail with ENOENT —
+    /// standing in for the operator renaming the topic dir aside
+    /// between our `mkdir_all` and our first file open (gh #220).
+    struct VanishingFs {
+        inner: RealFs,
+        fail_creates: std::sync::atomic::AtomicU32,
+    }
+
+    impl Fs for VanishingFs {
+        fn open_read(&self, p: &std::path::Path) -> std::io::Result<Box<dyn crate::fs::FileRead>> {
+            self.inner.open_read(p)
+        }
+        fn open_write(
+            &self,
+            p: &std::path::Path,
+            append: bool,
+        ) -> std::io::Result<Box<dyn crate::fs::FileWrite>> {
+            self.inner.open_write(p, append)
+        }
+        fn create(&self, p: &std::path::Path) -> std::io::Result<Box<dyn crate::fs::FileWrite>> {
+            if self
+                .fail_creates
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such file or directory",
+                ));
+            }
+            self.inner.create(p)
+        }
+        fn fsync(&self, f: &mut dyn crate::fs::FileWrite) -> std::io::Result<()> {
+            self.inner.fsync(f)
+        }
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn remove(&self, p: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove(p)
+        }
+        fn mkdir_all(&self, p: &std::path::Path) -> std::io::Result<()> {
+            self.inner.mkdir_all(p)
+        }
+        fn readdir(&self, p: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.readdir(p)
+        }
+        fn stat(&self, p: &std::path::Path) -> std::io::Result<std::fs::Metadata> {
+            self.inner.stat(p)
+        }
+    }
+
     impl Fs for SlowFs {
         fn open_read(&self, p: &std::path::Path) -> std::io::Result<Box<dyn crate::fs::FileRead>> {
             std::thread::sleep(self.delay);
@@ -1673,6 +1770,48 @@ mod tests {
             assert_eq!(p2.high_watermark(), 5);
             assert_eq!(p2.log_start_offset(), 2);
             p2.close().await.unwrap();
+        });
+    }
+
+    /// gh #220: an ENOENT during open means the directory is being
+    /// re-created underneath us (the operator's reclaim renames it aside
+    /// and mkdirs it again), never that the path is wrong — `open`
+    /// mkdir_all's it first. Open must ride that out instead of handing
+    /// the caller a produce error or a partition that stays closed until
+    /// the next takeover reconcile.
+    #[test]
+    fn open_rides_out_a_vanishing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("t").join("0");
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(VanishingFs {
+                inner: RealFs::new(),
+                fail_creates: std::sync::atomic::AtomicU32::new(2),
+            });
+            let p = Partition::open(fs, "t".into(), 0, dir.clone(), PartitionConfig::default())
+                .await
+                .expect("open should retry past a transient ENOENT");
+            // And the partition is fully usable, not a husk.
+            p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            assert_eq!(p.high_watermark(), 1);
+        });
+    }
+
+    /// The retry is bounded — a directory that never comes back still
+    /// surfaces the error rather than hanging the open forever.
+    #[test]
+    fn open_gives_up_on_a_permanently_missing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("t").join("0");
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(VanishingFs {
+                inner: RealFs::new(),
+                fail_creates: std::sync::atomic::AtomicU32::new(u32::MAX),
+            });
+            let err = Partition::open(fs, "t".into(), 0, dir, PartitionConfig::default())
+                .await
+                .expect_err("a permanent ENOENT must surface");
+            assert!(matches!(err, StorageError::Io(e) if e.kind() == std::io::ErrorKind::NotFound));
         });
     }
 

@@ -120,12 +120,23 @@ impl KafkaTopicReconciler {
         // (both idempotent).
         let topic_dir = self.data_dir.join(&topic_name);
         let fs = kaas_storage::fs::RealFs::new();
-        let identity =
+        let reclaimed =
             self.reclaim_stale_incarnation(&topic_name, &topic_dir, &next_topic_id, &fs)?;
         for p in 0..topic.spec.partitions {
             let part_dir = topic_dir.join(p.to_string());
             std::fs::create_dir_all(&part_dir)?;
         }
+        // gh #220: only now delete the staged copy. The rename in step 1
+        // frees the live path instantly, but a recursive delete of a real
+        // topic is not instant — 554 ms was observed on NFS — and until
+        // these mkdirs land, a broker opening a partition on this path
+        // fails with ENOENT. Deleting after them keeps the live path
+        // absent for microseconds instead of for the whole unlink walk.
+        // Failure is fine: the sweep retries every `.deleting-*`.
+        if let Some(staged) = reclaimed.staged.as_deref() {
+            let _ = std::fs::remove_dir_all(staged);
+        }
+        let identity = reclaimed.verdict;
 
         // 2. Write per-topic .config.json. The broker watches this
         // file and applies retention/segment/compaction knobs on
@@ -205,15 +216,17 @@ impl KafkaTopicReconciler {
     /// adopting it is the only safe reading — deleting on "unknown"
     /// would eat live data on upgrade.
     ///
-    /// Returns what the directory's stamp said, so the caller can skip
-    /// re-stamping a directory that already agrees.
+    /// Returns the stamp verdict (so the caller can skip re-stamping a
+    /// directory that already agrees) and the staged path still awaiting
+    /// deletion, which the caller removes **after** re-creating the live
+    /// partition dirs (gh #220).
     fn reclaim_stale_incarnation(
         &self,
         name: &str,
         topic_dir: &Path,
         topic_id: &str,
         fs: &dyn kaas_storage::fs::Fs,
-    ) -> Result<kaas_storage::IdentityVerdict, ControllerError> {
+    ) -> Result<Reclaimed, ControllerError> {
         reclaim_stale_incarnation(&self.data_dir, name, topic_dir, topic_id, fs)
     }
 
@@ -289,17 +302,16 @@ pub fn topic_dir_for(data_dir: &Path, topic: &KafkaTopic) -> PathBuf {
     data_dir.join(topic.effective_topic_name())
 }
 
-/// gh #203: reclaim a topic's directory without racing a broker's
-/// `Partition::open`.
-///
-/// Atomically renames `<data_dir>/<name>` aside to a
-/// `.deleting-<name>.<nanos>` sibling (a same-parent rename is the one
-/// atomic NFS primitive), then best-effort recurses on the staged
-/// copy — which no broker will ever open. The destructive
-/// `remove_dir_all` therefore never runs on the live path. Any staged
-/// dir the inline delete can't finish (FDs still held, gh #76) is
-/// retried by the resumable sweep. See
-/// `docs/src/architecture/nfs-substrate.md`.
+/// Outcome of [`reclaim_stale_incarnation`].
+#[derive(Debug)]
+pub(crate) struct Reclaimed {
+    pub(crate) verdict: kaas_storage::IdentityVerdict,
+    /// Path the old incarnation was renamed to, still to be deleted.
+    /// `None` when nothing was staged. gh #220: the caller deletes it
+    /// *after* re-creating the live partition dirs.
+    pub(crate) staged: Option<PathBuf>,
+}
+
 /// Body of [`KafkaTopicReconciler::reclaim_stale_incarnation`] — free
 /// so it is testable without a `kube::Client`. See that method for the
 /// contract.
@@ -309,39 +321,65 @@ pub(crate) fn reclaim_stale_incarnation(
     topic_dir: &Path,
     topic_id: &str,
     fs: &dyn kaas_storage::fs::Fs,
-) -> Result<kaas_storage::IdentityVerdict, ControllerError> {
+) -> Result<Reclaimed, ControllerError> {
     use kaas_storage::IdentityVerdict;
 
+    let unstamped = |()| Reclaimed {
+        verdict: IdentityVerdict::Unstamped,
+        staged: None,
+    };
     if topic_id.is_empty() {
-        return Ok(IdentityVerdict::Unstamped);
+        return Ok(unstamped(()));
     }
     let verdict = match kaas_storage::classify_topic_identity(fs, topic_dir, topic_id) {
         Ok(v) => v,
         // An unreadable stamp is "unknown", not "stale".
         Err(err) => {
             tracing::warn!(topic = name, %err, "topic identity unreadable; adopting the dir");
-            return Ok(IdentityVerdict::Unstamped);
+            return Ok(unstamped(()));
         }
     };
     if verdict != IdentityVerdict::Stale {
-        return Ok(verdict);
+        return Ok(Reclaimed {
+            verdict,
+            staged: None,
+        });
     }
     tracing::info!(
         topic = name,
         topic_id,
         "topic dir belongs to a previous incarnation; reclaiming before reuse"
     );
-    stage_and_delete_topic_dir(data_dir, name)?;
-    Ok(IdentityVerdict::Stale)
+    Ok(Reclaimed {
+        verdict: IdentityVerdict::Stale,
+        staged: stage_topic_dir(data_dir, name)?,
+    })
 }
 
-pub(crate) fn stage_and_delete_topic_dir(
+/// gh #203: free a topic's directory without racing a broker's
+/// `Partition::open`.
+///
+/// Atomically renames `<data_dir>/<name>` aside to a
+/// `.deleting-<name>.<nanos>` sibling — a same-parent rename is the one
+/// atomic NFS primitive — so the destructive `remove_dir_all` never runs
+/// on the live path a broker may be mid-open on. See
+/// `docs/src/architecture/nfs-substrate.md`.
+///
+/// gh #220: this **only stages**. It returns the staged path and leaves
+/// the deletion to the caller, which first re-creates the live partition
+/// dirs. The rename frees the live path in one atomic step, but the
+/// recursive delete that follows is a long unlink walk (554 ms measured
+/// on NFS for a modest topic), and every millisecond of it is a
+/// millisecond in which a broker opening a partition on this path gets
+/// ENOENT. A staged dir whose deletion can't finish (FDs still held,
+/// gh #76) is retried by the resumable sweep.
+pub(crate) fn stage_topic_dir(
     data_dir: &Path,
     name: &str,
-) -> Result<(), ControllerError> {
+) -> Result<Option<PathBuf>, ControllerError> {
     let path = data_dir.join(name);
     if !path.exists() {
-        return Ok(());
+        return Ok(None);
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -352,15 +390,11 @@ pub(crate) fn stage_and_delete_topic_dir(
         crate::sweep::STAGED_DELETE_PREFIX
     ));
     match std::fs::rename(&path, &staged) {
-        Ok(()) => {}
+        Ok(()) => Ok(Some(staged)),
         // Already gone (a concurrent actor moved/removed it) → done.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(ControllerError::Io(e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ControllerError::Io(e)),
     }
-    // Best-effort recurse on the staged copy. A failure here (FDs
-    // still open) is not fatal — the sweep retries `.deleting-*`.
-    let _ = std::fs::remove_dir_all(&staged);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -374,14 +408,14 @@ mod tests {
     /// recursive delete. With no open FDs the staged copy is fully
     /// gone afterwards.
     #[test]
-    fn stage_and_delete_frees_live_path_and_removes_staged() {
+    fn stage_frees_live_path_and_moves_data_aside() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let topic = root.join("doomed");
         std::fs::create_dir_all(topic.join("0")).unwrap();
         std::fs::write(topic.join("0").join("manifest.json"), b"{}").unwrap();
 
-        stage_and_delete_topic_dir(root, "doomed").unwrap();
+        let staged = stage_topic_dir(root, "doomed").unwrap().expect("staged");
 
         // Live path is free — a broker mkdir on it now creates a fresh
         // dir instead of racing a delete-in-progress.
@@ -389,17 +423,10 @@ mod tests {
         std::fs::create_dir_all(&topic).unwrap();
         assert!(topic.exists());
 
-        // No FDs were held, so the staged copy is fully reclaimed.
-        let staged: Vec<_> = std::fs::read_dir(root)
-            .unwrap()
-            .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(crate::sweep::STAGED_DELETE_PREFIX)
-            })
-            .collect();
-        assert!(staged.is_empty(), "staged copy removed when no FDs held");
+        // The old contents moved wholesale to the staged path, which no
+        // broker will ever open; deleting it is the caller's job.
+        assert!(staged.join("0").join("manifest.json").exists());
+        std::fs::remove_dir_all(&staged).unwrap();
     }
 
     /// Seed `<root>/<name>` with a partition dir carrying leftover
@@ -432,14 +459,18 @@ mod tests {
         let fs = kaas_storage::fs::RealFs::new();
         let dir = seed_topic_dir(root, "reset-me", "old-incarnation");
 
-        let verdict =
+        let out =
             reclaim_stale_incarnation(root, "reset-me", &dir, "new-incarnation", &fs).unwrap();
 
-        assert_eq!(verdict, kaas_storage::IdentityVerdict::Stale);
+        assert_eq!(out.verdict, kaas_storage::IdentityVerdict::Stale);
         assert!(
             !dir.exists(),
             "the previous incarnation's dir must not survive into the new one"
         );
+        // gh #220: the delete is deferred to the caller, so the staged
+        // copy is still on disk (and still carries the old data).
+        let staged = out.staged.expect("stale reclaim stages the old dir");
+        assert!(staged.join("0").join("manifest.json").exists());
     }
 
     /// Steady state: the same incarnation reconciling again must not
@@ -451,11 +482,12 @@ mod tests {
         let fs = kaas_storage::fs::RealFs::new();
         let dir = seed_topic_dir(root, "steady", "same-id");
 
-        let verdict = reclaim_stale_incarnation(root, "steady", &dir, "same-id", &fs).unwrap();
+        let out = reclaim_stale_incarnation(root, "steady", &dir, "same-id", &fs).unwrap();
 
         // `Match` is also what tells the reconciler not to re-stamp the
         // directory on every 5-minute requeue.
-        assert_eq!(verdict, kaas_storage::IdentityVerdict::Match);
+        assert_eq!(out.verdict, kaas_storage::IdentityVerdict::Match);
+        assert!(out.staged.is_none(), "nothing staged when the stamp agrees");
         assert!(dir.join("0").join("manifest.json").exists(), "data kept");
     }
 
@@ -501,10 +533,47 @@ mod tests {
         reclaim_stale_incarnation(tmp.path(), "never-existed", &dir, "id", &fs).unwrap();
     }
 
+    /// gh #220: the live path must be usable again the instant the
+    /// rename returns — the caller re-creates the partition dirs and
+    /// only *then* deletes the staged copy. Pinned by making the staged
+    /// tree undeletable: if re-creating the live path were sequenced
+    /// behind a successful delete, this would leave the topic without
+    /// its partition dirs.
+    #[cfg(unix)]
     #[test]
-    fn stage_and_delete_missing_dir_is_ok() {
+    fn live_path_is_usable_before_the_staged_delete_finishes() {
+        use std::os::unix::fs::PermissionsExt;
+
         let tmp = tempfile::tempdir().unwrap();
-        assert!(stage_and_delete_topic_dir(tmp.path(), "never-existed").is_ok());
+        let root = tmp.path();
+        let fs = kaas_storage::fs::RealFs::new();
+        let dir = seed_topic_dir(root, "reset-me", "old-incarnation");
+
+        let out = reclaim_stale_incarnation(root, "reset-me", &dir, "new-id", &fs).unwrap();
+        let staged = out.staged.expect("staged");
+        // Un-removable, standing in for a broker still holding an FD
+        // inside it (gh #76 silly-rename).
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // What the reconciler does next, in order.
+        std::fs::create_dir_all(dir.join("0")).unwrap();
+        let delete_failed = std::fs::remove_dir_all(&staged).is_err();
+
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(delete_failed, "test needs the staged delete to fail");
+        assert!(
+            dir.join("0").is_dir(),
+            "partition dir exists even though the staged delete could not finish"
+        );
+    }
+
+    #[test]
+    fn stage_missing_dir_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(stage_topic_dir(tmp.path(), "never-existed")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -122,10 +122,15 @@ Each of these was a real bug in kaas, and each is one rule ignored:
 | A broker being promoted to a partition's leader hit a transient "file not found" while opening the log, logged it, and never retried — so the partition stayed unopened and the broker never finished coming up. | 2 — not retried | A reconcile loop re-drives the open for any partition the broker should lead but hasn't opened yet; opening an already-open partition is a no-op, so retrying is always safe. |
 | A cleanup sweep aborted on the first directory it couldn't remove — busy because a broker still held a handle — stranding every other orphan behind it. | 2 — not resumable | Collect per-directory failures and continue; re-run periodically, since the "busy" condition clears once the handles close. |
 | Deleting a file a broker still had open left a `.nfsXXXX` tombstone that kept the parent directory busy and blocked cleanup. | 3 — single-writer FD discipline | Only the leader holds a partition's file handles, and it closes them before any delete; combined with the rename-aside above, a stray tombstone lands in a throwaway path instead of the live one. |
+| Reclaiming a recreated topic's directory renamed it aside and then ran the recursive delete *before* re-creating the live path — leaving that path absent for the whole unlink walk (554 ms measured), so a broker opening a partition in that window failed. | 2 — a two-step treated as atomic | Re-create the live path immediately after the rename and delete the staged copy afterwards, so the gap is a few `mkdir`s instead of a full delete; and make the opener retry, since after its own `mkdir_all` a "file not found" can only mean someone is re-creating the path. |
 
-Four bugs, one principle. That is the argument for writing it down: the next
-reviewer, holding this contract, can catch the *fifth* before it ships — by
-asking three questions of any code that touches the shared volume:
+Five bugs, one principle. Note the fifth was found by *this document's own
+checklist*, applied to a fix for the first: rename-aside solved a rule-3 race
+and quietly introduced a rule-2 one, because "rename, then delete, then
+re-create" is three steps and only the rename is atomic. That is the argument
+for writing it down — the next reviewer, holding this contract, can catch the
+sixth before it ships, by asking three questions of any code that touches the
+shared volume:
 
 1. Is this a single atomic primitive — a same-directory rename, or an exclusive
    create?
