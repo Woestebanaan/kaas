@@ -14,7 +14,7 @@
 //! - **Deleted and recreated** under the same name (gh #219): the
 //!   reconciler sees a stamp that isn't this incarnation's TopicID and
 //!   stages the old directory aside *before* the new one uses it. See
-//!   [`KafkaTopicReconciler::reclaim_stale_incarnation`].
+//!   `KafkaTopicReconciler::reclaim_stale_incarnation`.
 //! - **Deleted for good**: the leader-elected periodic
 //!   [`crate::sweep::sweep_topics`] pass reclaims the orphan. Latency
 //!   there is fine — nothing is waiting on the directory.
