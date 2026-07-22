@@ -205,6 +205,8 @@ storage:
   #     defaultEligible: false
   #     cordoned: false        # KIP-1066: true = no NEW placements
   #                            # (drain primitive for decommission)
+  #     labels:                # gh #224: matched by KafkaTopic
+  #       class: premium       # spec.storage.volumeSelector
   pool: []
 
 auth:

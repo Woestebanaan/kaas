@@ -310,7 +310,10 @@ pub async fn run_topic_watch<A, D>(
     cancel: CancellationToken,
 ) -> Result<(), KubeWatchError>
 where
-    A: Fn(&str, i32, &std::collections::BTreeMap<String, String>) + Send + Sync + 'static,
+    A: Fn(&str, i32, &std::collections::BTreeMap<String, String>, Option<&str>)
+        + Send
+        + Sync
+        + 'static,
     D: Fn(&str) + Send + Sync + 'static,
 {
     let api: Api<kaas_operator_api::KafkaTopic> = Api::namespaced(client, &namespace);
@@ -362,13 +365,20 @@ where
     }
 }
 
+/// gh #224: annotation that asks the brokers to drive this topic's
+/// partitions onto one log dir via the AlterReplicaLogDirs path —
+/// level-triggered and idempotent (partitions already on the target
+/// are skipped), rate-limited by the driver. Remove the annotation
+/// once `status.volumeAssignments` shows the move complete.
+pub const MIGRATE_TO_VOLUME_ANNOTATION: &str = "kaas.rs/migrate-to-volume";
+
 fn handle_topic_event<A, D>(
     on_apply: &A,
     on_delete: &D,
     event: Event<kaas_operator_api::KafkaTopic>,
     state: &mut TopicWatchState,
 ) where
-    A: Fn(&str, i32, &std::collections::BTreeMap<String, String>),
+    A: Fn(&str, i32, &std::collections::BTreeMap<String, String>, Option<&str>),
     D: Fn(&str),
 {
     match event {
@@ -398,7 +408,13 @@ fn handle_topic_event<A, D>(
                 .as_ref()
                 .map(|st| &st.volume_assignments)
                 .unwrap_or(&EMPTY);
-            on_apply(&name, t.spec.partitions, volumes);
+            let migrate_to = t
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(MIGRATE_TO_VOLUME_ANNOTATION))
+                .map(String::as_str);
+            on_apply(&name, t.spec.partitions, volumes, migrate_to);
             state.known.insert(name.clone());
             if let Some(relist) = state.relist.as_mut() {
                 relist.insert(name);
@@ -540,7 +556,10 @@ mod tests {
         let deleted = std::cell::RefCell::new(Vec::new());
         let mut state = TopicWatchState::default();
         {
-            let on_apply = |_: &str, _: i32, _: &std::collections::BTreeMap<String, String>| {};
+            let on_apply = |_: &str,
+                            _: i32,
+                            _: &std::collections::BTreeMap<String, String>,
+                            _: Option<&str>| {};
             let on_delete = |n: &str| deleted.borrow_mut().push(n.to_owned());
             for evt in events {
                 handle_topic_event(&on_apply, &on_delete, evt, &mut state);
@@ -555,9 +574,11 @@ mod tests {
         let applied = std::cell::RefCell::new(Vec::new());
         let mut state = TopicWatchState::default();
         {
-            let on_apply = |n: &str, p: i32, _: &std::collections::BTreeMap<String, String>| {
-                applied.borrow_mut().push((n.to_owned(), p))
-            };
+            let on_apply =
+                |n: &str,
+                 p: i32,
+                 _: &std::collections::BTreeMap<String, String>,
+                 _: Option<&str>| { applied.borrow_mut().push((n.to_owned(), p)) };
             let on_delete = |_: &str| {};
             for evt in events {
                 handle_topic_event(&on_apply, &on_delete, evt, &mut state);

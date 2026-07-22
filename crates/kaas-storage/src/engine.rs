@@ -53,6 +53,12 @@ pub struct LogDirInfo {
     /// The drain primitive for pool shrink / volume decommission.
     #[serde(default)]
     pub cordoned: bool,
+    /// gh #224: free-form labels for `volumeSelector` matching
+    /// (nodeSelector vocabulary — a topic's selector must be a subset
+    /// of a member's labels to match). The default data dir carries no
+    /// labels.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -201,6 +207,7 @@ pub trait StorageEngine: Send + Sync + 'static {
             path: self.data_dir().to_path_buf(),
             default_eligible: true,
             cordoned: false,
+            labels: Default::default(),
         }]
     }
 

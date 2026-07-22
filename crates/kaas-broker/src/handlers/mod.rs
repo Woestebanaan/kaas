@@ -43,7 +43,7 @@ pub use acls::{CreateAclsHandler, DeleteAclsHandler, DescribeAclsHandler};
 pub use add_offsets_to_txn::AddOffsetsToTxnHandler;
 pub use add_partitions_to_txn::AddPartitionsToTxnHandler;
 pub use alter_client_quotas::AlterClientQuotasHandler;
-pub use alter_replica_log_dirs::AlterReplicaLogDirsHandler;
+pub use alter_replica_log_dirs::{migrate_partition, AlterReplicaLogDirsHandler};
 pub use api_versions::ApiVersionsHandler;
 pub use create_partitions::CreatePartitionsHandler;
 pub use create_topics::CreateTopicsHandler;

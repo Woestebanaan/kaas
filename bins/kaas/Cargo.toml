@@ -21,6 +21,7 @@ rustls             = { workspace = true }
 rustls-pemfile     = { workspace = true }
 kaas-auth            = { path = "../../crates/kaas-auth" }
 kaas-broker          = { path = "../../crates/kaas-broker", features = ["cr-writer"] }
+parking_lot        = { workspace = true }
 kube               = { workspace = true }
 kaas-codec           = { path = "../../crates/kaas-codec" }
 kaas-controller      = { path = "../../crates/kaas-controller" }

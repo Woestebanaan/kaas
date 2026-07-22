@@ -43,7 +43,14 @@ partitions may land on. One field, three cases:
   casually) off premium substrate.
 
 Unknown names fail the reconcile loudly (`Ready=False`,
-`UnknownLogDir`) — a typo must not silently place data.
+`InvalidVolumeBinding`) — a typo must not silently place data.
+
+Alternatively, `spec.storage.volumeSelector` (mutually exclusive with
+`volumes`) selects members by their `storage.pool[].labels` —
+nodeSelector vocabulary, resolved to a set at reconcile time, so topic
+CRs stay decoupled from infrastructure names. A selector that matches
+no uncordoned member fails the reconcile the same loud way; the
+label-less `default` dir never matches a selector.
 
 ## Placement is creation-sticky; drift is surfaced, never auto-fixed
 
@@ -98,7 +105,12 @@ automatically:
    entry and upgrade. KIP-1066 semantics — the member stops receiving
    *new* partition placements (even from topics that name it
    explicitly); every existing partition keeps serving in place.
-2. **Move the partitions off** with `AlterReplicaLogDirs` (API 34) —
+2. **Move the partitions off** — either annotate the topic with
+   `kaas.rs/migrate-to-volume: <member>` (each broker drives its own
+   partitions through the move path, one every few seconds; the
+   annotation is level-triggered and idempotent — remove it once
+   `status.volumeAssignments` shows the move complete), or call
+   `AlterReplicaLogDirs` (API 34) directly —
    the destination is the target log dir's *path* as reported by
    `kafka-log-dirs.sh --describe`. Per partition, the leader closes it,
    fresh-copies the directory to the target volume, flips

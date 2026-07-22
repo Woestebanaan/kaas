@@ -50,81 +50,89 @@ impl AlterReplicaLogDirsHandler {
     pub fn new(broker: Arc<Broker>) -> Self {
         Self { broker }
     }
+}
 
-    async fn move_one(&self, topic: &str, partition: i32, log_dir_name: &str) -> i16 {
-        if self.broker.topics.get(topic).is_none() {
+/// Move one partition to `log_dir_name`, returning the wire error
+/// code (`0` = moved). Shared by the AlterReplicaLogDirs handler and
+/// the gh #224 `kaas.rs/migrate-to-volume` annotation driver — same
+/// close → fresh-copy → record-flip-with-rollback → reclaim sequence
+/// either way.
+pub async fn migrate_partition(
+    broker: &Broker,
+    topic: &str,
+    partition: i32,
+    log_dir_name: &str,
+) -> i16 {
+    if broker.topics.get(topic).is_none() {
+        return ERR_UNKNOWN_TOPIC_OR_PARTITION;
+    }
+    // Only the current leader holds the partition's files. Dev /
+    // single-broker mode (no coordinator) trivially leads.
+    if let Some(c) = broker.coordinator() {
+        if !c.owns(topic, partition) {
+            return ERR_REPLICA_NOT_AVAILABLE;
+        }
+    }
+    let src_dir = match broker
+        .engine
+        .move_partition_to_log_dir(topic, partition, log_dir_name)
+        .await
+    {
+        Ok(src) => src,
+        Err(kaas_storage::StorageError::UnknownTopicOrPartition) => {
             return ERR_UNKNOWN_TOPIC_OR_PARTITION;
         }
-        // Only the current leader holds the partition's files. Dev /
-        // single-broker mode (no coordinator) trivially leads.
-        if let Some(c) = self.broker.coordinator() {
-            if !c.owns(topic, partition) {
-                return ERR_REPLICA_NOT_AVAILABLE;
-            }
+        Err(kaas_storage::StorageError::Unsupported(_)) => return ERR_LOG_DIR_NOT_FOUND,
+        Err(err) => {
+            warn!(topic, partition, %err, "AlterReplicaLogDirs: move failed");
+            return ERR_KAFKA_STORAGE_ERROR;
         }
-        let src_dir = match self
-            .broker
-            .engine
-            .move_partition_to_log_dir(topic, partition, log_dir_name)
+    };
+
+    // Durable truth first: flip the CR status record. On failure,
+    // roll the copy back so data location and placement record
+    // never diverge (the copy is fresh-per-attempt, so a retry
+    // redoes it from scratch).
+    if let Some(writer) = broker.cr_writer() {
+        if let Err(err) = writer
+            .set_partition_log_dir(topic, partition, log_dir_name)
             .await
         {
-            Ok(src) => src,
-            Err(kaas_storage::StorageError::UnknownTopicOrPartition) => {
-                return ERR_UNKNOWN_TOPIC_OR_PARTITION;
+            warn!(topic, partition, %err,
+                "AlterReplicaLogDirs: placement-record flip failed; rolling back copy");
+            let target = broker
+                .engine
+                .log_dirs()
+                .into_iter()
+                .find(|d| d.name == log_dir_name)
+                .map(|d| d.path.join(topic).join(partition.to_string()));
+            if let Some(dst) = target {
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dst)).await;
             }
-            Err(kaas_storage::StorageError::Unsupported(_)) => return ERR_LOG_DIR_NOT_FOUND,
-            Err(err) => {
-                warn!(topic, partition, %err, "AlterReplicaLogDirs: move failed");
-                return ERR_KAFKA_STORAGE_ERROR;
-            }
-        };
-
-        // Durable truth first: flip the CR status record. On failure,
-        // roll the copy back so data location and placement record
-        // never diverge (the copy is fresh-per-attempt, so a retry
-        // redoes it from scratch).
-        if let Some(writer) = self.broker.cr_writer() {
-            if let Err(err) = writer
-                .set_partition_log_dir(topic, partition, log_dir_name)
-                .await
-            {
-                warn!(topic, partition, %err,
-                    "AlterReplicaLogDirs: placement-record flip failed; rolling back copy");
-                let target = self
-                    .broker
-                    .engine
-                    .log_dirs()
-                    .into_iter()
-                    .find(|d| d.name == log_dir_name)
-                    .map(|d| d.path.join(topic).join(partition.to_string()));
-                if let Some(dst) = target {
-                    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dst)).await;
-                }
-                return ERR_KAFKA_STORAGE_ERROR;
-            }
-        } else {
-            // No CR writer (dev mode): the local registry is the only
-            // placement record there is.
-            info!(
-                topic,
-                partition, log_dir_name, "AlterReplicaLogDirs: dev-mode local flip"
-            );
+            return ERR_KAFKA_STORAGE_ERROR;
         }
-        self.broker
-            .topics
-            .set_volume_assignment(topic, partition, log_dir_name);
-
-        // Source reclaim is best-effort: a failure (gh #76-style busy
-        // handles on NFS) leaves orphan bytes on the old volume, never
-        // an inconsistency. Logged so an operator can chase it.
-        let src = src_dir.clone();
-        if let Err(err) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&src)).await {
-            warn!(topic, partition, %err, "AlterReplicaLogDirs: source reclaim join error");
-        }
-        info!(topic, partition, log_dir_name, src = %src_dir.display(),
-            "AlterReplicaLogDirs: partition moved");
-        ERR_NONE
+    } else {
+        // No CR writer (dev mode): the local registry is the only
+        // placement record there is.
+        info!(
+            topic,
+            partition, log_dir_name, "AlterReplicaLogDirs: dev-mode local flip"
+        );
     }
+    broker
+        .topics
+        .set_volume_assignment(topic, partition, log_dir_name);
+
+    // Source reclaim is best-effort: a failure (gh #76-style busy
+    // handles on NFS) leaves orphan bytes on the old volume, never
+    // an inconsistency. Logged so an operator can chase it.
+    let src = src_dir.clone();
+    if let Err(err) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&src)).await {
+        warn!(topic, partition, %err, "AlterReplicaLogDirs: source reclaim join error");
+    }
+    info!(topic, partition, log_dir_name, src = %src_dir.display(),
+        "AlterReplicaLogDirs: partition moved");
+    ERR_NONE
 }
 
 #[async_trait]
@@ -154,7 +162,7 @@ impl Handler for AlterReplicaLogDirsHandler {
                         // KIP-1066: cordoned log dirs accept no new
                         // placements — moves included.
                         Some(d) if d.cordoned => ERR_INVALID_REQUEST,
-                        Some(d) => self.move_one(&t.name, *p, &d.name).await,
+                        Some(d) => migrate_partition(&self.broker, &t.name, *p, &d.name).await,
                     };
                     results
                         .entry(t.name.clone())

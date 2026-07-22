@@ -366,6 +366,7 @@ impl StorageEngine for DiskStorageEngine {
             path: self.data_dir.clone(),
             default_eligible: true,
             cordoned: false,
+            labels: Default::default(),
         }];
         dirs.extend(self.extra_log_dirs.iter().cloned());
         dirs
@@ -837,6 +838,7 @@ mod tests {
                     path: fast_root.clone(),
                     default_eligible: true,
                     cordoned: false,
+                    labels: Default::default(),
                 }]);
             e.set_placement_resolver(Arc::new(Fixed));
 
@@ -879,6 +881,7 @@ mod tests {
                     path: fast_root.clone(),
                     default_eligible: true,
                     cordoned: false,
+                    labels: Default::default(),
                 }]);
 
             e.create_partition("t", 0).await.unwrap();

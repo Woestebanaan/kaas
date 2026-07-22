@@ -74,8 +74,18 @@ pub struct KafkaTopicSpec {
 pub struct KafkaTopicStorage {
     /// Pool log-dir names (chart `storage.pool[].name`; `default` is
     /// the data volume). Unknown names fail the reconcile loudly.
+    /// Mutually exclusive with `volumeSelector`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
+
+    /// gh #224: label selector over pool members (nodeSelector
+    /// vocabulary — every key/value must match a member's
+    /// `storage.pool[].labels`). Resolved to an eligible set at
+    /// reconcile time, so topic CRs stay decoupled from
+    /// infrastructure names. Mutually exclusive with `volumes`;
+    /// matching zero members fails the reconcile loudly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_selector: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Per-topic configuration knobs. All optional — unset = broker default.

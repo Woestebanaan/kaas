@@ -70,8 +70,14 @@ spec:
                 description: 'gh #221 phase 2: which log dirs (pool volumes) this topic''s partitions may be placed on.'
                 nullable: true
                 properties:
+                  volumeSelector:
+                    additionalProperties:
+                      type: string
+                    description: 'gh #224: label selector over pool members (nodeSelector vocabulary — every key/value must match a member''s `storage.pool[].labels`). Resolved to an eligible set at reconcile time, so topic CRs stay decoupled from infrastructure names. Mutually exclusive with `volumes`; matching zero members fails the reconcile loudly.'
+                    nullable: true
+                    type: object
                   volumes:
-                    description: Pool log-dir names (chart `storage.pool[].name`; `default` is the data volume). Unknown names fail the reconcile loudly.
+                    description: Pool log-dir names (chart `storage.pool[].name`; `default` is the data volume). Unknown names fail the reconcile loudly. Mutually exclusive with `volumeSelector`.
                     items:
                       type: string
                     type: array

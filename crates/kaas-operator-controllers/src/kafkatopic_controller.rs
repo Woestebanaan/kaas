@@ -140,14 +140,14 @@ impl KafkaTopicReconciler {
         // reconcile failure — a typo must not silently place data.
         let eligible = match eligible_log_dirs(&self.log_dirs, topic.spec.storage.as_ref()) {
             Ok(set) => set,
-            Err(unknown) => {
+            Err(why) => {
                 let cond = Condition {
                     type_: READY.into(),
                     status: Condition::STATUS_FALSE.into(),
                     observed_generation: topic.metadata.generation,
                     last_transition_time: String::new(),
-                    reason: "UnknownLogDir".into(),
-                    message: format!("spec.storage.volumes references unknown log dir '{unknown}'"),
+                    reason: "InvalidVolumeBinding".into(),
+                    message: why,
                 };
                 self.patch_status(&topic, |st| set_condition(&mut st.conditions, cond.clone()))
                     .await?;
@@ -354,6 +354,38 @@ pub(crate) fn eligible_log_dirs(
     spec: Option<&kaas_operator_api::KafkaTopicStorage>,
 ) -> Result<Vec<String>, String> {
     let requested: Vec<String> = spec.map(|s| s.volumes.clone()).unwrap_or_default();
+    let selector = spec
+        .and_then(|s| s.volume_selector.as_ref())
+        .filter(|m| !m.is_empty());
+
+    if !requested.is_empty() && selector.is_some() {
+        return Err(
+            "spec.storage.volumes and spec.storage.volumeSelector are mutually exclusive".into(),
+        );
+    }
+
+    // gh #224: selector → the members whose labels contain every
+    // selector pair (nodeSelector semantics). The default data dir
+    // carries no labels, so a selector never matches it — selecting
+    // by class implies the pool.
+    if let Some(sel) = selector {
+        let matched: Vec<String> = pool
+            .iter()
+            .filter(|d| !d.cordoned && sel.iter().all(|(k, v)| d.labels.get(k) == Some(v)))
+            .map(|d| d.name.clone())
+            .collect();
+        if matched.is_empty() {
+            return Err(format!(
+                "spec.storage.volumeSelector matches no uncordoned pool member ({})",
+                sel.iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        return Ok(matched);
+    }
+
     if requested.is_empty() {
         let mut set = vec![kaas_storage::DEFAULT_LOG_DIR_NAME.to_owned()];
         set.extend(
@@ -836,12 +868,14 @@ mod tests {
                 path: "/vols/fast".into(),
                 default_eligible: true,
                 cordoned: false,
+                labels: [("class".to_string(), "standard".to_string())].into(),
             },
             kaas_storage::LogDirInfo {
                 name: "premium".into(),
                 path: "/vols/premium".into(),
-                default_eligible: false, // reserved: explicit binding only,
+                default_eligible: false, // reserved: explicit binding only
                 cordoned: false,
+                labels: [("class".to_string(), "premium".to_string())].into(),
             },
         ]
     }
@@ -849,6 +883,7 @@ mod tests {
     fn storage_spec(volumes: &[&str]) -> kaas_operator_api::KafkaTopicStorage {
         kaas_operator_api::KafkaTopicStorage {
             volumes: volumes.iter().map(|s| s.to_string()).collect(),
+            volume_selector: None,
         }
     }
 
@@ -924,5 +959,49 @@ mod tests {
         // Everything cordoned → loud failure.
         let err = eligible_log_dirs(&p, Some(&storage_spec(&["fast"]))).unwrap_err();
         assert!(err.contains("cordoned"), "{err}");
+    }
+
+    // --- gh #224: volumeSelector ------------------------------------
+
+    fn selector_spec(pairs: &[(&str, &str)]) -> kaas_operator_api::KafkaTopicStorage {
+        kaas_operator_api::KafkaTopicStorage {
+            volumes: Vec::new(),
+            volume_selector: Some(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn selector_resolves_to_matching_members() {
+        let set =
+            eligible_log_dirs(&pool(), Some(&selector_spec(&[("class", "premium")]))).unwrap();
+        assert_eq!(set, vec!["premium".to_string()]);
+    }
+
+    #[test]
+    fn selector_matching_nothing_fails_loudly() {
+        let err =
+            eligible_log_dirs(&pool(), Some(&selector_spec(&[("class", "gold")]))).unwrap_err();
+        assert!(err.contains("matches no uncordoned pool member"), "{err}");
+    }
+
+    #[test]
+    fn selector_skips_cordoned_members() {
+        let mut p = pool();
+        p[1].cordoned = true; // premium
+        let err = eligible_log_dirs(&p, Some(&selector_spec(&[("class", "premium")]))).unwrap_err();
+        assert!(err.contains("cordoned"), "{err}");
+    }
+
+    #[test]
+    fn selector_and_volumes_are_mutually_exclusive() {
+        let mut spec = selector_spec(&[("class", "premium")]);
+        spec.volumes = vec!["fast".into()];
+        let err = eligible_log_dirs(&pool(), Some(&spec)).unwrap_err();
+        assert!(err.contains("mutually exclusive"), "{err}");
     }
 }

@@ -301,6 +301,11 @@ async fn main() -> Result<()> {
         // the spot (gh #74) rather than on the next periodic tick.
         let topics_apply = topics.clone();
         let topics_delete = topics.clone();
+        // gh #224: per-topic in-flight guard for the migrate-annotation
+        // driver so relist echoes don't stack concurrent drivers.
+        let migrations_in_flight: Arc<parking_lot::Mutex<std::collections::HashSet<String>>> =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+        let broker_migrate = broker.clone();
         let engine_delete = engine.clone();
         let notify_apply = topic_notify.clone();
         let notify_delete = topic_notify.clone();
@@ -310,7 +315,7 @@ async fn main() -> Result<()> {
             if let Err(err) = kaas_k8s::kube_watchers::run_topic_watch(
                 client,
                 watch_ns,
-                move |name, partitions, volumes| {
+                move |name, partitions, volumes, migrate_to| {
                     let prev = topics_apply
                         .all()
                         .into_iter()
@@ -325,6 +330,55 @@ async fn main() -> Result<()> {
                     // placement — the engine resolves partition roots
                     // through the registry.
                     topics_apply.set_volume_assignments(name, volumes.clone());
+                    // gh #224: `kaas.rs/migrate-to-volume` annotation —
+                    // drive this topic's partitions onto the target log
+                    // dir, one at a time, through the same path the
+                    // AlterReplicaLogDirs handler uses. Level-triggered
+                    // and idempotent: already-placed partitions skip,
+                    // non-led partitions are another broker's job, and
+                    // an unknown target stops the pass (typo — surfaced
+                    // in the broker log, not a crash loop).
+                    if let Some(target) = migrate_to {
+                        let target = target.to_string();
+                        let name = name.to_string();
+                        if migrations_in_flight.lock().insert(name.clone()) {
+                            let broker = broker_migrate.clone();
+                            let registry = topics_apply.clone();
+                            let in_flight = migrations_in_flight.clone();
+                            tokio::spawn(async move {
+                                for p in 0..partitions {
+                                    let placed = registry
+                                        .volume_assignment(&name, p)
+                                        .unwrap_or_else(|| "default".to_string());
+                                    if placed == target {
+                                        continue;
+                                    }
+                                    let code =
+                                        kaas_broker::migrate_partition(&broker, &name, p, &target)
+                                            .await;
+                                    match code {
+                                        0 => {
+                                            // Rate limit: one partition per
+                                            // pass interval, so a drain never
+                                            // saturates the substrate.
+                                            tokio::time::sleep(std::time::Duration::from_secs(3))
+                                                .await;
+                                        }
+                                        57 => {
+                                            warn!(
+                                                topic = name.as_str(),
+                                                target = target.as_str(),
+                                                "migrate-to-volume: unknown log dir; stopping"
+                                            );
+                                            break;
+                                        }
+                                        _ => {} // not led here / transient — next echo retries
+                                    }
+                                }
+                                in_flight.lock().remove(&name);
+                            });
+                        }
+                    }
                     match prev {
                         None => {
                             notify_apply.notify(kaas_controller::AssignmentReason::TopicCreated)
