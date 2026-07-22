@@ -106,6 +106,7 @@ pub fn install(
     topics: Arc<TopicRegistry>,
     engine: Arc<dyn StorageEngine>,
     data_dir: Option<std::path::PathBuf>,
+    cluster_dir: Option<std::path::PathBuf>,
     broker_id: i32,
     cluster_id: &str,
     cancel: CancellationToken,
@@ -128,17 +129,19 @@ pub fn install(
         _ => None,
     };
 
-    // Cluster-state root: `<data_dir>/__cluster`; dev mode (no
-    // KAAS_DATA_DIR) gets a tmp dir so the stores still function
-    // under unit tests and single-binary smoke runs.
+    // Cluster-state root: the caller's resolved `KAAS_CLUSTER_DIR`
+    // (gh #221 phase 1 — its own volume when the chart's
+    // `storage.controlPlane` is enabled), falling back to the legacy
+    // `<data_dir>/__cluster`; dev mode (neither) gets a tmp dir so
+    // the stores still function under unit tests and single-binary
+    // smoke runs.
     //
     // Offsets live HERE, not at the data-dir root — a sibling of the
     // topic dirs is exactly what the operator's orphan-topic sweep
     // reclaims, and the pre-fix layout lost committed offsets to it
     // every 5 minutes (gh #223).
-    let cluster_dir = data_dir
-        .clone()
-        .map(|d| d.join("__cluster"))
+    let cluster_dir = cluster_dir
+        .or_else(|| data_dir.clone().map(|d| d.join("__cluster")))
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kaas-cluster-mem"));
     std::fs::create_dir_all(&cluster_dir)?;
     if let Some(dir) = data_dir.as_ref() {
@@ -253,7 +256,8 @@ pub fn install(
                     Some(w) => (w.lease_epoch.clone(), w.heart.clone()),
                     None => (Arc::new(LocalLeaseEpoch), Arc::new(LocalHeartbeat)),
                 };
-            let coordinator = Coordinator::new(self_id.clone(), dir.clone(), lease_src, heart_src);
+            let coordinator =
+                Coordinator::new(self_id.clone(), cluster_dir.clone(), lease_src, heart_src);
             if wiring.is_some() {
                 // Real heartbeat stream wired → arm the gh #62
                 // produce-path self-fence (3 s staleness bound).
@@ -323,6 +327,7 @@ pub fn install(
                 Some(w) => spawn_cluster_tasks(
                     w,
                     dir.clone(),
+                    cluster_dir.clone(),
                     self_id.clone(),
                     topics.clone(),
                     manager.clone(),
@@ -334,6 +339,7 @@ pub fn install(
                 None => {
                     if let Some(handle) = spawn_single_broker_assignment_loop(
                         dir.clone(),
+                        cluster_dir.clone(),
                         self_id.clone(),
                         topics.clone(),
                         cancel.clone(),
@@ -503,6 +509,7 @@ async fn run_txn_reaper(store: Arc<TxnStateStore>, cancel: CancellationToken) {
 /// on the broker.
 fn spawn_single_broker_assignment_loop(
     data_dir: std::path::PathBuf,
+    cluster_dir: std::path::PathBuf,
     self_id: String,
     topics: Arc<TopicRegistry>,
     cancel: CancellationToken,
@@ -525,6 +532,7 @@ fn spawn_single_broker_assignment_loop(
         live_topics,
         broker_source.clone(),
     )
+    .with_cluster_dir(cluster_dir)
     .with_group_source(broker_source.clone());
     let election = LocalElection::new(self_id.clone());
 
@@ -821,6 +829,7 @@ fn decide_alive(
 fn spawn_cluster_tasks(
     w: ClusterWiring,
     dir: std::path::PathBuf,
+    cluster_dir: std::path::PathBuf,
     self_id: String,
     topics: Arc<TopicRegistry>,
     manager: Arc<Manager>,
@@ -866,6 +875,7 @@ fn spawn_cluster_tasks(
                     heartbeat_bind,
                     lease_timings,
                     dir,
+                    cluster_dir,
                     topics,
                     manager,
                     coordinator_pump,
@@ -939,6 +949,7 @@ async fn control_plane(
     heartbeat_bind: String,
     lease_timings: (Duration, Duration, Duration),
     dir: std::path::PathBuf,
+    cluster_dir: std::path::PathBuf,
     topics: Arc<TopicRegistry>,
     manager: Arc<Manager>,
     coordinator: Arc<Coordinator>,
@@ -1061,6 +1072,7 @@ async fn control_plane(
                     epoch,
                     leader_token,
                     dir.clone(),
+                    cluster_dir.clone(),
                     self_id.clone(),
                     topics.clone(),
                     registry.clone(),
@@ -1088,6 +1100,7 @@ pub(crate) async fn run_controller(
     epoch: i64,
     leader_token: CancellationToken,
     dir: std::path::PathBuf,
+    cluster_dir: std::path::PathBuf,
     self_id: String,
     topics: Arc<TopicRegistry>,
     registry: Arc<BrokerRegistry>,
@@ -1132,6 +1145,7 @@ pub(crate) async fn run_controller(
         self_id: self_id.clone(),
     });
     let loop_handle = AssignmentLoop::new(dir, self_id, live_topics, broker_src.clone())
+        .with_cluster_dir(cluster_dir)
         .with_group_source(heart_srv.clone());
 
     // Heartbeat grace: a fresh controller's server starts empty, and
@@ -1266,7 +1280,7 @@ impl kaas_observability::GaugeSource for RuntimeGaugeSource {
     }
 
     fn assignment_file_size_bytes(&self) -> i64 {
-        let path = kaas_broker::Assignment::path_in(self.coordinator.data_dir());
+        let path = self.coordinator.assignment_path();
         std::fs::metadata(path).map_or(0, |m| i64::try_from(m.len()).unwrap_or(i64::MAX))
     }
 

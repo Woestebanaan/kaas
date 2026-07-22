@@ -84,6 +84,19 @@ fn run_init() -> Result<()> {
 
     ensure_data_dir_perms(data_path, uid, gid)
         .with_context(|| format!("init: chown/chmod {}", data_path.display()))?;
+
+    // gh #221 phase 1: the control-plane volume (KAAS_CLUSTER_DIR)
+    // needs the same ownership fix as the data volume when it's a
+    // separate mount — same CSI fsGroup caveats apply.
+    if let Ok(cluster_dir) = std::env::var("KAAS_CLUSTER_DIR") {
+        if !cluster_dir.is_empty() {
+            let cluster_path = Path::new(&cluster_dir);
+            std::fs::create_dir_all(cluster_path)
+                .with_context(|| format!("init: mkdir {}", cluster_path.display()))?;
+            ensure_data_dir_perms(cluster_path, uid, gid)
+                .with_context(|| format!("init: chown/chmod {}", cluster_path.display()))?;
+        }
+    }
     eprintln!(
         "kaas init: data_dir={} uid={} gid={} ok",
         data_dir, uid, gid
@@ -204,8 +217,7 @@ async fn main() -> Result<()> {
     // as duplicates, or rejected with OUT_OF_ORDER_SEQUENCE_NUMBER.
     // A failure here is non-fatal: we log and keep the in-memory
     // counter rather than refusing to serve.
-    if let Some(dir) = cli.data_dir.as_ref() {
-        let cluster_dir = dir.join("__cluster");
+    if let Some(cluster_dir) = cli.resolved_cluster_dir() {
         match kaas_broker::ProducerIdAllocator::open(&cluster_dir, cli.broker_id) {
             Ok(alloc) => {
                 broker.install_producer_id_allocator(Arc::new(alloc));
@@ -357,6 +369,7 @@ async fn main() -> Result<()> {
         topics.clone(),
         engine.clone(),
         cli.data_dir.clone(),
+        cli.resolved_cluster_dir(),
         cli.broker_id,
         &cli.cluster_id,
         cancel.clone(),
@@ -522,9 +535,7 @@ fn build_auth(cli: &Cli) -> Result<AuthSetup> {
     }
 
     let cluster_dir = cli
-        .data_dir
-        .as_ref()
-        .map(|d| d.join("__cluster"))
+        .resolved_cluster_dir()
         .unwrap_or_else(|| PathBuf::from("/data/__cluster"));
     let creds_path = cluster_dir.join("credentials.json");
     let acls_path = cluster_dir.join("acls.json");

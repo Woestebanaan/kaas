@@ -371,7 +371,8 @@ pub fn migrate_legacy_offsets_dir(data_dir: &std::path::Path, cluster_dir: &std:
     // Cross-device (or a half-migrated target from a previous crash):
     // copy file-by-file, never overwriting a file the new store may
     // already have rewritten, then drop the legacy dir.
-    if let Err(e) = copy_offsets_dir(&legacy, &target).and_then(|()| std::fs::remove_dir_all(&legacy))
+    if let Err(e) =
+        copy_offsets_dir(&legacy, &target).and_then(|()| std::fs::remove_dir_all(&legacy))
     {
         tracing::warn!(%e, from = %legacy.display(),
             "legacy consumer-offsets copy-migration incomplete; will retry next boot");

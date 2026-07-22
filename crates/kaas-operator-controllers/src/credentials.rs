@@ -117,16 +117,18 @@ impl CredentialsFile {
     }
 }
 
-/// `<data_dir>/__cluster/credentials.json`.
-pub fn credentials_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("__cluster").join("credentials.json")
+/// `<cluster_dir>/credentials.json`. Takes the cluster-state dir
+/// itself — the operator resolves `KAAS_CLUSTER_DIR` (default
+/// `<data_dir>/__cluster`, gh #221 phase 1) once at startup.
+pub fn credentials_path(cluster_dir: &Path) -> PathBuf {
+    cluster_dir.join("credentials.json")
 }
 
 /// Read `credentials.json`. Returns an empty `{version: 1, users: []}`
 /// when the file is absent (pre-operator-write boot returns
 /// no error, just an empty struct so the next write upserts cleanly).
-pub fn read_credentials(data_dir: &Path) -> Result<CredentialsFile, ControllerError> {
-    let path = credentials_path(data_dir);
+pub fn read_credentials(cluster_dir: &Path) -> Result<CredentialsFile, ControllerError> {
+    let path = credentials_path(cluster_dir);
     match std::fs::read(&path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CredentialsFile {
@@ -140,8 +142,8 @@ pub fn read_credentials(data_dir: &Path) -> Result<CredentialsFile, ControllerEr
 /// Atomic write of `credentials.json` via `<kaas_storage>::atomic_write`
 /// (tempfile + rename + fsync). Stamps `version = 1` so downstream
 /// readers can gate on it later if we ever bump the format.
-pub fn write_credentials(data_dir: &Path, cf: &CredentialsFile) -> Result<(), ControllerError> {
-    let cluster_dir = data_dir.join("__cluster");
+pub fn write_credentials(cluster_dir: &Path, cf: &CredentialsFile) -> Result<(), ControllerError> {
+    let cluster_dir = cluster_dir.to_path_buf();
     std::fs::create_dir_all(&cluster_dir)?;
     let mut stamped = cf.clone();
     stamped.version = 1;

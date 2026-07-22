@@ -24,6 +24,10 @@ spec:
           env:
             - name: KAAS_DATA_DIR
               value: {{ .Values.storage.mountPath }}
+            {{- if .Values.storage.controlPlane.enabled }}
+            - name: KAAS_CLUSTER_DIR
+              value: {{ .Values.storage.controlPlane.mountPath }}
+            {{- end }}
             - name: KAAS_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -62,10 +66,19 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.storage.controlPlane.enabled }}
+            - name: cluster-state
+              mountPath: {{ .Values.storage.controlPlane.mountPath }}
+            {{- end }}
           resources: {{- toYaml .Values.operator.resources | nindent 12 }}
       volumes:
-        # Operator mounts the SAME PVC as the brokers.
+        # Operator mounts the SAME PVCs as the brokers.
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "kaas.pvcName" . }}
+        {{- if .Values.storage.controlPlane.enabled }}
+        - name: cluster-state
+          persistentVolumeClaim:
+            claimName: {{ include "kaas.controlPlanePvcName" . }}
+        {{- end }}
 {{- end }}

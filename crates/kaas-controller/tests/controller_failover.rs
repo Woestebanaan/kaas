@@ -53,9 +53,11 @@ fn build_loop(
 }
 
 fn coord(self_id: &str, data_dir: &std::path::Path, lease: Arc<AtomicEpoch>) -> Arc<Coordinator> {
+    // Coordinator takes the cluster-state dir itself (gh #221); the
+    // loop's default layout writes to `<data_dir>/__cluster`.
     Coordinator::new(
         self_id,
-        data_dir.to_path_buf(),
+        data_dir.join("__cluster"),
         lease,
         Arc::new(LocalHeartbeat),
     )

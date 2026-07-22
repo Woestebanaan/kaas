@@ -100,7 +100,7 @@ pub fn install_runtime_gauges(meter: &Meter) {
 
     meter
         .i64_observable_gauge("kaas.assignment.file.size")
-        .with_description("Size of /data/__cluster/assignment.json")
+        .with_description("Size of assignment.json in the cluster-state dir")
         .with_unit("By")
         .with_callback(|observer| match load_source() {
             Some(src) => observer.observe(src.assignment_file_size_bytes(), &[]),

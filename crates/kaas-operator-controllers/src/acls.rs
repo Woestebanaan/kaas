@@ -57,9 +57,10 @@ pub struct AclResource {
     pub pattern_type: String,
 }
 
-/// `<data_dir>/__cluster/acls.json`.
-pub fn acls_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("__cluster").join("acls.json")
+/// `<cluster_dir>/acls.json`. Takes the cluster-state dir itself
+/// (gh #221 phase 1 — see `credentials_path`).
+pub fn acls_path(cluster_dir: &Path) -> PathBuf {
+    cluster_dir.join("acls.json")
 }
 
 /// List every `KafkaUser` CR in `namespace` and rebuild `acls.json`
@@ -76,7 +77,7 @@ pub fn acls_path(data_dir: &Path) -> PathBuf {
 pub async fn reconcile_acls(
     client: &Client,
     namespace: &str,
-    data_dir: &Path,
+    cluster_dir: &Path,
 ) -> Result<(), ControllerError> {
     let api: Api<KafkaUser> = Api::namespaced(client.clone(), namespace);
     let users = api.list(&ListParams::default()).await?;
@@ -102,7 +103,7 @@ pub async fn reconcile_acls(
     }
 
     write_acl_file(
-        data_dir,
+        cluster_dir,
         &AclFile {
             version: 1,
             acls: entries,
@@ -140,8 +141,8 @@ pub fn acl_to_entry(principal: &str, acl: &KafkaUserAcl) -> AclEntry {
 
 /// Read `acls.json` (returns empty `{version: 1, acls: []}` when
 /// the file is absent). Useful for tests + sweep-style assertions.
-pub fn read_acl_file(data_dir: &Path) -> Result<AclFile, ControllerError> {
-    let path = acls_path(data_dir);
+pub fn read_acl_file(cluster_dir: &Path) -> Result<AclFile, ControllerError> {
+    let path = acls_path(cluster_dir);
     match std::fs::read(&path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AclFile {
@@ -153,8 +154,8 @@ pub fn read_acl_file(data_dir: &Path) -> Result<AclFile, ControllerError> {
 }
 
 /// Atomic write of `acls.json`. Stamps `version = 1`.
-pub fn write_acl_file(data_dir: &Path, file: &AclFile) -> Result<(), ControllerError> {
-    let cluster_dir = data_dir.join("__cluster");
+pub fn write_acl_file(cluster_dir: &Path, file: &AclFile) -> Result<(), ControllerError> {
+    let cluster_dir = cluster_dir.to_path_buf();
     std::fs::create_dir_all(&cluster_dir)?;
     let mut stamped = file.clone();
     stamped.version = 1;

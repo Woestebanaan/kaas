@@ -72,6 +72,7 @@ async fn two_brokers_share_assignment_json_and_split_partitions() {
         topics.clone(),
         e0,
         Some(tmp.path().to_path_buf()),
+        None,
         0,
         "test-cluster",
         cancel.clone(),
@@ -85,6 +86,7 @@ async fn two_brokers_share_assignment_json_and_split_partitions() {
         topics.clone(),
         e1,
         Some(tmp.path().to_path_buf()),
+        None,
         1,
         "test-cluster",
         cancel.clone(),
@@ -211,7 +213,7 @@ async fn three_broker_controller_balances_and_reassigns() {
             let lease_src: Arc<dyn LeaseEpochSource> = lease.clone();
             let c = Coordinator::new(
                 format!("kaas-{id}"),
-                dir.clone(),
+                dir.join("__cluster"),
                 lease_src,
                 Arc::new(LocalHeartbeat),
             );
@@ -248,6 +250,7 @@ async fn three_broker_controller_balances_and_reassigns() {
         1,
         leader_token.clone(),
         dir.clone(),
+        dir.join("__cluster"),
         "kaas-0".to_owned(),
         topics.clone(),
         registry.clone(),

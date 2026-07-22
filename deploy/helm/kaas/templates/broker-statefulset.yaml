@@ -51,6 +51,10 @@ spec:
           env:
             - name: KAAS_DATA_DIR
               value: {{ .Values.storage.mountPath }}
+            {{- if .Values.storage.controlPlane.enabled }}
+            - name: KAAS_CLUSTER_DIR
+              value: {{ .Values.storage.controlPlane.mountPath }}
+            {{- end }}
             - name: KAAS_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -66,6 +70,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.storage.controlPlane.enabled }}
+            - name: cluster-state
+              mountPath: {{ .Values.storage.controlPlane.mountPath }}
+            {{- end }}
       containers:
         - name: broker
           image: {{ include "kaas.brokerImage" . }}
@@ -110,6 +118,10 @@ spec:
               value: {{ .Values.clusterDomain | default "cluster.local" }}
             - name: KAAS_DATA_DIR
               value: {{ .Values.storage.mountPath }}
+            {{- if .Values.storage.controlPlane.enabled }}
+            - name: KAAS_CLUSTER_DIR
+              value: {{ .Values.storage.controlPlane.mountPath }}
+            {{- end }}
             - name: KAAS_CLUSTER_ID
               value: {{ .Values.broker.clusterID }}
             - name: KAAS_CLUSTER_NAME
@@ -316,6 +328,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.storage.controlPlane.enabled }}
+            - name: cluster-state
+              mountPath: {{ .Values.storage.controlPlane.mountPath }}
+            {{- end }}
             {{- if include "kaas.hasAnyTLSListener" . }}
             - name: tls
               mountPath: /tls
@@ -331,6 +347,11 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "kaas.pvcName" . }}
+        {{- if .Values.storage.controlPlane.enabled }}
+        - name: cluster-state
+          persistentVolumeClaim:
+            claimName: {{ include "kaas.controlPlanePvcName" . }}
+        {{- end }}
         {{- if include "kaas.hasAnyTLSListener" . }}
         - name: tls
           secret:

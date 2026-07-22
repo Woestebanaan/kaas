@@ -160,6 +160,14 @@ pub struct TlsConfig {
 pub struct Cli {
     pub listeners: Vec<ListenerEntry>,
     pub data_dir: Option<PathBuf>,
+    /// `KAAS_CLUSTER_DIR` — where cluster-wide coordination state
+    /// (assignment.json, txn_state/, __consumer_offsets/, credentials,
+    /// fence + marker queues, producer_ids/) lives. Unset → the
+    /// legacy layout, `<data_dir>/__cluster`. The chart sets this to
+    /// the control-plane volume's mount when `storage.controlPlane`
+    /// is enabled (gh #221 phase 1) so a runaway topic filling the
+    /// data volume can't take the control plane down with it.
+    pub cluster_dir: Option<PathBuf>,
     pub flush_interval_messages: i64,
     pub cluster_id: String,
     pub broker_id: i32,
@@ -209,6 +217,14 @@ impl Cli {
             }
         });
 
+        let cluster_dir = env::var("KAAS_CLUSTER_DIR").ok().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(s))
+            }
+        });
+
         let flush_interval_messages = env::var("KAAS_FLUSH_INTERVAL_MESSAGES")
             .ok()
             .map(|s| s.parse::<i64>())
@@ -250,6 +266,7 @@ impl Cli {
         Ok(Self {
             listeners,
             data_dir,
+            cluster_dir,
             flush_interval_messages,
             cluster_id,
             broker_id,
@@ -260,6 +277,16 @@ impl Cli {
             super_users,
             ssl_principal_mapping_rules,
         })
+    }
+
+    /// The effective cluster-state directory: `KAAS_CLUSTER_DIR` when
+    /// set, else the legacy `<data_dir>/__cluster`. `None` only in
+    /// dev mode (no data dir either) — callers fall back to their
+    /// tmp-dir shims there.
+    pub fn resolved_cluster_dir(&self) -> Option<PathBuf> {
+        self.cluster_dir
+            .clone()
+            .or_else(|| self.data_dir.as_ref().map(|d| d.join("__cluster")))
     }
 }
 

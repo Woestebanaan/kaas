@@ -58,7 +58,7 @@ async fn stale_epoch_write_is_rejected_by_coordinator() {
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(2)));
     let coord = Coordinator::new(
         "kaas-0",
-        tmp.path().to_path_buf(),
+        tmp.path().join("__cluster"),
         lease.clone(),
         Arc::new(LocalHeartbeat),
     );
@@ -101,7 +101,7 @@ async fn higher_version_at_same_epoch_overrides_lower_version() {
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(1)));
     let coord = Coordinator::new(
         "kaas-0",
-        tmp.path().to_path_buf(),
+        tmp.path().join("__cluster"),
         lease.clone(),
         Arc::new(LocalHeartbeat),
     );
@@ -136,7 +136,7 @@ async fn epoch_bump_unfences_the_new_controller() {
     let lease = Arc::new(AtomicEpoch(AtomicI64::new(1)));
     let coord = Coordinator::new(
         "kaas-0",
-        tmp.path().to_path_buf(),
+        tmp.path().join("__cluster"),
         lease.clone(),
         Arc::new(LocalHeartbeat),
     );

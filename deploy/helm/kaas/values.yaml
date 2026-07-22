@@ -166,6 +166,24 @@ storage:
   size: 500Gi
   accessMode: ReadWriteMany
   mountPath: /data
+  # gh #221 phase 1: dedicated control-plane volume. Cluster-wide
+  # coordination state (assignment.json, txn slots, consumer offsets,
+  # credentials/ACLs, fence + marker queues, producer-id blocks) moves
+  # to its own small RWX volume, so a runaway topic filling the data
+  # volume degrades into a per-topic produce error instead of taking
+  # the whole control plane down.
+  #
+  # Enabling this on an EXISTING cluster is a migration: scale the
+  # brokers and operator down, copy /data/__cluster/* onto the new
+  # volume's root, then upgrade with enabled=true. (Consumer offsets
+  # under __cluster/__consumer_offsets are adopted automatically; the
+  # rest of the state is not.)
+  controlPlane:
+    enabled: false
+    className: ""               # "" → same class as storage.className
+    size: 1Gi
+    accessMode: ReadWriteMany
+    mountPath: /cluster
 
 auth:
   # When false, the broker uses an AllowAllAuthEngine (no authentication,

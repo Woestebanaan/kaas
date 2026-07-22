@@ -162,6 +162,9 @@ See `values.yaml` for the full set of tunables. Common overrides:
 | `broker.replicaCount` | 3 | Number of broker pods |
 | `storage.className` | ceph-filesystem | RWX StorageClass |
 | `storage.size` | 500Gi | PVC capacity |
+| `storage.controlPlane.enabled` | false | Dedicated control-plane volume (gh #221 phase 1): cluster-wide coordination state (`assignment.json`, txn slots, consumer offsets, credentials/ACLs) moves to its own PVC, mounted at `storage.controlPlane.mountPath` and exported as `KAAS_CLUSTER_DIR`. Enabling on an existing cluster is a migration — scale brokers+operator to 0, copy `/data/__cluster/*` to the new volume's root, upgrade. |
+| `storage.controlPlane.size` | 1Gi | Control-plane PVC capacity |
+| `storage.controlPlane.className` | "" | "" → same as `storage.className` |
 | `auth.enabled` | true | Enable credentials.json/acls.json loading |
 | `auth.requireSasl` | false | Reject non-SASL requests |
 | `listeners[]` | plain/external/authed | Strimzi-shape listener array (gh #126): per-entry `name`, `port`, `type`, `tls`, `authentication.type`, `enabled` — see values.yaml comments |

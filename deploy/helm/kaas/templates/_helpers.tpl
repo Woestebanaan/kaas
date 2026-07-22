@@ -22,6 +22,10 @@ Common template helpers.
 {{- printf "%s-data" (include "kaas.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "kaas.controlPlanePvcName" -}}
+{{- printf "%s-cluster-state" (include "kaas.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "kaas.brokerSAName" -}}
 {{- if .Values.serviceAccount.broker.create -}}
 {{- default (printf "%s-broker" (include "kaas.fullname" .)) .Values.serviceAccount.broker.name -}}

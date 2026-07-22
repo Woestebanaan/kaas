@@ -1,4 +1,4 @@
-# The NFS substrate contract
+# The RWX substrate contract
 
 Apache Kafka gets durability and failover from **replication**. Every partition
 has a leader and a set of in-sync followers, and a record isn't acknowledged
@@ -6,8 +6,8 @@ until it is on enough of them. Lose a broker and a follower is promoted — the
 data was already there.
 
 kaas makes a different bet. It runs on Kubernetes and stores every partition on
-a **shared `ReadWriteMany` volume** — NFSv4 or an NFS-equivalent — with **one
-writer per partition** and **no followers at all**. Durability comes from the
+a **shared `ReadWriteMany` volume** with **one writer per partition** and **no
+followers at all**. Durability comes from the
 shared filesystem (plus whatever redundancy the storage itself provides), and
 failover means a surviving broker opens the *same files* the dead one was
 writing. There is no second copy to fall back on, because the shared volume
@@ -15,11 +15,29 @@ writing. There is no second copy to fall back on, because the shared volume
 in short, it trades a replication protocol and a consensus log for a much
 smaller system that leans on Kubernetes and the filesystem instead.)
 
-That bet buys a lot, but it moves the hard problems onto the filesystem. And
-when the filesystem is NFS, correctness depends on respecting what NFS actually
-promises — which is less than most code assumes. This page is that contract.
-Most of the subtle bugs in kaas's history are what happens when a piece of code
-forgets it.
+That bet buys a lot, but it moves the hard problems onto the filesystem. kaas
+never speaks NFS — it does POSIX file operations on whatever the CSI driver
+mounted — so the real requirement is not a protocol but a **semantic contract**:
+three guarantees the substrate must honor, spelled out below. NFS is the
+*reference substrate* the contract was debugged against, and the floor it
+describes; correctness depends on respecting what that floor actually promises,
+which is less than most code assumes. This page is that contract. Most of the
+subtle bugs in kaas's history are what happens when a piece of code forgets it.
+
+**Which filesystems qualify?** Any RWX filesystem that delivers the three
+guarantees: the NFSv4.1 family (Linux kernel NFS, Azure NetApp Files, FSx for
+NetApp ONTAP, EFS, Azure Files NFS), and coherent POSIX filesystems like
+CephFS, which *exceed* the contract (stronger than close-to-open, and no
+silly-rename behavior — though the coding rules below still apply in full:
+read-modify-write and check-then-act are non-atomic on every shared
+filesystem). Metadata-engine filesystems over object storage (JuiceFS-class)
+satisfy the contract semantically but bring their own operational tax and
+object-PUT fsync latency. Disqualified regardless of protocol: SMB/CIFS
+(divergent open/rename/locking semantics), FUSE object-store mounts whose
+rename is copy+delete (s3fs, gcsfuse, Mountpoint for S3), and **any substrate
+that lies about fsync — including an `async` NFS export, which is "still NFS"
+and still breaks everything**. The risk direction is always a substrate weaker
+than the contract, never stronger.
 
 ## What lives on the shared volume
 
@@ -36,14 +54,19 @@ coordinate, is a file other brokers can read:
 - **The state Kafka keeps in internal topics** — consumer offsets, transaction
   state, producer fences — are plain files here rather than `__consumer_offsets`
   and the transaction log. A broker that becomes a coordinator reads the same
-  file the previous one wrote.
+  file the previous one wrote. This cluster-wide state lives in its own
+  directory (`__cluster/` by default), and can live on its own *volume*: the
+  broker and operator honor `KAAS_CLUSTER_DIR`, and the chart's
+  `storage.controlPlane` mounts a dedicated control-plane volume so a runaway
+  topic filling the data volume degrades into a per-topic produce error instead
+  of taking cluster coordination down with it.
 
 Because these files are read and written across brokers, every one of them is
 exposed to the guarantees — and the non-guarantees — below.
 
-## What NFS actually guarantees
+## What the substrate actually guarantees
 
-Three things, and only three:
+Three things, and only three — this is the contract's floor, which NFS defines:
 
 1. **A rename within one directory is atomic.** A reader sees the old target or
    the new one, never a half-written mix. This is the load-bearing primitive.
@@ -63,10 +86,12 @@ That is the whole toolbox. Everything you might *wish* were atomic is not:
   is exactly that shape.
 - **Deleting a file another host has open is not clean.** NFS renames it to a
   hidden `.nfsXXXX` file and keeps the parent directory busy until every open
-  handle closes.
+  handle closes. (This one is NFS-specific — CephFS behaves like a local
+  filesystem here — but the file-handle discipline it forced is kept on every
+  substrate, because it is what makes leader-side deletes actually free disk.)
 
-You cannot make a recursive delete atomic on NFS. So the goal is not "make
-everything atomic" — it is the following.
+You cannot make a recursive delete atomic on a shared filesystem. So the goal
+is not "make everything atomic" — it is the following.
 
 ## The contract
 

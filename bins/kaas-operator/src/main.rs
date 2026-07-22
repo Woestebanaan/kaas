@@ -76,12 +76,21 @@ async fn main() -> Result<()> {
     kaas_observability::install_tracing(&log_level, &log_format, providers.tracer.clone());
 
     let data_dir = PathBuf::from(env_or("KAAS_DATA_DIR", DEFAULT_DATA_DIR));
+    // gh #221 phase 1: cluster-wide state (credentials.json,
+    // acls.json, …) may live on its own control-plane volume. Unset →
+    // the legacy `<data_dir>/__cluster` layout.
+    let cluster_dir = std::env::var("KAAS_CLUSTER_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("__cluster"));
     let namespace = env_or("KAAS_NAMESPACE", DEFAULT_NAMESPACE);
     let metrics_addr = env_or("METRICS_BIND_ADDRESS", DEFAULT_METRICS_ADDR);
     let probe_addr = env_or("HEALTH_PROBE_BIND_ADDRESS", DEFAULT_PROBE_ADDR);
 
     info!(
         %namespace, data_dir = %data_dir.display(),
+        cluster_dir = %cluster_dir.display(),
         %metrics_addr, %probe_addr,
         "starting kaas-operator"
     );
@@ -166,6 +175,7 @@ async fn main() -> Result<()> {
     let sweep_client = client.clone();
     let sweep_ns = namespace.clone();
     let sweep_dir = data_dir.clone();
+    let sweep_cluster_dir = cluster_dir.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(SWEEP_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -182,7 +192,7 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => error!(error = ?e, "topic sweep failed"),
             }
-            match sweep::sweep_credentials(&sweep_client, &sweep_ns, &sweep_dir).await {
+            match sweep::sweep_credentials(&sweep_client, &sweep_ns, &sweep_cluster_dir).await {
                 Ok(removed) if !removed.is_empty() => {
                     info!(?removed, "removed orphan credentials")
                 }
@@ -198,7 +208,7 @@ async fn main() -> Result<()> {
     let topic_ctx = Arc::new(KafkaTopicReconciler::new(client.clone(), data_dir.clone()));
     let user_ctx = Arc::new(KafkaUserReconciler::new(
         client.clone(),
-        data_dir.clone(),
+        cluster_dir.clone(),
         namespace.clone(),
     ));
     let cluster_ctx = Arc::new(KafkaClusterReconciler::new(

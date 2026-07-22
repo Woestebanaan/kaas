@@ -114,6 +114,12 @@ impl GroupSource for StaticSources {
 /// can introduce a `tokio::mpsc` queue if the call rate climbs.
 pub struct AssignmentLoop<T, B, G> {
     data_dir: PathBuf,
+    /// gh #221 phase 1: where `assignment.json` lives. `None` →
+    /// legacy `<data_dir>/__cluster`. The broker sets this from
+    /// `KAAS_CLUSTER_DIR` when the control-plane volume is split
+    /// out. `data_dir` stays regardless — the epoch-floor scan walks
+    /// the topic dirs, which never move.
+    cluster_dir: Option<PathBuf>,
     controller_id: String,
     /// `AtomicI64` so [`Self::start`] can stamp the lease-acquire
     /// epoch after the `Arc` is already shared. Read on every
@@ -161,6 +167,7 @@ where
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir: data_dir.into(),
+            cluster_dir: None,
             controller_id: controller_id.into(),
             controller_epoch: AtomicI64::new(0),
             topics,
@@ -169,6 +176,25 @@ where
             mirror: Arc::new(NoopMirror),
             state: Mutex::new(LoopState::default()),
         })
+    }
+
+    /// Override the directory holding `assignment.json` (gh #221
+    /// phase 1). Call immediately after `new`, like the other
+    /// builders.
+    pub fn with_cluster_dir(self: Arc<Self>, dir: impl Into<PathBuf>) -> Arc<Self> {
+        let mut this = self;
+        if let Some(inner) = Arc::get_mut(&mut this) {
+            inner.cluster_dir = Some(dir.into());
+        }
+        this
+    }
+
+    /// The effective cluster-state dir: the override, else the
+    /// legacy `<data_dir>/__cluster`.
+    fn cluster_dir(&self) -> PathBuf {
+        self.cluster_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("__cluster"))
     }
 
     /// Attach an optional [`GroupSource`]. Without one,
@@ -201,7 +227,7 @@ where
         self.controller_epoch.store(epoch, Ordering::Relaxed);
         // Bootstrap: carry the version counter forward so a
         // restarted controller doesn't rewind the sequence.
-        let path = Assignment::path_in(&self.data_dir);
+        let path = self.cluster_dir().join(Assignment::FILE_NAME);
         if let Ok(bytes) = std::fs::read(&path) {
             if let Ok(prev) = serde_json::from_slice::<Assignment>(&bytes) {
                 let mut s = self.state.lock();
@@ -305,7 +331,7 @@ where
         m.assignment_changes.add(1, &[]);
 
         let started = std::time::Instant::now();
-        let write_res = atomic_write(&self.data_dir, &assignment);
+        let write_res = atomic_write(&self.cluster_dir(), &assignment);
         m.assignment_file_write_latency
             .record(started.elapsed().as_secs_f64(), &[]);
         m.assignment_file_writes.add(
@@ -377,10 +403,12 @@ fn build_broker_entries(brokers: &[String], now: &str) -> Vec<BrokerAssignment> 
         .collect()
 }
 
-/// `tmp + rename` write of `<data_dir>/__cluster/assignment.json`.
+/// `tmp + rename` write of `<cluster_dir>/assignment.json`.
 /// Shared by the loop and by the controller-failover test harness.
-fn atomic_write<T: Serialize>(data_dir: &std::path::Path, payload: &T) -> io::Result<()> {
-    let dir = data_dir.join("__cluster");
+/// Takes the cluster-state dir itself — callers resolve the legacy
+/// `<data_dir>/__cluster` join (gh #221 phase 1).
+fn atomic_write<T: Serialize>(cluster_dir: &std::path::Path, payload: &T) -> io::Result<()> {
+    let dir = cluster_dir.to_path_buf();
     std::fs::create_dir_all(&dir)?;
     let final_path = dir.join(Assignment::FILE_NAME);
     let mut tmp_name = String::from(Assignment::FILE_NAME);

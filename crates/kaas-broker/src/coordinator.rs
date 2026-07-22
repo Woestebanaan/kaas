@@ -99,7 +99,10 @@ struct Inner {
 /// derived indices + registered change handlers + the seam traits.
 pub struct Coordinator {
     self_id: BrokerId,
-    data_dir: PathBuf,
+    /// Cluster-state directory holding `assignment.json` — the
+    /// resolved `KAAS_CLUSTER_DIR` (gh #221 phase 1), NOT the data
+    /// dir. Legacy layout passes `<data_dir>/__cluster` here.
+    cluster_dir: PathBuf,
     lease: Arc<dyn LeaseEpochSource>,
     heartbeat: Arc<dyn HeartbeatSource>,
     current: ArcSwapOption<Assignment>,
@@ -118,7 +121,7 @@ impl std::fmt::Debug for Coordinator {
         let inner = self.inner.lock();
         f.debug_struct("Coordinator")
             .field("self_id", &self.self_id)
-            .field("data_dir", &self.data_dir)
+            .field("cluster_dir", &self.cluster_dir)
             .field("partitions_led", &inner.ownership.len())
             .field("last_applied_version", &inner.last_applied_version)
             .finish()
@@ -126,15 +129,17 @@ impl std::fmt::Debug for Coordinator {
 }
 
 impl Coordinator {
+    /// `cluster_dir` is the directory that holds `assignment.json`
+    /// directly (no `__cluster` is joined here).
     pub fn new(
         self_id: impl Into<BrokerId>,
-        data_dir: impl Into<PathBuf>,
+        cluster_dir: impl Into<PathBuf>,
         lease: Arc<dyn LeaseEpochSource>,
         heartbeat: Arc<dyn HeartbeatSource>,
     ) -> Arc<Self> {
         Arc::new(Self {
             self_id: self_id.into(),
-            data_dir: data_dir.into(),
+            cluster_dir: cluster_dir.into(),
             lease,
             heartbeat,
             current: ArcSwapOption::empty(),
@@ -171,8 +176,13 @@ impl Coordinator {
         &self.self_id
     }
 
-    pub fn data_dir(&self) -> &Path {
-        &self.data_dir
+    pub fn cluster_dir(&self) -> &Path {
+        &self.cluster_dir
+    }
+
+    /// Absolute path of the assignment file this coordinator watches.
+    pub fn assignment_path(&self) -> PathBuf {
+        self.cluster_dir.join(Assignment::FILE_NAME)
     }
 
     /// Most recently applied snapshot. `None` before the first
@@ -236,7 +246,7 @@ impl Coordinator {
     /// fire registered handlers. Returns `true` when a fresh
     /// assignment was applied.
     pub fn apply_if_new(&self) -> bool {
-        let path = Assignment::path_in(&self.data_dir);
+        let path = self.assignment_path();
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
@@ -422,10 +432,11 @@ mod tests {
         BrokerAssignment, BrokerHealth, ConsumerGroupAssignment, PartitionAssignment, PartitionRole,
     };
 
-    fn write_assignment(data_dir: &Path, a: &Assignment) {
-        let dir = data_dir.join("__cluster");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(Assignment::FILE_NAME);
+    // The tmp dir doubles as the cluster dir — `Coordinator::new`
+    // takes the directory holding `assignment.json` directly.
+    fn write_assignment(cluster_dir: &Path, a: &Assignment) {
+        std::fs::create_dir_all(cluster_dir).unwrap();
+        let path = cluster_dir.join(Assignment::FILE_NAME);
         std::fs::write(path, serde_json::to_vec(a).unwrap()).unwrap();
     }
 

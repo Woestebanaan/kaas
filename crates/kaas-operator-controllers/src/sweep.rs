@@ -157,7 +157,7 @@ fn remove_orphan(path: &Path, name: String, report: &mut SweepReport) {
 pub async fn sweep_credentials(
     client: &Client,
     namespace: &str,
-    data_dir: &Path,
+    cluster_dir: &Path,
 ) -> Result<Vec<String>, ControllerError> {
     let api: Api<KafkaUser> = Api::namespaced(client.clone(), namespace);
     let users =
@@ -169,7 +169,7 @@ pub async fn sweep_credentials(
         .filter_map(|u| u.metadata.name.clone())
         .collect();
 
-    let mut cf = read_credentials(data_dir)?;
+    let mut cf = read_credentials(cluster_dir)?;
     let before = cf.users.len();
     let mut removed: Vec<String> = cf
         .users
@@ -182,7 +182,7 @@ pub async fn sweep_credentials(
     }
     cf.users.retain(|u| keep.contains(&u.username));
     debug_assert_eq!(cf.users.len() + removed.len(), before);
-    write_credentials(data_dir, &cf)?;
+    write_credentials(cluster_dir, &cf)?;
     removed.sort();
     Ok(removed)
 }

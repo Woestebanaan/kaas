@@ -43,16 +43,17 @@ use crate::observer::ReconcileObserver;
 
 pub struct KafkaUserReconciler {
     pub client: Client,
-    pub data_dir: PathBuf,
+    /// Cluster-state dir (resolved `KAAS_CLUSTER_DIR`, gh #221).
+    pub cluster_dir: PathBuf,
     pub namespace: String,
     pub observer: ReconcileObserver,
 }
 
 impl KafkaUserReconciler {
-    pub fn new(client: Client, data_dir: PathBuf, namespace: String) -> Self {
+    pub fn new(client: Client, cluster_dir: PathBuf, namespace: String) -> Self {
         Self {
             client,
-            data_dir,
+            cluster_dir,
             namespace,
             observer: ReconcileObserver::new("KafkaUser"),
         }
@@ -112,12 +113,12 @@ impl KafkaUserReconciler {
         };
 
         // Write credentials.json.
-        let mut cf: CredentialsFile = read_credentials(&self.data_dir)?;
+        let mut cf: CredentialsFile = read_credentials(&self.cluster_dir)?;
         cf.upsert_user(cred);
-        write_credentials(&self.data_dir, &cf)?;
+        write_credentials(&self.cluster_dir, &cf)?;
 
         // Rebuild acls.json from every KafkaUser in the namespace.
-        acls::reconcile_acls(&self.client, &self.namespace, &self.data_dir).await?;
+        acls::reconcile_acls(&self.client, &self.namespace, &self.cluster_dir).await?;
 
         // Status patch.
         let cond = Condition {
@@ -144,12 +145,12 @@ impl KafkaUserReconciler {
     pub async fn handle_not_found(&self, name: &str) -> Result<(), ControllerError> {
         // Drop the credential entry; rebuild acls.json without this
         // user's rules. Both calls are best-effort.
-        let mut cf = read_credentials(&self.data_dir)?;
+        let mut cf = read_credentials(&self.cluster_dir)?;
         if cf.has_user(name) {
             cf.remove_user(name);
-            write_credentials(&self.data_dir, &cf)?;
+            write_credentials(&self.cluster_dir, &cf)?;
         }
-        acls::reconcile_acls(&self.client, &self.namespace, &self.data_dir).await?;
+        acls::reconcile_acls(&self.client, &self.namespace, &self.cluster_dir).await?;
         Ok(())
     }
 

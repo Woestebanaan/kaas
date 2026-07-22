@@ -13,3 +13,21 @@ spec:
   resources:
     requests:
       storage: {{ .Values.storage.size }}
+{{- if .Values.storage.controlPlane.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kaas.controlPlanePvcName" . }}
+  labels: {{- include "kaas.labels" . | nindent 4 }}
+  annotations:
+    # Holds assignment/txn/offset/credential state — never auto-delete.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ .Values.storage.controlPlane.accessMode }}
+  storageClassName: {{ .Values.storage.controlPlane.className | default .Values.storage.className }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.controlPlane.size }}
+{{- end }}
