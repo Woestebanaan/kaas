@@ -373,19 +373,32 @@ fn handle_topic_event<A, D>(
 {
     match event {
         Event::Apply(t) | Event::InitApply(t) => {
-            let Some(name) = t.metadata.name.as_deref() else {
+            // gh #219: register under the effective Kafka name
+            // (`spec.topic_name` when set), NOT `metadata.name`. For a
+            // non-RFC-1123 Kafka name — every uppercase Streams
+            // repartition/changelog topic — `metadata.name` is a
+            // synthetic `kaas-topic-<hash>` (gh #86). Registering by it
+            // makes the topic invisible to clients under its real name:
+            // Metadata returns "unknown partitions" and Streams loops
+            // forever on TopicExists. `effective_topic_name` matches the
+            // partition dir the operator creates, so registry + storage +
+            // client all agree. (See the accessor's own doc contract.)
+            let name = t.effective_topic_name();
+            if name.is_empty() {
                 return;
-            };
-            on_apply(name, t.spec.partitions);
-            state.known.insert(name.to_owned());
+            }
+            let name = name.to_owned();
+            on_apply(&name, t.spec.partitions);
+            state.known.insert(name.clone());
             if let Some(relist) = state.relist.as_mut() {
-                relist.insert(name.to_owned());
+                relist.insert(name);
             }
         }
         Event::Delete(t) => {
-            let Some(name) = t.metadata.name.as_deref() else {
+            let name = t.effective_topic_name();
+            if name.is_empty() {
                 return;
-            };
+            }
             on_delete(name);
             state.known.remove(name);
         }
@@ -492,6 +505,23 @@ mod tests {
         )
     }
 
+    // A CR whose metadata.name is a synthetic hash and whose real Kafka
+    // name lives in spec.topic_name (gh #86 shape for non-RFC-1123 names).
+    fn topic_with_spec_name(
+        meta_name: &str,
+        kafka_name: &str,
+        partitions: i32,
+    ) -> kaas_operator_api::KafkaTopic {
+        kaas_operator_api::KafkaTopic::new(
+            meta_name,
+            kaas_operator_api::KafkaTopicSpec {
+                topic_name: kafka_name.to_owned(),
+                partitions,
+                config: kaas_operator_api::KafkaTopicConfig::default(),
+            },
+        )
+    }
+
     /// Drives `handle_topic_event` over a script of events and returns
     /// the names passed to `on_delete`, in order.
     fn deletes_from(events: Vec<Event<kaas_operator_api::KafkaTopic>>) -> Vec<String> {
@@ -505,6 +535,43 @@ mod tests {
             }
         }
         deleted.into_inner()
+    }
+
+    /// Drives `handle_topic_event` and returns the (name, partitions)
+    /// pairs passed to `on_apply`, in order.
+    fn applies_from(events: Vec<Event<kaas_operator_api::KafkaTopic>>) -> Vec<(String, i32)> {
+        let applied = std::cell::RefCell::new(Vec::new());
+        let mut state = TopicWatchState::default();
+        {
+            let on_apply = |n: &str, p: i32| applied.borrow_mut().push((n.to_owned(), p));
+            let on_delete = |_: &str| {};
+            for evt in events {
+                handle_topic_event(&on_apply, &on_delete, evt, &mut state);
+            }
+        }
+        applied.into_inner()
+    }
+
+    #[test]
+    fn registers_synthetic_named_topic_under_effective_kafka_name() {
+        // gh #219: a non-RFC-1123 Streams internal topic has a synthetic
+        // metadata.name (kaas-topic-<hash>) with the real name in
+        // spec.topic_name. The watch must register/retract it under the
+        // REAL name (what clients ask Metadata for), not the hash — else
+        // Metadata reports unknown partitions and Streams loops forever.
+        let real = "app-KSTREAM-AGGREGATE-STATE-STORE-0000000003-repartition";
+        let applied = applies_from(vec![Event::Apply(topic_with_spec_name(
+            "kaas-topic-deadbeef",
+            real,
+            4,
+        ))]);
+        assert_eq!(applied, vec![(real.to_owned(), 4)]);
+        let deleted = deletes_from(vec![Event::Delete(topic_with_spec_name(
+            "kaas-topic-deadbeef",
+            real,
+            4,
+        ))]);
+        assert_eq!(deleted, vec![real.to_owned()]);
     }
 
     #[test]
