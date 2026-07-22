@@ -320,6 +320,24 @@ impl StorageEngine for DiskStorageEngine {
         Ok(())
     }
 
+    async fn abandon_topic(&self, topic: &str) -> usize {
+        // Collect first: don't hold DashMap shards across the await.
+        let keys: Vec<(String, i32)> = self
+            .partitions
+            .iter()
+            .map(|kv| kv.key().clone())
+            .filter(|(t, _)| t == topic)
+            .collect();
+        let mut dropped = 0;
+        for key in keys {
+            if let Some((_, p)) = self.partitions.remove(&key) {
+                p.abandon().await;
+                dropped += 1;
+            }
+        }
+        dropped
+    }
+
     fn open_partition_keys(&self) -> Vec<(String, i32)> {
         self.iter_partition_keys()
     }
@@ -572,6 +590,40 @@ mod tests {
             // Re-take.
             let hwm = e.take_over("t", 0, 0).await.unwrap();
             assert_eq!(hwm, 3);
+        });
+    }
+
+    /// gh #219: a deleted topic's partitions are dropped from the
+    /// engine — all of them, and only that topic's. Anything left open
+    /// keeps serving the deleted incarnation's records to a topic that
+    /// was recreated under the same name.
+    #[test]
+    fn abandon_topic_drops_only_that_topics_partitions() {
+        rt().block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let e =
+                DiskStorageEngine::new(fs, tmp.path().to_path_buf(), PartitionConfig::default());
+            for p in 0..3 {
+                e.append("doomed", p, 0, -1, build_batch(1, 1_000))
+                    .await
+                    .unwrap();
+            }
+            e.append("keeper", 0, 0, -1, build_batch(1, 1_000))
+                .await
+                .unwrap();
+
+            assert_eq!(e.abandon_topic("doomed").await, 3);
+            assert_eq!(e.open_partition_keys(), vec![("keeper".to_string(), 0)]);
+            assert_eq!(
+                e.high_watermark("keeper", 0).unwrap(),
+                1,
+                "the surviving topic is untouched"
+            );
+
+            // Idempotent: a second delete event (or a relist retraction)
+            // must not error or double-count.
+            assert_eq!(e.abandon_topic("doomed").await, 0);
         });
     }
 

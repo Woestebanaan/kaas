@@ -115,6 +115,10 @@ pub struct Broker {
     /// Live broker catalog for Metadata (cluster mode only). `None`
     /// keeps the single-broker "self is the whole cluster" shape.
     broker_view: RwLock<Option<Arc<dyn ClusterBrokerView>>>,
+    /// gh #219: persisted, cluster-unique PID source. `None` in dev
+    /// mode / unit tests (no shared volume), where `producer_id_counter`
+    /// stands in — nothing on disk survives to collide with.
+    producer_ids: RwLock<Option<Arc<crate::producer_id::ProducerIdAllocator>>>,
     producer_id_counter: AtomicI64,
 }
 
@@ -180,6 +184,7 @@ impl Broker {
             acl_cr_writer: RwLock::new(None),
             quota_enforcer: RwLock::new(None),
             broker_view: RwLock::new(None),
+            producer_ids: RwLock::new(None),
             // Start at 1 so 0 stays available as an "unset" sentinel
             // for clients that read uninitialised pid.
             producer_id_counter: AtomicI64::new(1),
@@ -198,11 +203,33 @@ impl Broker {
         self.broker_view.read().clone()
     }
 
-    /// Hand out the next non-transactional producer id. Monotonic,
-    /// resets to 1 on broker restart — same behaviour as Apache for
-    /// non-transactional producers (transactional ids are persisted
-    /// in Phase 6).
+    /// Install the persisted PID allocator (gh #219). Called from
+    /// `bins/kaas/main.rs` whenever a data dir is configured.
+    pub fn install_producer_id_allocator(
+        &self,
+        alloc: Arc<crate::producer_id::ProducerIdAllocator>,
+    ) {
+        *self.producer_ids.write() = Some(alloc);
+    }
+
+    /// Hand out the next producer id.
+    ///
+    /// gh #219: with a data dir this draws from the persisted,
+    /// broker-partitioned [`ProducerIdAllocator`] so a PID is never
+    /// reissued — not across a restart, not across brokers. Reissuing
+    /// one lands a fresh producer on a dead producer's dedupe window in
+    /// `producer-state.snapshot`, which silently drops records
+    /// (classified `Duplicate`) or rejects them with
+    /// `OUT_OF_ORDER_SEQUENCE_NUMBER`.
+    ///
+    /// Without an allocator (dev mode, unit tests) it falls back to an
+    /// in-memory counter: nothing persists there, so nothing collides.
+    ///
+    /// [`ProducerIdAllocator`]: crate::producer_id::ProducerIdAllocator
     pub fn next_producer_id(&self) -> i64 {
+        if let Some(alloc) = self.producer_ids.read().clone() {
+            return alloc.next();
+        }
         self.producer_id_counter.fetch_add(1, Ordering::Relaxed)
     }
 

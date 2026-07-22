@@ -4,12 +4,22 @@
 //! - A per-topic `.config.json` next to the topic dir, consumed by the
 //!   broker's cleaner / compactor via `kaas_storage::TopicConfigFile`.
 //! - `Status.TopicID` — a v4 UUID minted on first reconcile, never
-//!   rotated (gh #105, KIP-516).
+//!   rotated (gh #105, KIP-516), and stamped onto the topic dir as
+//!   `.topic-id.json` so a recreated topic can be told apart from its
+//!   predecessor.
 //!
-//! Cleanup model is reconcile-time + sweep — no finalizers. The
-//! `NotFound` branch removes the topic dir best-effort; the
-//! [`crate::sweep::sweep_topics`] pass catches orphans the operator
-//! missed while down. See the gh #76 / gh #86 notes inline.
+//! Cleanup model is reconcile-time + sweep — no finalizers, and no
+//! delete event is load-bearing:
+//!
+//! - **Deleted and recreated** under the same name (gh #219): the
+//!   reconciler sees a stamp that isn't this incarnation's TopicID and
+//!   stages the old directory aside *before* the new one uses it. See
+//!   [`KafkaTopicReconciler::reclaim_stale_incarnation`].
+//! - **Deleted for good**: the leader-elected periodic
+//!   [`crate::sweep::sweep_topics`] pass reclaims the orphan. Latency
+//!   there is fine — nothing is waiting on the directory.
+//!
+//! See the gh #76 / gh #86 / gh #203 notes inline.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,13 +63,11 @@ impl KafkaTopicReconciler {
     }
 
     async fn reconcile_inner(&self, topic: Arc<KafkaTopic>) -> Result<Action, ControllerError> {
-        // gh #76 / NFS silly-rename guard: when the CR is mid-delete
-        // (deletionTimestamp non-nil) the broker's TopicWatcher fires
-        // its own Deleted event so the broker closes its open file
-        // descriptors BEFORE our remove_dir_all swings in. The
-        // reconciler itself doesn't have to do anything special —
-        // the actual cleanup happens in the NotFound branch below
-        // once the object disappears.
+        // A CR mid-delete (deletionTimestamp non-nil) has nothing to
+        // materialise. Its directory is reclaimed later — by the sweep
+        // if the topic stays gone, or by `reclaim_stale_incarnation`
+        // when a topic of the same name is recreated. Neither path
+        // depends on this reconcile, so bail out cleanly.
         if topic.metadata.deletion_timestamp.is_some() {
             self.observer.bump_requeue();
             return Ok(Action::await_change());
@@ -98,8 +106,22 @@ impl KafkaTopicReconciler {
             return Ok(Action::await_change());
         }
 
-        // 1. mkdir partition dirs (idempotent).
+        // TopicID first: it is this incarnation's identity, and step 1
+        // needs it to tell "our directory" from "the previous
+        // incarnation's directory sitting at the same path".
+        let next_topic_id = topic
+            .status
+            .as_ref()
+            .filter(|s| !s.topic_id.is_empty())
+            .map(|s| s.topic_id.clone())
+            .unwrap_or_else(generate_topic_uuid);
+
+        // 1. Reclaim a stale incarnation, then mkdir partition dirs
+        // (both idempotent).
         let topic_dir = self.data_dir.join(&topic_name);
+        let fs = kaas_storage::fs::RealFs::new();
+        let identity =
+            self.reclaim_stale_incarnation(&topic_name, &topic_dir, &next_topic_id, &fs)?;
         for p in 0..topic.spec.partitions {
             let part_dir = topic_dir.join(p.to_string());
             std::fs::create_dir_all(&part_dir)?;
@@ -116,18 +138,11 @@ impl KafkaTopicReconciler {
             min_compaction_lag_ms: topic.spec.config.min_compaction_lag_ms,
             delete_retention_ms: topic.spec.config.delete_retention_ms,
         };
-        let fs = kaas_storage::fs::RealFs::new();
         kaas_storage::write_topic_config(&fs, &topic_dir, &cfg)?;
 
         // 3. Status update: partition count + TopicID (v4 UUID, minted
         // on first reconcile, NEVER rotated per gh #105).
         let next_count = topic.spec.partitions;
-        let next_topic_id = topic
-            .status
-            .as_ref()
-            .filter(|s| !s.topic_id.is_empty())
-            .map(|s| s.topic_id.clone())
-            .unwrap_or_else(generate_topic_uuid);
 
         let ready = Condition {
             type_: READY.into(),
@@ -145,6 +160,22 @@ impl KafkaTopicReconciler {
         })
         .await?;
 
+        // Stamp the directory only once the TopicID is durable in the
+        // CR status (gh #219). Stamping a *locally minted* ID before
+        // that would be a data-loss trap: if the status patch keeps
+        // failing, every reconcile mints a different ID, and each one
+        // would see the previous one's stamp as a stale incarnation and
+        // reclaim a live topic. Post-patch, a failed patch simply
+        // leaves the dir unstamped — which is always adopted, never
+        // reclaimed — and the next reconcile stamps it for real.
+        //
+        // Skipped when the stamp already matches: the steady-state
+        // 5-minute requeue shouldn't rewrite a file per topic on the
+        // shared volume for no reason.
+        if identity != kaas_storage::IdentityVerdict::Match {
+            kaas_storage::write_topic_identity(&fs, &topic_dir, &next_topic_id)?;
+        }
+
         self.observer.bump_success();
         // 5 min default requeue (controller-runtime-style
         // SyncPeriod fallback); watch events are
@@ -152,27 +183,38 @@ impl KafkaTopicReconciler {
         Ok(Action::requeue(Duration::from_secs(300)))
     }
 
-    /// NotFound branch: reclaim the topic dir.
+    /// gh #219: reclaim a directory left behind by a **previous
+    /// incarnation** of this topic name before the current one uses it.
     ///
-    /// gh #203 / NFS rule 1+3 (see `docs/src/architecture/nfs-substrate.md`):
-    /// do NOT `remove_dir_all` the live `<data_dir>/<name>` path — a
-    /// broker may be mid-`Partition::open` on it, and a concurrent
-    /// recursive delete races its file opens into ENOENT. Instead
-    /// **atomically rename** the dir aside to
-    /// `<data_dir>/.deleting-<name>.<nanos>` (a same-parent rename is
-    /// the one atomic NFS primitive), then recurse on the staged copy,
-    /// which no broker will ever open. If a broker still holds an FD
-    /// the inline `remove_dir_all` may leave `.nfsXXXX` entries — that
-    /// is fine: the staged dir is retried by the resumable
-    /// [`sweep_topics`](crate::sweep::sweep_topics) pass once handles
-    /// close.
+    /// Partition dirs are addressed by name, so a delete→recreate under
+    /// the same name (Kafka Streams' `application-reset` does this on
+    /// every run) inherits the old incarnation's segments, manifest
+    /// (high watermark / log start offset / epoch) and
+    /// `producer-state.snapshot` — the last of which rejects the new
+    /// producer's first batch with `OUT_OF_ORDER_SEQUENCE_NUMBER` or
+    /// silently swallows it as a duplicate. `Status.TopicID` is minted
+    /// fresh for a recreated CR (gh #105), so a stamp mismatch is an
+    /// exact, race-free "this is not my directory" signal.
     ///
-    /// We only have `metadata.name` here (the watch's tombstone carries
-    /// that, never `spec.topic_name`). For gh #86 synthetic-name CRs
-    /// the directory is at the `spec.topic_name` path we no longer
-    /// know — the sweep catches those.
-    pub fn handle_not_found(&self, name: &str) -> Result<(), ControllerError> {
-        stage_and_delete_topic_dir(&self.data_dir, name)
+    /// Reconcile-driven on purpose: it needs no delete event, so there
+    /// is no ordering hazard between a delete watch and the reconciler
+    /// re-creating the dir. Re-running it is a no-op (NFS rule 2).
+    ///
+    /// **Unstamped is never stale.** A directory with no stamp predates
+    /// this check, or was created by a broker's `Partition::open`;
+    /// adopting it is the only safe reading — deleting on "unknown"
+    /// would eat live data on upgrade.
+    ///
+    /// Returns what the directory's stamp said, so the caller can skip
+    /// re-stamping a directory that already agrees.
+    fn reclaim_stale_incarnation(
+        &self,
+        name: &str,
+        topic_dir: &Path,
+        topic_id: &str,
+        fs: &dyn kaas_storage::fs::Fs,
+    ) -> Result<kaas_storage::IdentityVerdict, ControllerError> {
+        reclaim_stale_incarnation(&self.data_dir, name, topic_dir, topic_id, fs)
     }
 
     async fn patch_status(
@@ -247,8 +289,8 @@ pub fn topic_dir_for(data_dir: &Path, topic: &KafkaTopic) -> PathBuf {
     data_dir.join(topic.effective_topic_name())
 }
 
-/// gh #203: reclaim a deleted topic's directory without racing a
-/// broker's `Partition::open`.
+/// gh #203: reclaim a topic's directory without racing a broker's
+/// `Partition::open`.
 ///
 /// Atomically renames `<data_dir>/<name>` aside to a
 /// `.deleting-<name>.<nanos>` sibling (a same-parent rename is the one
@@ -258,6 +300,41 @@ pub fn topic_dir_for(data_dir: &Path, topic: &KafkaTopic) -> PathBuf {
 /// dir the inline delete can't finish (FDs still held, gh #76) is
 /// retried by the resumable sweep. See
 /// `docs/src/architecture/nfs-substrate.md`.
+/// Body of [`KafkaTopicReconciler::reclaim_stale_incarnation`] — free
+/// so it is testable without a `kube::Client`. See that method for the
+/// contract.
+pub(crate) fn reclaim_stale_incarnation(
+    data_dir: &Path,
+    name: &str,
+    topic_dir: &Path,
+    topic_id: &str,
+    fs: &dyn kaas_storage::fs::Fs,
+) -> Result<kaas_storage::IdentityVerdict, ControllerError> {
+    use kaas_storage::IdentityVerdict;
+
+    if topic_id.is_empty() {
+        return Ok(IdentityVerdict::Unstamped);
+    }
+    let verdict = match kaas_storage::classify_topic_identity(fs, topic_dir, topic_id) {
+        Ok(v) => v,
+        // An unreadable stamp is "unknown", not "stale".
+        Err(err) => {
+            tracing::warn!(topic = name, %err, "topic identity unreadable; adopting the dir");
+            return Ok(IdentityVerdict::Unstamped);
+        }
+    };
+    if verdict != IdentityVerdict::Stale {
+        return Ok(verdict);
+    }
+    tracing::info!(
+        topic = name,
+        topic_id,
+        "topic dir belongs to a previous incarnation; reclaiming before reuse"
+    );
+    stage_and_delete_topic_dir(data_dir, name)?;
+    Ok(IdentityVerdict::Stale)
+}
+
 pub(crate) fn stage_and_delete_topic_dir(
     data_dir: &Path,
     name: &str,
@@ -323,6 +400,105 @@ mod tests {
             })
             .collect();
         assert!(staged.is_empty(), "staged copy removed when no FDs held");
+    }
+
+    /// Seed `<root>/<name>` with a partition dir carrying leftover
+    /// state, stamped with `stamp` (empty = unstamped).
+    fn seed_topic_dir(root: &Path, name: &str, stamp: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join("0")).unwrap();
+        std::fs::write(
+            dir.join("0").join("manifest.json"),
+            br#"{"highWatermark":500}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("0").join("producer-state.snapshot"), b"{}").unwrap();
+        if !stamp.is_empty() {
+            kaas_storage::write_topic_identity(&kaas_storage::fs::RealFs::new(), &dir, stamp)
+                .unwrap();
+        }
+        dir
+    }
+
+    /// gh #219: a topic deleted and recreated under the same name gets
+    /// a fresh `Status.TopicID`, so the directory left by the previous
+    /// incarnation must be staged aside — otherwise the new topic
+    /// inherits its high watermark and, worse, its idempotence dedupe
+    /// window (`OUT_OF_ORDER_SEQUENCE_NUMBER` on the first produce).
+    #[test]
+    fn stale_incarnation_dir_is_reclaimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = kaas_storage::fs::RealFs::new();
+        let dir = seed_topic_dir(root, "reset-me", "old-incarnation");
+
+        let verdict =
+            reclaim_stale_incarnation(root, "reset-me", &dir, "new-incarnation", &fs).unwrap();
+
+        assert_eq!(verdict, kaas_storage::IdentityVerdict::Stale);
+        assert!(
+            !dir.exists(),
+            "the previous incarnation's dir must not survive into the new one"
+        );
+    }
+
+    /// Steady state: the same incarnation reconciling again must not
+    /// touch its own data.
+    #[test]
+    fn matching_incarnation_dir_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = kaas_storage::fs::RealFs::new();
+        let dir = seed_topic_dir(root, "steady", "same-id");
+
+        let verdict = reclaim_stale_incarnation(root, "steady", &dir, "same-id", &fs).unwrap();
+
+        // `Match` is also what tells the reconciler not to re-stamp the
+        // directory on every 5-minute requeue.
+        assert_eq!(verdict, kaas_storage::IdentityVerdict::Match);
+        assert!(dir.join("0").join("manifest.json").exists(), "data kept");
+    }
+
+    /// Upgrade safety: directories written before the stamp existed
+    /// (and directories a broker created on `Partition::open`) carry no
+    /// identity. "Unknown" must adopt, never delete — anything else
+    /// would wipe every live topic on the first reconcile after
+    /// upgrade.
+    #[test]
+    fn unstamped_dir_is_adopted_not_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = kaas_storage::fs::RealFs::new();
+        let dir = seed_topic_dir(root, "legacy", "");
+
+        reclaim_stale_incarnation(root, "legacy", &dir, "fresh-id", &fs).unwrap();
+
+        assert!(
+            dir.join("0").join("manifest.json").exists(),
+            "an unstamped dir is adopted, never reclaimed"
+        );
+    }
+
+    /// A CR whose status hasn't been written yet has no identity to
+    /// compare against; that must be a no-op, not a reclaim.
+    #[test]
+    fn empty_topic_id_never_reclaims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let fs = kaas_storage::fs::RealFs::new();
+        let dir = seed_topic_dir(root, "no-id-yet", "some-id");
+
+        reclaim_stale_incarnation(root, "no-id-yet", &dir, "", &fs).unwrap();
+
+        assert!(dir.join("0").join("manifest.json").exists());
+    }
+
+    #[test]
+    fn reclaim_on_a_missing_dir_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = kaas_storage::fs::RealFs::new();
+        let dir = tmp.path().join("never-existed");
+        reclaim_stale_incarnation(tmp.path(), "never-existed", &dir, "id", &fs).unwrap();
     }
 
     #[test]

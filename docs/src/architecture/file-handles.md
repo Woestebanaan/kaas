@@ -14,14 +14,26 @@ metadata only (size, base offset, epoch from the filename); FDs are opened on
 ```mermaid
 flowchart TD
     del["kubectl delete kafkatopic T"] --> watch["broker topic watch<br/>fires the delete event"]
-    watch --> notify["TopicRegistry drops T ·<br/>assignment recompute triggered<br/>(reason: TopicDeleted)"]
+    watch --> abandon["TopicRegistry drops T ·<br/>engine.abandon_topic(T):<br/>close_handles(), persist NOTHING"]
+    abandon --> notify["assignment recompute triggered<br/>(reason: TopicDeleted)"]
     notify --> ctl["controller: balancer drops T's partitions,<br/>writes new assignment.json"]
-    ctl --> apply["every broker applies the new assignment"]
-    apply --> reling["TakeoverDriver: T's partitions no longer owned<br/>→ engine.relinquish → Partition::close"]
-    reling --> fds["persist manifest + producer snapshot,<br/>then close_handles() —<br/>log + index FDs dropped"]
-    fds --> sweepstep["operator startup sweep (leader-elected):<br/>remove_dir_all(/data/T) once no CR references it"]
-    sweepstep --> disk["directory unlink succeeds —<br/>no .nfsXXXX silly-rename, disk freed"]
+    ctl --> apply["every broker applies it —<br/>relinquish is already a no-op<br/>for the abandoned partitions"]
+    apply --> reclaim["operator reclaims /data/T:<br/>periodic sweep, or the identity check<br/>if T is recreated (gh #219)"]
+    reclaim --> disk["directory unlink succeeds —<br/>no .nfsXXXX silly-rename, disk freed"]
 ```
+
+Note the asymmetry between `abandon` and `relinquish` (gh #219). A relinquish is
+a *leadership handover*: persist the manifest and producer snapshot, then
+release. A delete is not — the topic is gone, and the operator reclaims its
+directory by renaming it aside, so a recreated topic of the same name gets a
+**fresh directory at the same path**. A well-meaning `close()` racing that
+sequence lands the dead incarnation's high watermark and dedupe window in the
+new incarnation's directory. `abandon_topic` therefore drops the handles and
+writes nothing, and dropping the in-memory partition forces the next `take_over`
+to re-open from disk rather than keep serving the deleted topic's state.
+
+Both the delete and the recreate arrive on the *same* watch stream, so the
+abandon is ordered before the recreate's apply — no coordination needed.
 
 The same ownership rule pays off in day-to-day operation, not just deletes:
 segment retention, `DeleteRecords`, and segment-roll cleanup all unlink files

@@ -510,6 +510,40 @@ impl Partition {
         Ok(())
     }
 
+    /// Drop this partition **without persisting anything** (gh #219).
+    ///
+    /// The counterpart to [`Partition::close`], for when the topic
+    /// itself is gone: stop the committer and release the FDs, but
+    /// write no manifest, no producer snapshot, no recovery checkpoint.
+    ///
+    /// Persisting here is actively harmful. The operator reclaims a
+    /// deleted topic's directory by renaming it aside, and a recreated
+    /// topic gets a *fresh* directory at the same path — so a
+    /// well-meaning `close()` racing that sequence lands the dead
+    /// incarnation's high watermark and idempotence window in the new
+    /// incarnation's directory. That is the "empty log, advanced
+    /// HWM == logStartOffset" state gh #219 saw on the Streams
+    /// repartition topic.
+    ///
+    /// Releasing the FDs still matters: on NFS an unlinked-while-open
+    /// file becomes a `.nfsXXXX` entry that blocks the parent's removal
+    /// (gh #76), so dropping handles promptly is what lets the staged
+    /// directory actually be reclaimed.
+    pub async fn abandon(&self) {
+        let handle = {
+            let mut guard = self.committer.lock();
+            guard.take()
+        };
+        {
+            let mut guard = self.inner.lock();
+            guard.active.close_handles();
+        }
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
     /// Append a raw RecordBatch under `epoch`. Returns the assigned
     /// `base_offset` (or the cached one for an idempotent duplicate).
     pub async fn append(&self, epoch: u32, acks: i16, batch: Bytes) -> Result<i64, StorageError> {
@@ -1639,6 +1673,58 @@ mod tests {
             assert_eq!(p2.high_watermark(), 5);
             assert_eq!(p2.log_start_offset(), 2);
             p2.close().await.unwrap();
+        });
+    }
+
+    /// gh #219: `abandon` must not write state back. The scenario is a
+    /// topic delete→recreate: the operator stages the old directory
+    /// aside and a fresh one appears at the same path, so anything the
+    /// dying partition persists lands in the *new* incarnation's dir
+    /// (an advanced HWM over an empty log, plus a poisoned idempotence
+    /// window).
+    #[test]
+    fn abandon_persists_nothing_into_a_recreated_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("t").join("0");
+        rt().block_on(async {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let p = Partition::open(
+                fs.clone(),
+                "t".into(),
+                0,
+                dir.clone(),
+                PartitionConfig::default(),
+            )
+            .await
+            .unwrap();
+            for _ in 0..5 {
+                p.append(0, -1, build_batch(1, 1_000)).await.unwrap();
+            }
+            assert_eq!(p.high_watermark(), 5);
+
+            // Stand in for the operator's reclaim: the directory this
+            // partition was opened on is replaced by an empty one.
+            std::fs::remove_dir_all(tmp.path().join("t")).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+
+            p.abandon().await;
+
+            let leftovers: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "abandon must leave the recreated dir untouched, found {leftovers:?}"
+            );
+
+            // And the recreated partition starts from zero.
+            let fresh = Partition::open(fs, "t".into(), 0, dir.clone(), PartitionConfig::default())
+                .await
+                .unwrap();
+            assert_eq!(fresh.high_watermark(), 0);
+            assert_eq!(fresh.log_start_offset(), 0);
         });
     }
 

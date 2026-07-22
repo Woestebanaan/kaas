@@ -9,7 +9,7 @@ volume:
 
 | Layer | Where it lives |
 |---|---|
-| PID allocation (`InitProducerId`) | monotonic in-memory counter seeded at boot; txn IDs get the same PID + `epoch+1` on rejoin |
+| PID allocation (`InitProducerId`) | persisted block allocator, `/data/__cluster/producer_ids/kaas-<id>.json`; txn IDs get the same PID + `epoch+1` on rejoin |
 | Per-partition dedupe | `ProducerStates` map, 5-batch ring per PID (`crates/kaas-storage/src/idempotence.rs`) |
 | Snapshot persistence | `producer-state.snapshot` next to the manifest (`crates/kaas-storage/src/producer_snapshot.rs`) |
 | Per-`transactional.id` state | `txn_state/slot-N.json` (`crates/kaas-coordinator/src/txn_state.rs`) |
@@ -29,6 +29,32 @@ Java client's `max.in.flight.requests.per.connection=5`:
 The ring survives leadership moves via `producer-state.snapshot` (written on
 segment roll + relinquish, restored on take-over — see [File-handle
 ownership](./file-handles.md)).
+
+### PIDs must never be reused (gh #219)
+
+The dedupe ring is keyed by `(PID, epoch)`, so handing the same PID to two
+different producers is not a cosmetic collision — the second one inherits the
+first one's sequence history. Its batches are then either **silently dropped**
+(sequence range matches a cached batch → classified duplicate, stale base
+offset echoed, produce "succeeds", consumers read nothing) or **rejected** with
+`OUT_OF_ORDER_SEQUENCE_NUMBER`. Both were seen in gh #219.
+
+Apache draws PIDs from a global counter whose next block is persisted (ZK's
+`/latest_producer_id_block`, KRaft's `ProducerIdsRecord`). kaas has no metadata
+quorum (non-goal), so it partitions the space by broker ordinal instead:
+
+```text
+pid = (broker_id + 1) * 2^40 + local
+```
+
+Each broker is the single writer of its own slice *and* of its own block file
+`/data/__cluster/producer_ids/kaas-<id>.json`, so there is no cross-broker
+read-modify-write on the shared volume. `local` advances in blocks of 1000, and
+the block end is persisted (tmp + fsync + rename) **before** any PID in it is
+handed out — a crash can only skip PIDs forward, never rewind. The `+ 1` keeps
+broker 0 clear of the low PIDs the pre-gh #219 in-memory counter handed out, so
+an upgrade can't collide with producer state already on the volume.
+Implementation: `crates/kaas-broker/src/producer_id.rs`.
 
 ### Fencing across partitions and brokers
 

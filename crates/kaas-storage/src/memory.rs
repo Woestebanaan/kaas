@@ -227,6 +227,23 @@ impl StorageEngine for MemoryStorage {
         Ok(())
     }
 
+    /// gh #219: nothing is persisted here, so dropping the entries is
+    /// the whole job — but it still has to happen, or a recreated topic
+    /// keeps serving the deleted one's records in dev mode.
+    async fn abandon_topic(&self, topic: &str) -> usize {
+        let keys: Vec<(String, i32)> = self
+            .partitions
+            .iter()
+            .map(|kv| kv.key().clone())
+            .filter(|(t, _)| t == topic)
+            .collect();
+        let dropped = keys.len();
+        for key in keys {
+            self.partitions.remove(&key);
+        }
+        dropped
+    }
+
     fn partition_size(&self, topic: &str, partition: i32) -> i64 {
         // No segment files; partition size is 0 by convention.
         let _ = (topic, partition);

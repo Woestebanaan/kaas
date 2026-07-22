@@ -20,6 +20,7 @@ pub mod handlers;
 pub mod heartbeat_client;
 pub mod local_lease;
 pub mod marker_watcher;
+pub mod producer_id;
 pub mod self_fence;
 pub mod takeover;
 pub mod topic_config_defaults;
@@ -63,6 +64,7 @@ pub use local_lease::LocalLeaseManager;
 pub use marker_watcher::{
     ApplyOutcome, MarkerApplier, MarkerWatcher, DEFAULT_POLL as MARKER_POLL_DEFAULT,
 };
+pub use producer_id::{ProducerIdAllocator, PID_BLOCK, PID_STRIDE, PRODUCER_ID_DIR};
 pub use self_fence::{is_heartbeat_fresh, DEFAULT_HEARTBEAT_TIMEOUT};
 pub use takeover::TakeoverDriver;
 #[cfg(feature = "cr-writer")]

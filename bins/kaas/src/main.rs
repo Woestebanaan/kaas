@@ -197,6 +197,28 @@ async fn main() -> Result<()> {
         auth.quotas.clone(),
     ));
 
+    // gh #219: persisted, cluster-unique producer IDs. Without this the
+    // PID counter restarts at 1 on every boot and every broker issues
+    // the same PIDs, so a fresh producer inherits a dead one's dedupe
+    // window from `producer-state.snapshot` — records silently dropped
+    // as duplicates, or rejected with OUT_OF_ORDER_SEQUENCE_NUMBER.
+    // A failure here is non-fatal: we log and keep the in-memory
+    // counter rather than refusing to serve.
+    if let Some(dir) = cli.data_dir.as_ref() {
+        let cluster_dir = dir.join("__cluster");
+        match kaas_broker::ProducerIdAllocator::open(&cluster_dir, cli.broker_id) {
+            Ok(alloc) => {
+                broker.install_producer_id_allocator(Arc::new(alloc));
+                info!("installed persisted producer-id allocator");
+            }
+            Err(err) => warn!(
+                %err,
+                "producer-id allocator unavailable; falling back to the in-memory counter \
+                 (PIDs may be reissued after a restart)"
+            ),
+        }
+    }
+
     let cancel = CancellationToken::new();
 
     // Shared kube client — the CR writer, topic watcher, AND the
@@ -250,6 +272,7 @@ async fn main() -> Result<()> {
         // the spot (gh #74) rather than on the next periodic tick.
         let topics_apply = topics.clone();
         let topics_delete = topics.clone();
+        let engine_delete = engine.clone();
         let notify_apply = topic_notify.clone();
         let notify_delete = topic_notify.clone();
         let watch_cancel = cancel.clone();
@@ -281,6 +304,28 @@ async fn main() -> Result<()> {
                 },
                 move |name| {
                     topics_delete.remove(name);
+                    // gh #219: drop the topic's partitions from the
+                    // engine *without persisting*. Leaving it to the
+                    // assignment recompute is too late on a
+                    // delete→recreate (Streams' `application-reset`
+                    // does exactly that): the recompute can coalesce
+                    // both events into no ownership change at all,
+                    // leaving the recreated topic served from the dead
+                    // one's in-memory state — and a relinquish landing
+                    // after the operator re-created the directory
+                    // writes the dead incarnation's manifest into it.
+                    // The spawn resolves in microseconds while the
+                    // recreate's take-over is gated behind an
+                    // assignment recompute + watch (~1 s), so the drop
+                    // lands first with a wide margin.
+                    let engine = engine_delete.clone();
+                    let topic = name.to_string();
+                    tokio::spawn(async move {
+                        let dropped = engine.abandon_topic(&topic).await;
+                        if dropped > 0 {
+                            info!(topic, dropped, "topic deleted; dropped open partitions");
+                        }
+                    });
                     notify_delete.notify(kaas_controller::AssignmentReason::TopicDeleted);
                 },
                 watch_cancel,

@@ -135,6 +135,38 @@ asking three questions of any code that touches the shared volume:
 If all three answers are "no," the code has a latent race — no matter how
 cleanly it passes on a single broker backed by a local disk.
 
+## A fourth question: whose state is this?
+
+Those three questions are about *concurrent* access. gh #219 was about
+*sequential* access, and slipped past all three.
+
+A partition's directory is addressed by name — `/data/<topic>/<partition>/`.
+Delete a topic and recreate it under the same name (Kafka Streams'
+`application-reset` does this on every run) and the new topic silently inherits
+the old one's segments, high watermark, and idempotence dedupe window. No two
+writers ever ran at once; the second incarnation simply moved into the first
+one's house. The visible symptom was a producer whose very first batch came back
+`OUT_OF_ORDER_SEQUENCE_NUMBER` — or worse, was accepted and silently discarded
+as a duplicate of a record written by a producer that no longer existed.
+
+The same shape shows up wherever an identifier is recycled: a producer ID
+reissued after a broker restart lands a fresh producer on a dead one's sequence
+history, which is why kaas now allocates PIDs from a persisted, per-broker block
+(see [transactions & idempotence](./transactions.md)).
+
+So there's a fourth question for anything that persists state on the shared
+volume:
+
+4. Does this path assume a *name* identifies its state uniquely — over time, not
+   just at this instant?
+
+Apache Kafka answers it with topic IDs (KIP-516) and producer-ID blocks. kaas
+answers it the same way: the operator stamps each topic directory with the CR's
+`Status.TopicID` (`.topic-id.json`) and reclaims the directory when the stamp
+belongs to a previous incarnation — a reconcile-time check, so it needs no
+delete event and no ordering between watchers. An *unstamped* directory is
+always adopted, never reclaimed: "unknown identity" must not be destructive.
+
 ## Why this matters more for kaas than for Kafka
 
 In Apache Kafka a broker's local disk is one replica among several: a corner

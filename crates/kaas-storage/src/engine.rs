@@ -127,6 +127,27 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// Release write ownership.
     async fn relinquish(&self, topic: &str, partition: i32) -> Result<(), StorageError>;
 
+    /// gh #219: drop every open partition of `topic` **without
+    /// persisting state**, and return how many were dropped.
+    ///
+    /// Called when the `KafkaTopic` CR is deleted. Unlike
+    /// [`StorageEngine::relinquish`] (a leadership handover — persist,
+    /// then release) this is "the topic is gone": writing a manifest or
+    /// producer snapshot on the way out would land the dead
+    /// incarnation's state in the directory a recreated topic of the
+    /// same name is about to use. Dropping the in-memory partition also
+    /// forces the next `take_over` to re-open from disk, so a recreated
+    /// topic can't keep serving the old one's high watermark and
+    /// idempotence window.
+    ///
+    /// Safe to call for a topic that isn't open, and safe if the delete
+    /// turns out to be spurious — nothing on disk is touched, and the
+    /// takeover reconcile backstop (gh #215) re-opens anything still
+    /// assigned. Default is a no-op for engines with no open handles.
+    async fn abandon_topic(&self, _topic: &str) -> usize {
+        0
+    }
+
     /// Keys of the partitions this engine currently holds open — i.e.
     /// the ones it has taken over (`take_over` opened; `relinquish`
     /// closed). Used to compute the gh #208 "serving" readiness
