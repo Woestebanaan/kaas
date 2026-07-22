@@ -12,10 +12,13 @@
 //!   `KafkaTopicReconciler`, `KafkaUserReconciler`,
 //!   `KafkaClusterReconciler`.
 //!
-//! Cleanup model: **no finalizers**. Reconcile-time
-//! best-effort cleanup on `Get → NotFound` plus a leader-elected
-//! startup sweep ([`sweep::sweep_topics`] +
-//! [`sweep::sweep_credentials`]) drop orphans the reconciler missed.
+//! Cleanup model: **no finalizers**, and no delete event is
+//! load-bearing. A topic recreated under a name that still has a
+//! directory is reclaimed at reconcile time by the `.topic-id.json`
+//! identity check (gh #219,
+//! [`kafkatopic_controller::KafkaTopicReconciler`]); anything deleted
+//! for good is dropped by the leader-elected periodic sweep
+//! ([`sweep::sweep_topics`] + [`sweep::sweep_credentials`]).
 
 #![allow(missing_debug_implementations)]
 
