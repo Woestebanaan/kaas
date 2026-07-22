@@ -22,12 +22,65 @@
 //! it. Records bytes (everything past the 61-byte header) are never
 //! inspected or modified.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::errors::StorageError;
+
+/// Name of the implicit log dir every engine has — the `data_dir`.
+/// Pool members (gh #221 phase 2) carry chart-chosen names; this one
+/// is reserved.
+pub const DEFAULT_LOG_DIR_NAME: &str = "default";
+
+/// One named log dir (gh #221 phase 2 — Kafka's KIP-113 vocabulary:
+/// one pool volume = one log dir). `default_eligible` mirrors the
+/// chart's `storage.pool[].defaultEligible`: whether topics without
+/// an explicit volume binding may be placed here.
+///
+/// Serde shape matches the `KAAS_LOG_DIRS` env JSON the chart emits:
+/// `[{"name":"fast","path":"/vols/fast","defaultEligible":true}]`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogDirInfo {
+    pub name: String,
+    pub path: PathBuf,
+    #[serde(default = "default_true")]
+    pub default_eligible: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Parse the `KAAS_LOG_DIRS` env JSON (broker and operator share
+/// this). Empty/absent input → empty pool (single-volume layout).
+/// Entries named `default` are rejected — that name is reserved for
+/// the data dir.
+pub fn parse_log_dirs_json(json: &str) -> Result<Vec<LogDirInfo>, String> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let dirs: Vec<LogDirInfo> =
+        serde_json::from_str(json).map_err(|e| format!("KAAS_LOG_DIRS: {e}"))?;
+    if let Some(d) = dirs.iter().find(|d| d.name == DEFAULT_LOG_DIR_NAME) {
+        return Err(format!(
+            "KAAS_LOG_DIRS: entry '{}' uses the reserved name '{DEFAULT_LOG_DIR_NAME}'",
+            d.path.display()
+        ));
+    }
+    Ok(dirs)
+}
+
+/// Resolves which log dir hosts a partition. Backed by the KafkaTopic
+/// registry in production (the operator stamps placement into the CR
+/// status; the topic watch feeds it here). A `None` answer — or an
+/// unknown name — falls back to the default log dir, so resolution
+/// can never make a partition unopenable.
+pub trait PlacementResolver: Send + Sync {
+    fn log_dir_of(&self, topic: &str, partition: i32) -> Option<String>;
+}
 
 #[async_trait]
 pub trait StorageEngine: Send + Sync + 'static {
@@ -117,6 +170,22 @@ pub trait StorageEngine: Send + Sync + 'static {
     /// `DescribeLogDirs`. `MemoryStorage` returns the sentinel
     /// `memory://`.
     fn data_dir(&self) -> &Path;
+
+    /// Every log dir this engine serves, default first (gh #221
+    /// phase 2). Single-volume engines report just the data dir.
+    fn log_dirs(&self) -> Vec<LogDirInfo> {
+        vec![LogDirInfo {
+            name: DEFAULT_LOG_DIR_NAME.to_owned(),
+            path: self.data_dir().to_path_buf(),
+            default_eligible: true,
+        }]
+    }
+
+    /// Name of the log dir hosting `(topic, partition)` under the
+    /// current placement. Feeds `DescribeLogDirs` grouping.
+    fn partition_log_dir(&self, _topic: &str, _partition: i32) -> String {
+        DEFAULT_LOG_DIR_NAME.to_owned()
+    }
 
     /// Claim write ownership of `(topic, partition)` under `epoch`.
     /// On disk, this opens FDs and runs recovery; on memory storage

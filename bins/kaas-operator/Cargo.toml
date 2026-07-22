@@ -23,6 +23,7 @@ kaas-controller           = { path = "../../crates/kaas-controller" }
 kaas-observability        = { workspace = true }
 kaas-operator-api         = { workspace = true }
 kaas-operator-controllers = { workspace = true }
+kaas-storage              = { workspace = true }
 tokio                   = { workspace = true }
 tokio-util              = { workspace = true }
 tracing                 = { workspace = true }

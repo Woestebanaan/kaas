@@ -48,6 +48,13 @@ struct TopicSeedEntry {
 #[derive(Debug)]
 pub struct TopicRegistry {
     inner: RwLock<HashMap<String, TopicMeta>>,
+    /// gh #221 phase 2: topic → (partition-as-string → log-dir name),
+    /// stashed from `KafkaTopic.status.volumeAssignments` by the
+    /// topic watch. Side map (not a `TopicMeta` field) so the meta
+    /// struct keeps its stable literal shape across the many
+    /// construction sites. Keys are strings because the CR status
+    /// map is JSON.
+    volume_assignments: RwLock<HashMap<String, std::collections::BTreeMap<String, String>>>,
 }
 
 impl Default for TopicRegistry {
@@ -60,6 +67,7 @@ impl TopicRegistry {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(HashMap::new()),
+            volume_assignments: RwLock::new(HashMap::new()),
         }
     }
 
@@ -85,6 +93,7 @@ impl TopicRegistry {
         }
         Ok(Self {
             inner: RwLock::new(map),
+            volume_assignments: RwLock::new(HashMap::new()),
         })
     }
 
@@ -105,6 +114,34 @@ impl TopicRegistry {
 
     pub fn remove(&self, name: &str) {
         self.inner.write().remove(name);
+        self.volume_assignments.write().remove(name);
+    }
+
+    /// Replace the stashed partition→log-dir placement for `topic`
+    /// (gh #221 phase 2). The topic watch calls this on every CR
+    /// apply; an empty map clears the entry.
+    pub fn set_volume_assignments(
+        &self,
+        topic: &str,
+        map: std::collections::BTreeMap<String, String>,
+    ) {
+        if map.is_empty() {
+            self.volume_assignments.write().remove(topic);
+        } else {
+            self.volume_assignments
+                .write()
+                .insert(topic.to_owned(), map);
+        }
+    }
+
+    /// Log-dir name hosting `(topic, partition)`, if explicitly
+    /// placed. `None` → the default log dir.
+    pub fn volume_assignment(&self, topic: &str, partition: i32) -> Option<String> {
+        self.volume_assignments
+            .read()
+            .get(topic)?
+            .get(&partition.to_string())
+            .cloned()
     }
 
     pub fn len(&self) -> usize {
@@ -113,6 +150,15 @@ impl TopicRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.inner.read().is_empty()
+    }
+}
+
+/// gh #221 phase 2: the registry IS the broker's placement source —
+/// the topic watch stashes `KafkaTopic.status.volumeAssignments`
+/// here, and the storage engine resolves partition roots through it.
+impl kaas_storage::PlacementResolver for TopicRegistry {
+    fn log_dir_of(&self, topic: &str, partition: i32) -> Option<String> {
+        self.volume_assignment(topic, partition)
     }
 }
 

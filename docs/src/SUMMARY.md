@@ -12,6 +12,7 @@
 - [Storage engine hot path](architecture/storage-hot-path.md)
 - [File-handle ownership & takeover](architecture/file-handles.md)
 - [The RWX substrate contract](architecture/nfs-substrate.md)
+- [The volume pool: log dirs & placement](architecture/volume-pool.md)
 - [Consumer-group coordination](architecture/consumer-groups.md)
 - [Transactions & idempotence](architecture/transactions.md)
 - [Listeners, authentication, authorization](architecture/listeners-auth.md)

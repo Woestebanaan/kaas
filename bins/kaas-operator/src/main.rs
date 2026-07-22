@@ -84,6 +84,10 @@ async fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("__cluster"));
+    // gh #221 phase 2: pool log dirs (same env JSON the broker gets).
+    let log_dirs =
+        kaas_storage::parse_log_dirs_json(&std::env::var("KAAS_LOG_DIRS").unwrap_or_default())
+            .map_err(|e: String| anyhow::anyhow!(e))?;
     let namespace = env_or("KAAS_NAMESPACE", DEFAULT_NAMESPACE);
     let metrics_addr = env_or("METRICS_BIND_ADDRESS", DEFAULT_METRICS_ADDR);
     let probe_addr = env_or("HEALTH_PROBE_BIND_ADDRESS", DEFAULT_PROBE_ADDR);
@@ -174,14 +178,16 @@ async fn main() -> Result<()> {
     // the next operator restart.
     let sweep_client = client.clone();
     let sweep_ns = namespace.clone();
-    let sweep_dir = data_dir.clone();
+    let sweep_roots: Vec<PathBuf> = std::iter::once(data_dir.clone())
+        .chain(log_dirs.iter().map(|d| d.path.clone()))
+        .collect();
     let sweep_cluster_dir = cluster_dir.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(SWEEP_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            match sweep::sweep_topics(&sweep_client, &sweep_ns, &sweep_dir).await {
+            match sweep::sweep_topics(&sweep_client, &sweep_ns, &sweep_roots).await {
                 Ok(r) => {
                     if !r.removed.is_empty() {
                         info!(removed = ?r.removed, "removed orphan topic dirs");
@@ -205,7 +211,11 @@ async fn main() -> Result<()> {
     // Spawn the three reconcilers. Each Controller::run returns a
     // stream of reconcile outcomes; we drain them concurrently in
     // tokio::select so a single shutdown signal stops the lot.
-    let topic_ctx = Arc::new(KafkaTopicReconciler::new(client.clone(), data_dir.clone()));
+    let topic_ctx = Arc::new(KafkaTopicReconciler::new(
+        client.clone(),
+        data_dir.clone(),
+        log_dirs.clone(),
+    ));
     let user_ctx = Arc::new(KafkaUserReconciler::new(
         client.clone(),
         cluster_dir.clone(),

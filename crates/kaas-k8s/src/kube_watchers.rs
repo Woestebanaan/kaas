@@ -310,7 +310,7 @@ pub async fn run_topic_watch<A, D>(
     cancel: CancellationToken,
 ) -> Result<(), KubeWatchError>
 where
-    A: Fn(&str, i32) + Send + Sync + 'static,
+    A: Fn(&str, i32, &std::collections::BTreeMap<String, String>) + Send + Sync + 'static,
     D: Fn(&str) + Send + Sync + 'static,
 {
     let api: Api<kaas_operator_api::KafkaTopic> = Api::namespaced(client, &namespace);
@@ -368,7 +368,7 @@ fn handle_topic_event<A, D>(
     event: Event<kaas_operator_api::KafkaTopic>,
     state: &mut TopicWatchState,
 ) where
-    A: Fn(&str, i32),
+    A: Fn(&str, i32, &std::collections::BTreeMap<String, String>),
     D: Fn(&str),
 {
     match event {
@@ -388,7 +388,17 @@ fn handle_topic_event<A, D>(
                 return;
             }
             let name = name.to_owned();
-            on_apply(&name, t.spec.partitions);
+            // gh #221 phase 2: forward the reconciler-stamped
+            // partition→log-dir placement so the registry (the
+            // engine's placement resolver) tracks it.
+            static EMPTY: std::sync::LazyLock<std::collections::BTreeMap<String, String>> =
+                std::sync::LazyLock::new(std::collections::BTreeMap::new);
+            let volumes = t
+                .status
+                .as_ref()
+                .map(|st| &st.volume_assignments)
+                .unwrap_or(&EMPTY);
+            on_apply(&name, t.spec.partitions, volumes);
             state.known.insert(name.clone());
             if let Some(relist) = state.relist.as_mut() {
                 relist.insert(name);
@@ -501,6 +511,7 @@ mod tests {
                 topic_name: String::new(),
                 partitions,
                 config: kaas_operator_api::KafkaTopicConfig::default(),
+                storage: None,
             },
         )
     }
@@ -518,6 +529,7 @@ mod tests {
                 topic_name: kafka_name.to_owned(),
                 partitions,
                 config: kaas_operator_api::KafkaTopicConfig::default(),
+                storage: None,
             },
         )
     }
@@ -528,7 +540,7 @@ mod tests {
         let deleted = std::cell::RefCell::new(Vec::new());
         let mut state = TopicWatchState::default();
         {
-            let on_apply = |_: &str, _: i32| {};
+            let on_apply = |_: &str, _: i32, _: &std::collections::BTreeMap<String, String>| {};
             let on_delete = |n: &str| deleted.borrow_mut().push(n.to_owned());
             for evt in events {
                 handle_topic_event(&on_apply, &on_delete, evt, &mut state);
@@ -543,7 +555,9 @@ mod tests {
         let applied = std::cell::RefCell::new(Vec::new());
         let mut state = TopicWatchState::default();
         {
-            let on_apply = |n: &str, p: i32| applied.borrow_mut().push((n.to_owned(), p));
+            let on_apply = |n: &str, p: i32, _: &std::collections::BTreeMap<String, String>| {
+                applied.borrow_mut().push((n.to_owned(), p))
+            };
             let on_delete = |_: &str| {};
             for evt in events {
                 handle_topic_event(&on_apply, &on_delete, evt, &mut state);

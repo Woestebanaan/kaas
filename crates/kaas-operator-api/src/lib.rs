@@ -43,7 +43,9 @@ pub use kafkaclusterassignments::{
     BrokerHealth, KafkaClusterAssignments, KafkaClusterAssignmentsSpec,
     KafkaClusterAssignmentsStatus, MirroredBroker, MirroredConsumerGroup, MirroredPartition,
 };
-pub use kafkatopic::{KafkaTopic, KafkaTopicConfig, KafkaTopicSpec, KafkaTopicStatus};
+pub use kafkatopic::{
+    KafkaTopic, KafkaTopicConfig, KafkaTopicSpec, KafkaTopicStatus, KafkaTopicStorage,
+};
 pub use kafkauser::{
     KafkaUser, KafkaUserAcl, KafkaUserAclResource, KafkaUserAuthentication, KafkaUserAuthorization,
     KafkaUserQuotas, KafkaUserScramCredential, KafkaUserSpec, KafkaUserStatus, LocalObjectRef,

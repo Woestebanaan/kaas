@@ -1536,6 +1536,7 @@ dependencies = [
  "kaas-observability",
  "kaas-operator-api",
  "kaas-operator-controllers",
+ "kaas-storage",
  "kube",
  "rustls",
  "tokio",

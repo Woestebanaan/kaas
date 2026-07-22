@@ -66,6 +66,7 @@ fn kafkatopic_effective_topic_name_falls_back_to_metadata_name() {
             topic_name: "explicit-Kafka-Name".into(),
             partitions: 3,
             config: KafkaTopicConfig::default(),
+            storage: None,
         },
         status: None,
     };
@@ -84,6 +85,7 @@ fn kafkatopic_effective_topic_name_falls_back_to_metadata_name() {
             topic_name: String::new(),
             partitions: 1,
             config: KafkaTopicConfig::default(),
+            storage: None,
         },
         status: None,
     };

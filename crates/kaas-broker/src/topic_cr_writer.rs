@@ -343,6 +343,7 @@ mod kube_impl {
                     topic_name,
                     partitions: num_partitions,
                     config: KafkaTopicConfig::default(),
+                    storage: None,
                 },
                 status: None,
             };

@@ -62,15 +62,18 @@ pub struct SweepReport {
     pub failed: Vec<String>,
 }
 
-/// Remove `/data/<topic>/` directories that no longer have a matching
-/// `KafkaTopic` CR. Per-directory failures are collected into
-/// [`SweepReport::failed`] rather than aborting the pass. The outer
-/// `Err` is reserved for failures that make the whole pass impossible
-/// (listing CRs, reading the data dir).
+/// Remove `<root>/<topic>/` directories that no longer have a
+/// matching `KafkaTopic` CR — on every log-dir root (gh #221
+/// phase 2: pool volumes host topic dirs too; a deleted topic's
+/// dirs must be reclaimed wherever its partitions were placed).
+/// Per-directory failures are collected into [`SweepReport::failed`]
+/// rather than aborting the pass. The outer `Err` is reserved for
+/// failures that make the whole pass impossible (listing CRs,
+/// reading a root).
 pub async fn sweep_topics(
     client: &Client,
     namespace: &str,
-    data_dir: &Path,
+    roots: &[std::path::PathBuf],
 ) -> Result<SweepReport, ControllerError> {
     let api: Api<KafkaTopic> = Api::namespaced(client.clone(), namespace);
     let topics =
@@ -85,7 +88,15 @@ pub async fn sweep_topics(
         keep.insert(t.effective_topic_name().to_string());
     }
 
-    reclaim_orphan_dirs(data_dir, &keep)
+    let mut report = SweepReport::default();
+    for root in roots {
+        let r = reclaim_orphan_dirs(root, &keep)?;
+        report.removed.extend(r.removed);
+        report.failed.extend(r.failed);
+    }
+    report.removed.sort();
+    report.failed.sort();
+    Ok(report)
 }
 
 /// The non-topic names every sweep pass must preserve, independent of

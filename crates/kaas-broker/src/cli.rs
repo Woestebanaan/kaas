@@ -20,6 +20,8 @@ pub enum ConfigError {
     BrokerId(std::num::ParseIntError),
     #[error("KAAS_FLUSH_INTERVAL_MESSAGES: {0}")]
     FlushInterval(std::num::ParseIntError),
+    #[error("{0}")]
+    LogDirs(String),
 }
 
 /// JSON entry in `KAAS_LISTENERS`. Mirrors the Helm chart's
@@ -168,6 +170,11 @@ pub struct Cli {
     /// is enabled (gh #221 phase 1) so a runaway topic filling the
     /// data volume can't take the control plane down with it.
     pub cluster_dir: Option<PathBuf>,
+    /// `KAAS_LOG_DIRS` — named pool log dirs beyond the default
+    /// `data_dir` (gh #221 phase 2). Chart-emitted JSON:
+    /// `[{"name":"fast","path":"/vols/fast","defaultEligible":true}]`.
+    /// Empty in the classic single-volume layout.
+    pub log_dirs: Vec<kaas_storage::LogDirInfo>,
     pub flush_interval_messages: i64,
     pub cluster_id: String,
     pub broker_id: i32,
@@ -225,6 +232,10 @@ impl Cli {
             }
         });
 
+        let log_dirs =
+            kaas_storage::parse_log_dirs_json(&env::var("KAAS_LOG_DIRS").unwrap_or_default())
+                .map_err(ConfigError::LogDirs)?;
+
         let flush_interval_messages = env::var("KAAS_FLUSH_INTERVAL_MESSAGES")
             .ok()
             .map(|s| s.parse::<i64>())
@@ -267,6 +278,7 @@ impl Cli {
             listeners,
             data_dir,
             cluster_dir,
+            log_dirs,
             flush_interval_messages,
             cluster_id,
             broker_id,

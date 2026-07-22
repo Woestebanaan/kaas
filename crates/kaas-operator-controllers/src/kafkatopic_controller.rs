@@ -40,16 +40,34 @@ use crate::observer::ReconcileObserver;
 pub struct KafkaTopicReconciler {
     pub client: Client,
     pub data_dir: PathBuf,
+    /// gh #221 phase 2: pool log dirs beyond the default data dir
+    /// (parsed from `KAAS_LOG_DIRS`; empty = single-volume layout).
+    pub log_dirs: Vec<kaas_storage::LogDirInfo>,
     pub observer: ReconcileObserver,
 }
 
 impl KafkaTopicReconciler {
-    pub fn new(client: Client, data_dir: PathBuf) -> Self {
+    pub fn new(client: Client, data_dir: PathBuf, log_dirs: Vec<kaas_storage::LogDirInfo>) -> Self {
         Self {
             client,
             data_dir,
+            log_dirs,
             observer: ReconcileObserver::new("KafkaTopic"),
         }
+    }
+
+    /// Root path for a log-dir name; unknown names fall back to the
+    /// data dir, mirroring the broker's resolver so both sides agree
+    /// on where a mis-referenced partition actually lives.
+    fn root_of(&self, name: &str) -> PathBuf {
+        if name == kaas_storage::DEFAULT_LOG_DIR_NAME {
+            return self.data_dir.clone();
+        }
+        self.log_dirs
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.path.clone())
+            .unwrap_or_else(|| self.data_dir.clone())
     }
 
     /// Reconcile entry point. The top-level [`reconcile_topic`]
@@ -116,27 +134,93 @@ impl KafkaTopicReconciler {
             .map(|s| s.topic_id.clone())
             .unwrap_or_else(generate_topic_uuid);
 
-        // 1. Reclaim a stale incarnation, then mkdir partition dirs
-        // (both idempotent).
-        let topic_dir = self.data_dir.join(&topic_name);
-        let fs = kaas_storage::fs::RealFs::new();
-        let reclaimed =
-            self.reclaim_stale_incarnation(&topic_name, &topic_dir, &next_topic_id, &fs)?;
+        // gh #221 phase 2: resolve the topic's eligible log-dir set
+        // and extend the creation-sticky placement for partitions
+        // that don't have one yet. An unknown volume name is a loud
+        // reconcile failure — a typo must not silently place data.
+        let eligible = match eligible_log_dirs(&self.log_dirs, topic.spec.storage.as_ref()) {
+            Ok(set) => set,
+            Err(unknown) => {
+                let cond = Condition {
+                    type_: READY.into(),
+                    status: Condition::STATUS_FALSE.into(),
+                    observed_generation: topic.metadata.generation,
+                    last_transition_time: String::new(),
+                    reason: "UnknownLogDir".into(),
+                    message: format!("spec.storage.volumes references unknown log dir '{unknown}'"),
+                };
+                self.patch_status(&topic, |st| set_condition(&mut st.conditions, cond.clone()))
+                    .await?;
+                self.observer.bump_error();
+                return Ok(Action::await_change());
+            }
+        };
+        let mut assignments = topic
+            .status
+            .as_ref()
+            .map(|s| s.volume_assignments.clone())
+            .unwrap_or_default();
         for p in 0..topic.spec.partitions {
-            let part_dir = topic_dir.join(p.to_string());
+            assignments.entry(p.to_string()).or_insert_with(|| {
+                eligible[usize::try_from(p).unwrap_or(0) % eligible.len()].clone()
+            });
+        }
+        // Drift (never auto-migrated, gh #221): partitions placed on
+        // dirs outside the *current* spec set keep serving where they
+        // are and are only counted.
+        let outside_spec = i32::try_from(
+            (0..topic.spec.partitions)
+                .filter(|p| {
+                    assignments
+                        .get(&p.to_string())
+                        .is_some_and(|name| !eligible.contains(name))
+                })
+                .count(),
+        )
+        .unwrap_or(i32::MAX);
+
+        // 1. Reclaim stale incarnations on every involved root, then
+        // mkdir partition dirs (both idempotent). The reclaim must
+        // run per root: a delete→recreate leaves the old
+        // incarnation's dirs on whichever volumes hosted it.
+        let fs = kaas_storage::fs::RealFs::new();
+        let mut involved_roots: Vec<PathBuf> = vec![self.data_dir.clone()];
+        for name in assignments.values() {
+            let root = self.root_of(name);
+            if !involved_roots.contains(&root) {
+                involved_roots.push(root);
+            }
+        }
+        let mut identity = kaas_storage::IdentityVerdict::Match;
+        let mut staged_paths: Vec<PathBuf> = Vec::new();
+        for root in &involved_roots {
+            let topic_dir = root.join(&topic_name);
+            let reclaimed =
+                reclaim_stale_incarnation(root, &topic_name, &topic_dir, &next_topic_id, &fs)?;
+            if reclaimed.verdict != kaas_storage::IdentityVerdict::Match {
+                identity = reclaimed.verdict;
+            }
+            staged_paths.extend(reclaimed.staged);
+        }
+        for p in 0..topic.spec.partitions {
+            let name = assignments
+                .get(&p.to_string())
+                .map(String::as_str)
+                .unwrap_or(kaas_storage::DEFAULT_LOG_DIR_NAME);
+            let part_dir = self.root_of(name).join(&topic_name).join(p.to_string());
             std::fs::create_dir_all(&part_dir)?;
         }
-        // gh #220: only now delete the staged copy. The rename in step 1
-        // frees the live path instantly, but a recursive delete of a real
-        // topic is not instant — 554 ms was observed on NFS — and until
-        // these mkdirs land, a broker opening a partition on this path
-        // fails with ENOENT. Deleting after them keeps the live path
-        // absent for microseconds instead of for the whole unlink walk.
-        // Failure is fine: the sweep retries every `.deleting-*`.
-        if let Some(staged) = reclaimed.staged.as_deref() {
+        // gh #220: only now delete the staged copies. The rename in
+        // step 1 frees each live path instantly, but a recursive
+        // delete of a real topic is not instant — 554 ms was observed
+        // on NFS — and until these mkdirs land, a broker opening a
+        // partition on this path fails with ENOENT. Deleting after
+        // them keeps the live path absent for microseconds instead of
+        // for the whole unlink walk. Failure is fine: the sweep
+        // retries every `.deleting-*`.
+        for staged in &staged_paths {
             let _ = std::fs::remove_dir_all(staged);
         }
-        let identity = reclaimed.verdict;
 
         // 2. Write per-topic .config.json. The broker watches this
         // file and applies retention/segment/compaction knobs on
@@ -149,7 +233,9 @@ impl KafkaTopicReconciler {
             min_compaction_lag_ms: topic.spec.config.min_compaction_lag_ms,
             delete_retention_ms: topic.spec.config.delete_retention_ms,
         };
-        kaas_storage::write_topic_config(&fs, &topic_dir, &cfg)?;
+        for root in &involved_roots {
+            kaas_storage::write_topic_config(&fs, &root.join(&topic_name), &cfg)?;
+        }
 
         // 3. Status update: partition count + TopicID (v4 UUID, minted
         // on first reconcile, NEVER rotated per gh #105).
@@ -167,6 +253,8 @@ impl KafkaTopicReconciler {
         self.patch_status(&topic, |st| {
             st.partition_count = next_count;
             st.topic_id = next_topic_id.clone();
+            st.volume_assignments = assignments.clone();
+            st.partitions_outside_spec = outside_spec;
             set_condition(&mut st.conditions, ready.clone());
         })
         .await?;
@@ -184,7 +272,9 @@ impl KafkaTopicReconciler {
         // 5-minute requeue shouldn't rewrite a file per topic on the
         // shared volume for no reason.
         if identity != kaas_storage::IdentityVerdict::Match {
-            kaas_storage::write_topic_identity(&fs, &topic_dir, &next_topic_id)?;
+            for root in &involved_roots {
+                kaas_storage::write_topic_identity(&fs, &root.join(&topic_name), &next_topic_id)?;
+            }
         }
 
         self.observer.bump_success();
@@ -220,16 +310,6 @@ impl KafkaTopicReconciler {
     /// directory that already agrees) and the staged path still awaiting
     /// deletion, which the caller removes **after** re-creating the live
     /// partition dirs (gh #220).
-    fn reclaim_stale_incarnation(
-        &self,
-        name: &str,
-        topic_dir: &Path,
-        topic_id: &str,
-        fs: &dyn kaas_storage::fs::Fs,
-    ) -> Result<Reclaimed, ControllerError> {
-        reclaim_stale_incarnation(&self.data_dir, name, topic_dir, topic_id, fs)
-    }
-
     async fn patch_status(
         &self,
         topic: &KafkaTopic,
@@ -261,6 +341,36 @@ impl KafkaTopicReconciler {
         .await?;
         Ok(())
     }
+}
+
+/// gh #221 phase 2: the log-dir names a topic's partitions may be
+/// placed on. `spec.storage.volumes` set → validated names (the
+/// reserved `default` refers to the data volume); unset → the
+/// default set: `default` plus every pool member with
+/// `defaultEligible: true` (reserved members opt out of receiving
+/// unbound topics — Streams auto-creates arrive casually).
+pub(crate) fn eligible_log_dirs(
+    pool: &[kaas_storage::LogDirInfo],
+    spec: Option<&kaas_operator_api::KafkaTopicStorage>,
+) -> Result<Vec<String>, String> {
+    let requested: Vec<String> = spec.map(|s| s.volumes.clone()).unwrap_or_default();
+    if requested.is_empty() {
+        let mut set = vec![kaas_storage::DEFAULT_LOG_DIR_NAME.to_owned()];
+        set.extend(
+            pool.iter()
+                .filter(|d| d.default_eligible)
+                .map(|d| d.name.clone()),
+        );
+        return Ok(set);
+    }
+    for name in &requested {
+        let known =
+            name == kaas_storage::DEFAULT_LOG_DIR_NAME || pool.iter().any(|d| &d.name == name);
+        if !known {
+            return Err(name.clone());
+        }
+    }
+    Ok(requested)
 }
 
 /// Generate a canonical hyphenated v4-shape UUID. Mirrors
@@ -602,6 +712,7 @@ mod tests {
                 topic_name: String::new(),
                 partitions: 1,
                 config: KafkaTopicConfig::default(),
+                storage: None,
             },
             status: None,
         };
@@ -620,6 +731,7 @@ mod tests {
                 topic_name: "My.Real.Topic".into(),
                 partitions: 1,
                 config: KafkaTopicConfig::default(),
+                storage: None,
             },
             status: None,
         };
@@ -654,8 +766,11 @@ mod tests {
                 topic_name: "t".into(),
                 partitions: 1,
                 config: KafkaTopicConfig::default(),
+                storage: None,
             },
             status: Some(KafkaTopicStatus {
+                volume_assignments: Default::default(),
+                partitions_outside_spec: 0,
                 partition_count: 1,
                 topic_id: original.clone(),
                 conditions: vec![],
@@ -678,6 +793,7 @@ mod tests {
                 topic_name: "t".into(),
                 partitions: 1,
                 config: KafkaTopicConfig::default(),
+                storage: None,
             },
             status: None,
         };
@@ -688,5 +804,84 @@ mod tests {
             .map(|s| s.topic_id.clone())
             .unwrap_or_else(generate_topic_uuid);
         assert!(regex_lite_v4().is_match(&id));
+    }
+
+    // --- gh #221 phase 2: eligible-set + placement -----------------
+
+    fn pool() -> Vec<kaas_storage::LogDirInfo> {
+        vec![
+            kaas_storage::LogDirInfo {
+                name: "fast".into(),
+                path: "/vols/fast".into(),
+                default_eligible: true,
+            },
+            kaas_storage::LogDirInfo {
+                name: "premium".into(),
+                path: "/vols/premium".into(),
+                default_eligible: false, // reserved: explicit binding only
+            },
+        ]
+    }
+
+    fn storage_spec(volumes: &[&str]) -> kaas_operator_api::KafkaTopicStorage {
+        kaas_operator_api::KafkaTopicStorage {
+            volumes: volumes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn unset_binding_uses_default_eligible_set() {
+        let set = eligible_log_dirs(&pool(), None).unwrap();
+        // default + fast; premium is reserved (defaultEligible=false).
+        assert_eq!(set, vec!["default".to_string(), "fast".to_string()]);
+    }
+
+    #[test]
+    fn explicit_binding_may_name_reserved_members() {
+        let set = eligible_log_dirs(&pool(), Some(&storage_spec(&["premium"]))).unwrap();
+        assert_eq!(set, vec!["premium".to_string()]);
+    }
+
+    #[test]
+    fn unknown_name_fails_loudly() {
+        let err = eligible_log_dirs(&pool(), Some(&storage_spec(&["fast", "typo"]))).unwrap_err();
+        assert_eq!(err, "typo");
+    }
+
+    #[test]
+    fn round_robin_is_creation_sticky() {
+        // First placement: 4 partitions over [default, fast].
+        let eligible = eligible_log_dirs(&pool(), None).unwrap();
+        let mut assignments = std::collections::BTreeMap::new();
+        for p in 0..4 {
+            assignments.entry(p.to_string()).or_insert_with(|| {
+                eligible[usize::try_from(p).unwrap_or(0) % eligible.len()].clone()
+            });
+        }
+        assert_eq!(assignments["0"], "default");
+        assert_eq!(assignments["1"], "fast");
+        assert_eq!(assignments["2"], "default");
+        assert_eq!(assignments["3"], "fast");
+
+        // Spec edit pins the topic to premium; existing entries must
+        // NOT move — only new partitions (expansion) follow the new
+        // set — and the old ones count as drift.
+        let eligible = eligible_log_dirs(&pool(), Some(&storage_spec(&["premium"]))).unwrap();
+        for p in 0..6 {
+            assignments.entry(p.to_string()).or_insert_with(|| {
+                eligible[usize::try_from(p).unwrap_or(0) % eligible.len()].clone()
+            });
+        }
+        assert_eq!(assignments["0"], "default", "sticky");
+        assert_eq!(assignments["4"], "premium", "expansion follows new set");
+        assert_eq!(assignments["5"], "premium");
+        let outside = (0..6)
+            .filter(|p| {
+                assignments
+                    .get(&p.to_string())
+                    .is_some_and(|n| !eligible.contains(n))
+            })
+            .count();
+        assert_eq!(outside, 4, "the four original placements are drift");
     }
 }

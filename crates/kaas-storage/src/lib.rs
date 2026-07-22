@@ -38,7 +38,9 @@ pub mod txn_index;
 
 pub use cleaner::{FixedPolicySource, PolicySource, RetentionCleaner, RetentionPolicy};
 pub use disk::DiskStorageEngine;
-pub use engine::StorageEngine;
+pub use engine::{
+    parse_log_dirs_json, LogDirInfo, PlacementResolver, StorageEngine, DEFAULT_LOG_DIR_NAME,
+};
 pub use errors::StorageError;
 pub use fs::{Fs, RealFs};
 pub use idempotence::{

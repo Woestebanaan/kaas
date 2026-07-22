@@ -16,8 +16,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
+use parking_lot::RwLock;
 
-use crate::engine::StorageEngine;
+use crate::engine::{LogDirInfo, PlacementResolver, StorageEngine};
 use crate::errors::StorageError;
 use crate::fs::Fs;
 use crate::partition::{Partition, PartitionConfig};
@@ -25,6 +26,16 @@ use crate::partition::{Partition, PartitionConfig};
 pub struct DiskStorageEngine {
     fs: Arc<dyn Fs>,
     data_dir: PathBuf,
+    /// gh #221 phase 2: additional named log dirs (pool members)
+    /// beyond the default `data_dir`. Kafka vocabulary — one pool
+    /// volume = one log dir (KIP-113 shape). Empty in the classic
+    /// single-volume layout.
+    extra_log_dirs: Vec<LogDirInfo>,
+    /// Resolves `(topic, partition)` → log-dir *name*. `None` (or a
+    /// resolver miss, or an unknown name) → the default log dir, so
+    /// the resolver can never make a partition unopenable — worst
+    /// case it lands in the legacy location.
+    placement: RwLock<Option<Arc<dyn PlacementResolver>>>,
     cfg: PartitionConfig,
     partitions: DashMap<(String, i32), Arc<Partition>>,
 }
@@ -33,6 +44,7 @@ impl std::fmt::Debug for DiskStorageEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiskStorageEngine")
             .field("data_dir", &self.data_dir)
+            .field("extra_log_dirs", &self.extra_log_dirs.len())
             .field("partitions", &self.partitions.len())
             .finish()
     }
@@ -45,13 +57,54 @@ impl DiskStorageEngine {
         Self {
             fs,
             data_dir,
+            extra_log_dirs: Vec::new(),
+            placement: RwLock::new(None),
             cfg,
             partitions: DashMap::new(),
         }
     }
 
+    /// Add named pool log dirs (gh #221 phase 2). Call before the
+    /// engine is shared; entries named `default` are ignored (that
+    /// name is reserved for `data_dir`).
+    pub fn with_extra_log_dirs(mut self, dirs: Vec<LogDirInfo>) -> Self {
+        self.extra_log_dirs = dirs
+            .into_iter()
+            .filter(|d| d.name != crate::engine::DEFAULT_LOG_DIR_NAME)
+            .collect();
+        self
+    }
+
+    /// Install the placement source (the broker wires the KafkaTopic
+    /// registry here). Swappable at runtime — resolution happens on
+    /// partition open/create, not per record.
+    pub fn set_placement_resolver(&self, r: Arc<dyn PlacementResolver>) {
+        *self.placement.write() = Some(r);
+    }
+
+    /// Root directory hosting `(topic, partition)` under the current
+    /// placement. Falls back to `data_dir` on any miss.
+    fn log_dir_root(&self, topic: &str, partition: i32) -> PathBuf {
+        let name = self
+            .placement
+            .read()
+            .as_ref()
+            .and_then(|r| r.log_dir_of(topic, partition));
+        match name {
+            Some(n) => self
+                .extra_log_dirs
+                .iter()
+                .find(|d| d.name == n)
+                .map(|d| d.path.clone())
+                .unwrap_or_else(|| self.data_dir.clone()),
+            None => self.data_dir.clone(),
+        }
+    }
+
     fn partition_dir(&self, topic: &str, partition: i32) -> PathBuf {
-        self.data_dir.join(topic).join(partition.to_string())
+        self.log_dir_root(topic, partition)
+            .join(topic)
+            .join(partition.to_string())
     }
 
     /// Get-or-open the partition. The race window between "no entry"
@@ -297,6 +350,30 @@ impl StorageEngine for DiskStorageEngine {
 
     fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    fn log_dirs(&self) -> Vec<LogDirInfo> {
+        let mut dirs = vec![LogDirInfo {
+            name: crate::engine::DEFAULT_LOG_DIR_NAME.to_owned(),
+            path: self.data_dir.clone(),
+            default_eligible: true,
+        }];
+        dirs.extend(self.extra_log_dirs.iter().cloned());
+        dirs
+    }
+
+    fn partition_log_dir(&self, topic: &str, partition: i32) -> String {
+        let name = self
+            .placement
+            .read()
+            .as_ref()
+            .and_then(|r| r.log_dir_of(topic, partition));
+        match name {
+            // An unknown name resolves to the default root (see
+            // `log_dir_root`), so report it as such.
+            Some(n) if self.extra_log_dirs.iter().any(|d| d.name == n) => n,
+            _ => crate::engine::DEFAULT_LOG_DIR_NAME.to_owned(),
+        }
     }
 
     async fn take_over(
@@ -642,6 +719,57 @@ mod tests {
             }
             assert_eq!(e.partition_size("t", 0), one_len * 4);
             e.relinquish_all().await.unwrap();
+        });
+    }
+
+    /// gh #221 phase 2: the engine routes partition paths through
+    /// the placement resolver; unknown names and unplaced partitions
+    /// fall back to the default root.
+    #[test]
+    fn placement_resolver_routes_partition_dirs() {
+        use crate::engine::{LogDirInfo, PlacementResolver};
+        struct Fixed;
+        impl PlacementResolver for Fixed {
+            fn log_dir_of(&self, topic: &str, partition: i32) -> Option<String> {
+                match (topic, partition) {
+                    ("t", 0) => Some("fast".to_owned()),
+                    ("t", 1) => Some("no-such-dir".to_owned()),
+                    _ => None,
+                }
+            }
+        }
+        rt().block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let default_root = tmp.path().join("data");
+            let fast_root = tmp.path().join("fast");
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new());
+            let e = DiskStorageEngine::new(fs, default_root.clone(), PartitionConfig::default())
+                .with_extra_log_dirs(vec![LogDirInfo {
+                    name: "fast".to_owned(),
+                    path: fast_root.clone(),
+                    default_eligible: true,
+                }]);
+            e.set_placement_resolver(Arc::new(Fixed));
+
+            e.create_partition("t", 0).await.unwrap();
+            e.create_partition("t", 1).await.unwrap();
+            e.create_partition("t", 2).await.unwrap();
+
+            assert!(
+                fast_root.join("t/0").is_dir(),
+                "placed partition on pool root"
+            );
+            assert!(default_root.join("t/1").is_dir(), "unknown name falls back");
+            assert!(default_root.join("t/2").is_dir(), "unplaced falls back");
+
+            assert_eq!(e.partition_log_dir("t", 0), "fast");
+            assert_eq!(e.partition_log_dir("t", 1), "default");
+            assert_eq!(e.partition_log_dir("t", 2), "default");
+
+            let dirs = e.log_dirs();
+            assert_eq!(dirs.len(), 2);
+            assert_eq!(dirs[0].name, "default");
+            assert_eq!(dirs[1].name, "fast");
         });
     }
 }

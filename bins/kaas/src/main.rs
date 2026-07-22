@@ -85,17 +85,26 @@ fn run_init() -> Result<()> {
     ensure_data_dir_perms(data_path, uid, gid)
         .with_context(|| format!("init: chown/chmod {}", data_path.display()))?;
 
-    // gh #221 phase 1: the control-plane volume (KAAS_CLUSTER_DIR)
-    // needs the same ownership fix as the data volume when it's a
-    // separate mount — same CSI fsGroup caveats apply.
+    // gh #221: the control-plane volume (KAAS_CLUSTER_DIR, phase 1)
+    // and every pool log dir (KAAS_LOG_DIRS, phase 2) need the same
+    // ownership fix as the data volume when they're separate mounts —
+    // same CSI fsGroup caveats apply.
+    let mut extra_roots: Vec<PathBuf> = Vec::new();
     if let Ok(cluster_dir) = std::env::var("KAAS_CLUSTER_DIR") {
         if !cluster_dir.is_empty() {
-            let cluster_path = Path::new(&cluster_dir);
-            std::fs::create_dir_all(cluster_path)
-                .with_context(|| format!("init: mkdir {}", cluster_path.display()))?;
-            ensure_data_dir_perms(cluster_path, uid, gid)
-                .with_context(|| format!("init: chown/chmod {}", cluster_path.display()))?;
+            extra_roots.push(PathBuf::from(cluster_dir));
         }
+    }
+    if let Ok(json) = std::env::var("KAAS_LOG_DIRS") {
+        match kaas_storage::parse_log_dirs_json(&json) {
+            Ok(dirs) => extra_roots.extend(dirs.into_iter().map(|d| d.path)),
+            Err(e) => anyhow::bail!("init: {e}"),
+        }
+    }
+    for root in &extra_roots {
+        std::fs::create_dir_all(root).with_context(|| format!("init: mkdir {}", root.display()))?;
+        ensure_data_dir_perms(root, uid, gid)
+            .with_context(|| format!("init: chown/chmod {}", root.display()))?;
     }
     eprintln!(
         "kaas init: data_dir={} uid={} gid={} ok",
@@ -190,9 +199,17 @@ async fn main() -> Result<()> {
         "kaas starting",
     );
 
-    let engine = build_engine(cli.data_dir.clone(), cli.flush_interval_messages)?;
     let topics =
         Arc::new(TopicRegistry::from_env_json(&cli.topics_seed).context("parsing KAAS_TOPICS")?);
+    // Registry before engine: it doubles as the placement resolver
+    // (gh #221 phase 2) — the engine resolves partition roots through
+    // the volume assignments the topic watch stashes into it.
+    let engine = build_engine(
+        cli.data_dir.clone(),
+        cli.flush_interval_messages,
+        cli.log_dirs.clone(),
+        topics.clone(),
+    )?;
     if topics.is_empty() {
         warn!(
             "KAAS_TOPICS is empty — broker will serve metadata for zero topics. \
@@ -293,7 +310,7 @@ async fn main() -> Result<()> {
             if let Err(err) = kaas_k8s::kube_watchers::run_topic_watch(
                 client,
                 watch_ns,
-                move |name, partitions| {
+                move |name, partitions, volumes| {
                     let prev = topics_apply
                         .all()
                         .into_iter()
@@ -304,6 +321,10 @@ async fn main() -> Result<()> {
                         partition_count: partitions,
                         topic_id: [0u8; 16],
                     });
+                    // gh #221 phase 2: stash the reconciler-stamped
+                    // placement — the engine resolves partition roots
+                    // through the registry.
+                    topics_apply.set_volume_assignments(name, volumes.clone());
                     match prev {
                         None => {
                             notify_apply.notify(kaas_controller::AssignmentReason::TopicCreated)
@@ -636,6 +657,8 @@ fn spawn_reloader(
 fn build_engine(
     data_dir: Option<PathBuf>,
     flush_interval_messages: i64,
+    log_dirs: Vec<kaas_storage::LogDirInfo>,
+    placement: Arc<TopicRegistry>,
 ) -> Result<Arc<dyn StorageEngine>> {
     match data_dir {
         Some(dir) => {
@@ -652,7 +675,13 @@ fn build_engine(
                 flush_interval_messages,
                 ..PartitionConfig::default()
             };
-            let engine = DiskStorageEngine::new(Arc::new(RealFs), dir, cfg);
+            for d in &log_dirs {
+                std::fs::create_dir_all(&d.path)
+                    .with_context(|| format!("creating log dir {}", d.path.display()))?;
+            }
+            let engine =
+                DiskStorageEngine::new(Arc::new(RealFs), dir, cfg).with_extra_log_dirs(log_dirs);
+            engine.set_placement_resolver(placement);
             Ok(Arc::new(engine))
         }
         None => Ok(Arc::new(MemoryStorage::new())),

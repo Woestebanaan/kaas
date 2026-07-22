@@ -53,6 +53,29 @@ pub struct KafkaTopicSpec {
 
     #[serde(default)]
     pub config: KafkaTopicConfig,
+
+    /// gh #221 phase 2: which log dirs (pool volumes) this topic's
+    /// partitions may be placed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<KafkaTopicStorage>,
+}
+
+/// Per-topic volume binding (gh #221 phase 2). One field, three
+/// cases: a single name pins the topic to that log dir; multiple
+/// names stripe partitions round-robin across the set; unset uses
+/// the default set (every pool member with `defaultEligible: true`).
+///
+/// Placement is **creation-sticky**: editing this list never moves
+/// existing partitions — new placements follow the new set, and
+/// partitions sitting outside it are surfaced via
+/// `status.partitionsOutsideSpec` until an explicit migration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaTopicStorage {
+    /// Pool log-dir names (chart `storage.pool[].name`; `default` is
+    /// the data volume). Unknown names fail the reconcile loudly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<String>,
 }
 
 /// Per-topic configuration knobs. All optional — unset = broker default.
@@ -111,6 +134,19 @@ pub struct KafkaTopicStatus {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+
+    /// gh #221 phase 2: partition → log-dir name, stamped by the
+    /// reconciler when a partition is first placed and never
+    /// recomputed for existing partitions (creation-sticky). String
+    /// keys because JSON object keys are strings.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub volume_assignments: std::collections::BTreeMap<String, String>,
+
+    /// Number of partitions currently placed on log dirs outside
+    /// `spec.storage.volumes` — drift from a spec edit, surfaced
+    /// instead of auto-migrated (data moves are explicit, gh #221).
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub partitions_outside_spec: i32,
 }
 
 impl KafkaTopic {

@@ -69,30 +69,50 @@ impl Handler for DescribeLogDirsHandler {
         let mut body = body;
         let req = describe_log_dirs::decode_request(&mut body, version)?;
 
-        let topics = self
-            .wanted(&req)
+        // gh #221 phase 2: one LogDirResult per log dir (pool
+        // member), every member reported even when empty — Kafka
+        // reports all configured log.dirs. Partitions group under
+        // the dir the placement resolver assigns them to.
+        let wanted = self.wanted(&req);
+        let results = self
+            .broker
+            .engine
+            .log_dirs()
             .into_iter()
-            .map(|(name, parts)| describe_log_dirs::ResponseTopic {
-                partitions: parts
+            .map(|dir| {
+                let topics = wanted
                     .iter()
-                    .map(|p| describe_log_dirs::ResponsePartition {
-                        partition_index: *p,
-                        partition_size: self.broker.engine.partition_size(&name, *p),
-                        offset_lag: 0,
-                        is_future_key: false,
+                    .filter_map(|(name, parts)| {
+                        let partitions: Vec<_> = parts
+                            .iter()
+                            .filter(|p| self.broker.engine.partition_log_dir(name, **p) == dir.name)
+                            .map(|p| describe_log_dirs::ResponsePartition {
+                                partition_index: *p,
+                                partition_size: self.broker.engine.partition_size(name, *p),
+                                offset_lag: 0,
+                                is_future_key: false,
+                            })
+                            .collect();
+                        if partitions.is_empty() {
+                            return None;
+                        }
+                        Some(describe_log_dirs::ResponseTopic {
+                            name: name.clone(),
+                            partitions,
+                        })
                     })
-                    .collect(),
-                name,
+                    .collect();
+                describe_log_dirs::LogDirResult {
+                    error_code: 0,
+                    log_dir: dir.path.display().to_string(),
+                    topics,
+                }
             })
             .collect();
 
         let resp = describe_log_dirs::Response {
             throttle_time_ms: 0,
-            results: vec![describe_log_dirs::LogDirResult {
-                error_code: 0,
-                log_dir: self.broker.engine.data_dir().display().to_string(),
-                topics,
-            }],
+            results,
         };
         let mut out = BytesMut::new();
         describe_log_dirs::encode_response(&mut out, &resp, version)?;

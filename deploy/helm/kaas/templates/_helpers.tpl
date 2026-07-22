@@ -26,6 +26,20 @@ Common template helpers.
 {{- printf "%s-cluster-state" (include "kaas.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "kaas.poolPvcName" -}}
+{{- printf "%s-pool-%s" (include "kaas.fullname" .ctx) .name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- /* gh #221 phase 2: KAAS_LOG_DIRS JSON for broker + operator.
+       Mount path convention: /vols/<name>. */ -}}
+{{- define "kaas.logDirsJSON" -}}
+{{- $dirs := list -}}
+{{- range .Values.storage.pool -}}
+{{- $dirs = append $dirs (dict "name" .name "path" (printf "/vols/%s" .name) "defaultEligible" (ne .defaultEligible false)) -}}
+{{- end -}}
+{{- toJson $dirs -}}
+{{- end -}}
+
 {{- define "kaas.brokerSAName" -}}
 {{- if .Values.serviceAccount.broker.create -}}
 {{- default (printf "%s-broker" (include "kaas.fullname" .)) .Values.serviceAccount.broker.name -}}

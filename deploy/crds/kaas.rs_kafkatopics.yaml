@@ -66,6 +66,16 @@ spec:
                 format: int32
                 minimum: 1.0
                 type: integer
+              storage:
+                description: 'gh #221 phase 2: which log dirs (pool volumes) this topic''s partitions may be placed on.'
+                nullable: true
+                properties:
+                  volumes:
+                    description: Pool log-dir names (chart `storage.pool[].name`; `default` is the data volume). Unknown names fail the reconcile loudly.
+                    items:
+                      type: string
+                    type: array
+                type: object
               topicName:
                 description: |-
                   On-wire Kafka topic name. Empty → defaults to `metadata.name`. Use [`KafkaTopic::effective_topic_name`] in callers; never read this field directly.
@@ -116,9 +126,18 @@ spec:
               partitionCount:
                 format: int32
                 type: integer
+              partitionsOutsideSpec:
+                description: 'Number of partitions currently placed on log dirs outside `spec.storage.volumes` — drift from a spec edit, surfaced instead of auto-migrated (data moves are explicit, gh #221).'
+                format: int32
+                type: integer
               topicId:
                 description: 'Stable v4 UUID minted by the operator on first reconcile (gh #105, KIP-516). Never rotated; deleting + re-creating a topic mints a fresh UUID per Apache''s contract. The broker surfaces this on Metadata v10+ responses.'
                 type: string
+              volumeAssignments:
+                additionalProperties:
+                  type: string
+                description: 'gh #221 phase 2: partition → log-dir name, stamped by the reconciler when a partition is first placed and never recomputed for existing partitions (creation-sticky). String keys because JSON object keys are strings.'
+                type: object
             type: object
         required:
         - spec

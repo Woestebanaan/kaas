@@ -28,6 +28,10 @@ spec:
             - name: KAAS_CLUSTER_DIR
               value: {{ .Values.storage.controlPlane.mountPath }}
             {{- end }}
+            {{- if .Values.storage.pool }}
+            - name: KAAS_LOG_DIRS
+              value: {{ include "kaas.logDirsJSON" . | quote }}
+            {{- end }}
             - name: KAAS_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -70,6 +74,10 @@ spec:
             - name: cluster-state
               mountPath: {{ .Values.storage.controlPlane.mountPath }}
             {{- end }}
+            {{- range .Values.storage.pool }}
+            - name: pool-{{ .name }}
+              mountPath: /vols/{{ .name }}
+            {{- end }}
           resources: {{- toYaml .Values.operator.resources | nindent 12 }}
       volumes:
         # Operator mounts the SAME PVCs as the brokers.
@@ -80,5 +88,10 @@ spec:
         - name: cluster-state
           persistentVolumeClaim:
             claimName: {{ include "kaas.controlPlanePvcName" . }}
+        {{- end }}
+        {{- range .Values.storage.pool }}
+        - name: pool-{{ .name }}
+          persistentVolumeClaim:
+            claimName: {{ include "kaas.poolPvcName" (dict "ctx" $ "name" .name) }}
         {{- end }}
 {{- end }}

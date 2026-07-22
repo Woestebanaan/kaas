@@ -184,6 +184,26 @@ storage:
     size: 1Gi
     accessMode: ReadWriteMany
     mountPath: /cluster
+  # gh #221 phase 2: named pool log dirs (Kafka KIP-113 vocabulary —
+  # one pool volume = one log dir). Each member is its own RWX PVC,
+  # mounted on every broker at /vols/<name> and advertised to broker
+  # + operator as KAAS_LOG_DIRS. Topics choose members via
+  # `KafkaTopic.spec.storage.volumes`; members with
+  # defaultEligible: false are reserved — they only receive topics
+  # that name them explicitly. Placement is creation-sticky; editing
+  # a topic's binding never moves existing partitions.
+  #
+  # pool:
+  #   - name: fast
+  #     size: 100Gi
+  #     className: ""           # "" → storage.className
+  #     accessMode: ReadWriteMany
+  #     defaultEligible: true
+  #   - name: premium
+  #     size: 50Gi
+  #     className: premium-nfs
+  #     defaultEligible: false
+  pool: []
 
 auth:
   # When false, the broker uses an AllowAllAuthEngine (no authentication,

@@ -31,3 +31,21 @@ spec:
     requests:
       storage: {{ .Values.storage.controlPlane.size }}
 {{- end }}
+{{- range .Values.storage.pool }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kaas.poolPvcName" (dict "ctx" $ "name" .name) }}
+  labels: {{- include "kaas.labels" $ | nindent 4 }}
+  annotations:
+    # Pool log dir — holds topic data; never auto-delete.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ .accessMode | default "ReadWriteMany" }}
+  storageClassName: {{ .className | default $.Values.storage.className }}
+  resources:
+    requests:
+      storage: {{ .size }}
+{{- end }}
