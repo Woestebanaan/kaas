@@ -25,6 +25,14 @@ use crate::errors::ControllerError;
 /// fence_log/, __consumer_offsets/). The topic sweep MUST skip it.
 const CLUSTER_FILES_DIR: &str = "__cluster";
 
+/// Pre-gh #223 brokers wrote committed group offsets to
+/// `<data_dir>/__consumer_offsets/` — a sibling of the topic dirs,
+/// which this sweep deleted every pass (silent offset loss). Current
+/// brokers keep offsets under `__cluster/`, but the legacy name must
+/// stay in the keep-set: during a rolling upgrade an old-image broker
+/// still writes the old path, and a new operator must not eat it.
+const LEGACY_CONSUMER_OFFSETS_DIR: &str = "__consumer_offsets";
+
 /// Prefix for a topic directory that has been atomically renamed aside
 /// for deletion (gh #203). The `KafkaTopic` reconciler's NotFound path
 /// renames `<data_dir>/<topic>` → `<data_dir>/.deleting-<topic>.<n>`
@@ -72,13 +80,23 @@ pub async fn sweep_topics(
     // Build the keep-set from `effective_topic_name()` so synthetic-
     // metadata.name topics (gh #86) are matched against their on-wire
     // Kafka name — the directory layer uses that name verbatim.
-    let mut keep: HashSet<String> = HashSet::new();
-    keep.insert(CLUSTER_FILES_DIR.into());
+    let mut keep = base_keep_set();
     for t in &topics.items {
         keep.insert(t.effective_topic_name().to_string());
     }
 
     reclaim_orphan_dirs(data_dir, &keep)
+}
+
+/// The non-topic names every sweep pass must preserve, independent of
+/// which `KafkaTopic` CRs exist. Split out so the unit tests exercise
+/// the same set production uses — the gh #223 offset-loss bug lived
+/// precisely in this set being one entry short.
+fn base_keep_set() -> HashSet<String> {
+    let mut keep: HashSet<String> = HashSet::new();
+    keep.insert(CLUSTER_FILES_DIR.into());
+    keep.insert(LEGACY_CONSUMER_OFFSETS_DIR.into());
+    keep
 }
 
 /// Remove every immediate child directory of `data_dir` whose name is
@@ -180,7 +198,9 @@ mod tests {
     // We still want a smoke test for `sweep_topics`' filesystem
     // walk + the `__cluster` skip; isolate that path by calling the
     // internal helper directly.
-    use super::{SweepReport, CLUSTER_FILES_DIR, STAGED_DELETE_PREFIX};
+    use super::{
+        base_keep_set, reclaim_orphan_dirs, SweepReport, CLUSTER_FILES_DIR, STAGED_DELETE_PREFIX,
+    };
     use std::collections::HashSet;
     use std::fs;
 
@@ -242,6 +262,26 @@ mod tests {
         // Expected removals.
         assert!(!root.join("orphan-a").exists());
         assert!(!root.join("orphan-b").exists());
+    }
+
+    /// gh #223 regression pin: the production keep-set must preserve
+    /// the cluster dir AND the legacy `__consumer_offsets` dir (an
+    /// old-image broker still writes it mid-rolling-upgrade). Uses
+    /// the real `base_keep_set` + `reclaim_orphan_dirs` pair — the
+    /// bug lived in the set construction the older tests bypassed.
+    #[test]
+    fn production_keep_set_preserves_consumer_offsets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(CLUSTER_FILES_DIR)).unwrap();
+        fs::create_dir(root.join("__consumer_offsets")).unwrap();
+        fs::write(root.join("__consumer_offsets/g1.json"), b"{}").unwrap();
+        fs::create_dir(root.join("orphan")).unwrap();
+
+        let report = reclaim_orphan_dirs(root, &base_keep_set()).unwrap();
+        assert_eq!(report.removed, vec!["orphan"]);
+        assert!(root.join("__consumer_offsets/g1.json").exists());
+        assert!(root.join(CLUSTER_FILES_DIR).exists());
     }
 
     #[test]

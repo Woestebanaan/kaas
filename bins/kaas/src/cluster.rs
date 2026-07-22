@@ -128,11 +128,24 @@ pub fn install(
         _ => None,
     };
 
-    let offset_dir = data_dir
+    // Cluster-state root: `<data_dir>/__cluster`; dev mode (no
+    // KAAS_DATA_DIR) gets a tmp dir so the stores still function
+    // under unit tests and single-binary smoke runs.
+    //
+    // Offsets live HERE, not at the data-dir root — a sibling of the
+    // topic dirs is exactly what the operator's orphan-topic sweep
+    // reclaims, and the pre-fix layout lost committed offsets to it
+    // every 5 minutes (gh #223).
+    let cluster_dir = data_dir
         .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kaas-offsets-mem"));
+        .map(|d| d.join("__cluster"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kaas-cluster-mem"));
+    std::fs::create_dir_all(&cluster_dir)?;
+    if let Some(dir) = data_dir.as_ref() {
+        kaas_coordinator::migrate_legacy_offsets_dir(dir, &cluster_dir);
+    }
 
-    let offsets = Arc::new(OffsetStore::new(&offset_dir));
+    let offsets = Arc::new(OffsetStore::new(&cluster_dir));
     let lookup: Arc<dyn BrokerLookup> = match &wiring {
         Some(w) => registry_lookup(w.registry.clone()),
         None => self_endpoint_lookup(&self_id, client_port),
@@ -161,16 +174,9 @@ pub fn install(
         cluster_id, "installed Manager (LocalGroupSource + LocalTxnSource bootstrap)"
     );
 
-    // Phase 6 transactional-state store + fence log. We always
-    // construct one — dev mode (no KAAS_DATA_DIR) gets a tempdir
-    // so the gh #22 rejoin contract still works under unit tests
-    // and single-binary smoke runs. Same shape as the offset store
-    // fallback above.
-    let cluster_dir = data_dir
-        .clone()
-        .map(|d| d.join("__cluster"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kaas-cluster-mem"));
-    std::fs::create_dir_all(&cluster_dir)?;
+    // Phase 6 transactional-state store + fence log, rooted in the
+    // same cluster-state dir resolved above (gh #22 rejoin contract
+    // holds in dev mode via the tmp-dir fallback).
     let txn_state = Arc::new(TxnStateStore::open(&cluster_dir, 0)?);
     broker.install_txn_state(txn_state.clone());
     info!(
