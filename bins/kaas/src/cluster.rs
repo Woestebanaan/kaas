@@ -139,14 +139,13 @@ pub fn install(
     // Offsets live HERE, not at the data-dir root — a sibling of the
     // topic dirs is exactly what the operator's orphan-topic sweep
     // reclaims, and the pre-fix layout lost committed offsets to it
-    // every 5 minutes (gh #223).
+    // every 5 minutes (gh #223). The legacy-dir adoption shim was
+    // dropped (pre-v1 no-backcompat policy — fresh deploy across
+    // gh #223).
     let cluster_dir = cluster_dir
         .or_else(|| data_dir.clone().map(|d| d.join("__cluster")))
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kaas-cluster-mem"));
     std::fs::create_dir_all(&cluster_dir)?;
-    if let Some(dir) = data_dir.as_ref() {
-        kaas_coordinator::migrate_legacy_offsets_dir(dir, &cluster_dir);
-    }
 
     let offsets = Arc::new(OffsetStore::new(&cluster_dir));
     let lookup: Arc<dyn BrokerLookup> = match &wiring {
@@ -785,11 +784,12 @@ impl kaas_controller::BrokerSource for ClusterBrokerSource {
 ///
 /// - No heartbeats yet → bootstrap fallback to EndpointSlice-ready
 ///   (`registered_ready`), same as before this change.
-/// - Otherwise a connected broker is alive unless it has PROVEN it
-///   speaks the `healthy` field (`ever_healthy`) and is now reporting
-///   `false` — i.e. a known-new broker whose main runtime is wedged.
-///   An old-image broker never sets `ever_healthy`, so its
-///   always-false `healthy` never evicts it (rolling-upgrade safety).
+/// - Otherwise a connected broker is alive iff its latest heartbeat
+///   reports `healthy=true`. The field is seeded from the stream's
+///   first status message and trusted unconditionally — the old-image
+///   `ever_healthy` guard was dropped under the pre-v1 no-backcompat
+///   policy (docs/RELEASING.md); mixed-version rolling upgrades from
+///   pre-`healthy` images are unsupported (fresh deploy instead).
 /// - `self_id` is always included: the controller holds the Lease, so
 ///   it is alive by definition, and the set is never empty.
 fn decide_alive(
@@ -801,7 +801,7 @@ fn decide_alive(
         registered_ready()
     } else {
         live.into_iter()
-            .filter(|b| b.healthy || !b.ever_healthy)
+            .filter(|b| b.healthy)
             .map(|b| b.id)
             .collect()
     };
@@ -1385,11 +1385,10 @@ mod alive_tests {
     use super::decide_alive;
     use kaas_controller::BrokerLiveness;
 
-    fn bl(id: &str, healthy: bool, ever: bool) -> BrokerLiveness {
+    fn bl(id: &str, healthy: bool) -> BrokerLiveness {
         BrokerLiveness {
             id: id.to_owned(),
             healthy,
-            ever_healthy: ever,
         }
     }
 
@@ -1413,7 +1412,7 @@ mod alive_tests {
         // Healthy (main runtime ticking) but hasn't finished takeover;
         // it is NOT EndpointSlice-ready, yet must be assignable.
         let alive = decide_alive(
-            vec![bl("kaas-0", true, true), bl("kaas-1", true, true)],
+            vec![bl("kaas-0", true), bl("kaas-1", true)],
             || vec!["kaas-0".to_owned()], // only kaas-0 is Ready
             "kaas-0",
         );
@@ -1421,10 +1420,12 @@ mod alive_tests {
     }
 
     #[test]
-    fn wedged_new_broker_is_evicted() {
-        // Proven to speak `healthy` (ever=true), now reporting false.
+    fn wedged_broker_is_evicted() {
+        // `healthy` is trusted unconditionally (the old-image
+        // `ever_healthy` guard was dropped — pre-v1 no-backcompat
+        // policy): reporting false = evicted.
         let alive = decide_alive(
-            vec![bl("kaas-0", true, true), bl("kaas-1", false, true)],
+            vec![bl("kaas-0", true), bl("kaas-1", false)],
             Vec::new,
             "kaas-0",
         );
@@ -1432,22 +1433,10 @@ mod alive_tests {
     }
 
     #[test]
-    fn old_image_broker_is_never_evicted_for_healthy_false() {
-        // Rolling-upgrade safety: never reported true, so its
-        // always-false must not evict it.
-        let alive = decide_alive(
-            vec![bl("kaas-0", true, true), bl("kaas-1", false, false)],
-            Vec::new,
-            "kaas-0",
-        );
-        assert_eq!(sorted(alive), vec!["kaas-0", "kaas-1"]);
-    }
-
-    #[test]
     fn self_is_always_present() {
         // Even if the controller's own entry is missing/wedged, it
         // holds the Lease and must appear.
-        let alive = decide_alive(vec![bl("kaas-1", true, true)], Vec::new, "kaas-0");
+        let alive = decide_alive(vec![bl("kaas-1", true)], Vec::new, "kaas-0");
         assert_eq!(sorted(alive), vec!["kaas-0", "kaas-1"]);
     }
 }

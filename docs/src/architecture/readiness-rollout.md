@@ -102,18 +102,17 @@ off the heartbeat, rather than waiting ~25 minutes for a `tcpSocket` liveness
 probe to notice (gh #211). Meanwhile kaas-2's `/readyz`, answered from its
 still-responsive dedicated runtime, reports `503`.
 
-## Rolling-upgrade safety
+## Rolling-upgrade note
 
-`healthy` is proto field 6, so a broker running an image that predates it sends
-the proto3 default `false`. Treating that as "wedged" would evict every
-old-image broker the moment a new-image controller took over — a self-inflicted
-outage mid-upgrade. The controller guards against it with a sticky
-`ever_healthy` bit: a broker is evicted for `healthy = false` **only if it has
-previously reported `healthy = true`**, proving it speaks the field. An
-old-image broker never sets `ever_healthy`, so its perpetual `false` is read as
-"unknown, assume alive". Fast failover is preserved by the heartbeat
+`healthy` is trusted unconditionally: a connected broker reporting `false` is
+evicted from the alive set. (An earlier sticky `ever_healthy` guard tolerated
+images predating proto field 6, which always send the proto3 default `false`;
+it was dropped under the pre-v1 no-backcompat policy — see
+`docs/RELEASING.md`. Rolling upgrades from a pre-`healthy` image are
+unsupported; deploy fresh instead.) Fast failover comes from the heartbeat
 *connection* itself — a genuinely dead broker drops its stream and vanishes
-from the alive set within a heartbeat, `ever_healthy` or not.
+from the alive set within a heartbeat — while a wedged one is evicted on its
+next `healthy = false` report.
 
 ## Belt and braces: `minReadySeconds`
 
@@ -134,5 +133,5 @@ free.
 - `bins/kaas/src/cluster.rs` — `decide_alive`, the `healthy`-gated alive-set
   policy.
 - `crates/kaas-controller/src/heartbeat_server.rs` — per-broker `healthy` /
-  `ever_healthy` tracking and `broker_liveness()`.
+  `broker_liveness()`.
 - `proto/heartbeat.proto` — `BrokerStatus.healthy` (field 6).

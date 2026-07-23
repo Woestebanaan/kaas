@@ -5,9 +5,9 @@
 //! The root is the cluster-state directory (`/data/__cluster` by
 //! default), NOT the data dir: a sibling of the topic dirs is exactly
 //! what the operator's orphan-topic sweep reclaims, and offsets lived
-//! there once — every sweep pass deleted them (gh #223).
-//! [`migrate_legacy_offsets_dir`] adopts a surviving pre-gh #223
-//! layout on boot.
+//! there once — every sweep pass deleted them (gh #223). The boot-time
+//! adoption shim for the pre-fix layout was dropped under the pre-v1
+//! no-backcompat policy: upgrading across gh #223 is a fresh deploy.
 //!
 //! Wire-readable JSON shape pinned across releases: a v0.1-written
 //! file decodes here unchanged, and vice-versa. Two on-disk schemas survive: the gh #21 v2 envelope
@@ -316,81 +316,19 @@ impl OffsetStore {
     }
 }
 
-/// Parse a `<group>.json` blob. Tries the v2 envelope first; falls
-/// back to the legacy v1 plain `HashMap<String, i64>`. Returning
-/// `None` metadata for the legacy shape lets `load` skip touching
-/// `s.metadata` for unmigrated groups.
+/// Parse a `<group>.json` blob — the gh #21 v2 envelope only. The
+/// legacy v1 plain-map fallback was dropped under the pre-v1
+/// no-backcompat policy (every write since gh #21 emits v2).
 type OffsetsAndMetadata = (HashMap<String, i64>, Option<HashMap<String, String>>);
 
 fn decode_offsets_file(data: &[u8]) -> io::Result<OffsetsAndMetadata> {
-    if let Ok(v2) = serde_json::from_slice::<OffsetFileV2>(data) {
-        if !v2.offsets.is_empty() || !v2.metadata.is_empty() {
-            let meta = if v2.metadata.is_empty() {
-                None
-            } else {
-                Some(v2.metadata)
-            };
-            return Ok((v2.offsets, meta));
-        }
-    }
-    let v1: HashMap<String, i64> = serde_json::from_slice(data).map_err(io::Error::other)?;
-    Ok((v1, None))
-}
-
-/// gh #223 boot-time adoption of the pre-fix layout: offsets used to
-/// live at `<data_dir>/__consumer_offsets`, a sibling of the topic
-/// dirs, where the operator's orphan-topic sweep deleted them every
-/// pass. Move a surviving legacy dir under the cluster-state root.
-///
-/// `rename` first (atomic on the same mount — the default layout);
-/// on `EXDEV` (cluster dir on its own volume) fall back to
-/// copy-then-remove, per-file, resumable: a crash mid-copy leaves
-/// both dirs and the next boot re-runs the copy idempotently
-/// (`<group>.json` files are only ever whole-file replaced).
-pub fn migrate_legacy_offsets_dir(data_dir: &std::path::Path, cluster_dir: &std::path::Path) {
-    let legacy = data_dir.join("__consumer_offsets");
-    let target = cluster_dir.join("__consumer_offsets");
-    if !legacy.is_dir() || legacy == target {
-        return;
-    }
-    if !target.exists() {
-        match std::fs::rename(&legacy, &target) {
-            Ok(()) => {
-                tracing::info!(from = %legacy.display(), to = %target.display(),
-                    "migrated legacy consumer-offsets dir (gh #223)");
-                return;
-            }
-            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {}
-            Err(e) => {
-                tracing::warn!(%e, from = %legacy.display(),
-                    "legacy consumer-offsets migration failed; leaving in place");
-                return;
-            }
-        }
-    }
-    // Cross-device (or a half-migrated target from a previous crash):
-    // copy file-by-file, never overwriting a file the new store may
-    // already have rewritten, then drop the legacy dir.
-    if let Err(e) =
-        copy_offsets_dir(&legacy, &target).and_then(|()| std::fs::remove_dir_all(&legacy))
-    {
-        tracing::warn!(%e, from = %legacy.display(),
-            "legacy consumer-offsets copy-migration incomplete; will retry next boot");
+    let v2: OffsetFileV2 = serde_json::from_slice(data).map_err(io::Error::other)?;
+    let meta = if v2.metadata.is_empty() {
+        None
     } else {
-        tracing::info!(from = %legacy.display(), to = %target.display(),
-            "copy-migrated legacy consumer-offsets dir (gh #223)");
-    }
-}
-
-fn copy_offsets_dir(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)?.flatten() {
-        let dst = to.join(entry.file_name());
-        if entry.file_type()?.is_file() && !dst.exists() {
-            std::fs::copy(entry.path(), &dst)?;
-        }
-    }
-    Ok(())
+        Some(v2.metadata)
+    };
+    Ok((v2.offsets, meta))
 }
 
 #[cfg(test)]
@@ -481,25 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn load_reads_legacy_v1_plain_map() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("__consumer_offsets");
-        std::fs::create_dir_all(&dir).unwrap();
-        // Pre-#21 plain-map shape.
-        std::fs::write(dir.join("g1.json"), r#"{"t1/0": 99}"#).unwrap();
-        let s = store(tmp.path());
-        s.load("g1").unwrap();
-        let got = s.fetch(
-            "g1",
-            &[FetchSpec {
-                topic: "t1".to_owned(),
-                partitions: vec![0],
-            }],
-        );
-        assert_eq!(got.get("t1/0"), Some(&99));
-    }
-
-    #[test]
     fn delete_drops_cache_and_file() {
         let tmp = tempfile::tempdir().unwrap();
         let s = store(tmp.path());
@@ -576,84 +495,5 @@ mod tests {
             }],
         );
         assert_eq!(got.get("t1/0"), Some(&-1));
-    }
-
-    /// gh #223: a pre-fix `<data_dir>/__consumer_offsets` dir is
-    /// adopted under the cluster dir on boot, and the store then
-    /// serves the migrated offsets.
-    #[test]
-    fn migrates_legacy_offsets_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let cluster_dir = data_dir.join("__cluster");
-        std::fs::create_dir_all(&cluster_dir).unwrap();
-        let legacy = data_dir.join("__consumer_offsets");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("g1.json"), r#"{"t1/0": 42}"#).unwrap();
-
-        migrate_legacy_offsets_dir(data_dir, &cluster_dir);
-        assert!(!legacy.exists());
-        assert!(cluster_dir.join("__consumer_offsets/g1.json").exists());
-
-        let s = store(&cluster_dir);
-        s.load("g1").unwrap();
-        let got = s.fetch(
-            "g1",
-            &[FetchSpec {
-                topic: "t1".to_owned(),
-                partitions: vec![0],
-            }],
-        );
-        assert_eq!(got.get("t1/0"), Some(&42));
-
-        // Idempotent: a second run with nothing to do is a no-op.
-        migrate_legacy_offsets_dir(data_dir, &cluster_dir);
-        assert!(cluster_dir.join("__consumer_offsets/g1.json").exists());
-    }
-
-    /// gh #223: a half-migrated target (crash between copy and
-    /// remove) merges without clobbering files the new store already
-    /// rewrote.
-    #[test]
-    fn legacy_migration_merges_without_clobbering() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let cluster_dir = data_dir.join("__cluster");
-        let target = cluster_dir.join("__consumer_offsets");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::write(target.join("g1.json"), r#"{"t1/0": 99}"#).unwrap();
-        let legacy = data_dir.join("__consumer_offsets");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("g1.json"), r#"{"t1/0": 1}"#).unwrap();
-        std::fs::write(legacy.join("g2.json"), r#"{"t2/0": 7}"#).unwrap();
-
-        migrate_legacy_offsets_dir(data_dir, &cluster_dir);
-        assert!(!legacy.exists());
-        // g1 kept the newer (target) copy; g2 was carried over.
-        let s = store(&cluster_dir);
-        s.load("g1").unwrap();
-        s.load("g2").unwrap();
-        assert_eq!(
-            s.fetch(
-                "g1",
-                &[FetchSpec {
-                    topic: "t1".to_owned(),
-                    partitions: vec![0]
-                }]
-            )
-            .get("t1/0"),
-            Some(&99)
-        );
-        assert_eq!(
-            s.fetch(
-                "g2",
-                &[FetchSpec {
-                    topic: "t2".to_owned(),
-                    partitions: vec![0]
-                }]
-            )
-            .get("t2/0"),
-            Some(&7)
-        );
     }
 }

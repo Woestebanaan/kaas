@@ -173,11 +173,10 @@ storage:
   # volume degrades into a per-topic produce error instead of taking
   # the whole control plane down.
   #
-  # Enabling this on an EXISTING cluster is a migration: scale the
-  # brokers and operator down, copy /data/__cluster/* onto the new
-  # volume's root, then upgrade with enabled=true. (Consumer offsets
-  # under __cluster/__consumer_offsets are adopted automatically; the
-  # rest of the state is not.)
+  # Enabling this on an EXISTING cluster is a breaking change (pre-v1
+  # no-backcompat policy, docs/RELEASING.md): either redeploy fresh,
+  # or manually copy /data/__cluster/* onto the new volume's root
+  # while brokers and operator are scaled down.
   controlPlane:
     enabled: false
     className: ""               # "" → same class as storage.className

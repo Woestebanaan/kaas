@@ -49,10 +49,10 @@ const SEND_BUFFER: usize = 4;
 pub struct BrokerLiveness {
     pub id: String,
     /// Latest reported `healthy` (main runtime scheduling tasks).
+    /// Trusted unconditionally — every supported image speaks the
+    /// field (the pre-field-image guard was dropped under the pre-v1
+    /// no-backcompat policy, docs/RELEASING.md).
     pub healthy: bool,
-    /// Has this broker ever reported `healthy=true`? False for an
-    /// image that predates the field — see [`ClientState::ever_healthy`].
-    pub ever_healthy: bool,
 }
 
 /// State the server keeps per connected broker.
@@ -63,15 +63,10 @@ struct ClientState {
     active_groups: Vec<String>,
     last_broker_ts_ms: i64,
     /// gh #208: latest `BrokerStatus.healthy` — is the broker's main
-    /// (request) runtime scheduling tasks?
+    /// (request) runtime scheduling tasks? Seeded from the stream's
+    /// first status message, so there is no connected-but-unreported
+    /// window.
     healthy: bool,
-    /// Sticky: set once this broker has ever reported `healthy=true`.
-    /// A broker running an image that predates the `healthy` field
-    /// always reports false (proto3 default), so we must NOT treat its
-    /// false as "wedged" — only a broker that has proven it speaks the
-    /// field (ever_healthy) can be evicted for reporting false. This is
-    /// what keeps a rolling upgrade from reassigning every old broker.
-    ever_healthy: bool,
 }
 
 impl std::fmt::Debug for ClientState {
@@ -165,11 +160,10 @@ impl HeartbeatServer {
         self.clients.lock().keys().cloned().collect()
     }
 
-    /// gh #208: per-connected-broker liveness — `(id, healthy,
-    /// ever_healthy)`. The alive-set computation in `bins/kaas` uses
-    /// this to include booting brokers (healthy, not yet
-    /// EndpointSlice-ready) and exclude wedged ones (proven to speak
-    /// `healthy`, now reporting false) without depending on pod
+    /// gh #208: per-connected-broker liveness. The alive-set
+    /// computation in `bins/kaas` uses this to include booting
+    /// brokers (healthy, not yet EndpointSlice-ready) and exclude
+    /// wedged ones (reporting false) without depending on pod
     /// readiness. See `BrokerLiveness`.
     pub fn broker_liveness(&self) -> Vec<BrokerLiveness> {
         self.clients
@@ -180,7 +174,6 @@ impl HeartbeatServer {
                 BrokerLiveness {
                     id: id.clone(),
                     healthy: s.healthy,
-                    ever_healthy: s.ever_healthy,
                 }
             })
             .collect()
@@ -263,7 +256,6 @@ impl ControllerHeartbeat for HeartbeatService {
             active_groups: first.active_groups.clone(),
             last_broker_ts_ms: first.timestamp_ms,
             healthy: first.healthy,
-            ever_healthy: first.healthy,
         }));
         // Replace any prior stream for the same broker — reconnect
         // wins.
@@ -296,9 +288,6 @@ impl ControllerHeartbeat for HeartbeatService {
                 s.active_groups = msg.active_groups;
                 s.last_broker_ts_ms = msg.timestamp_ms;
                 s.healthy = msg.healthy;
-                if msg.healthy {
-                    s.ever_healthy = true;
-                }
             }
             // Remove this client on stream end, but only if we're
             // still the registered state — a reconnect during this

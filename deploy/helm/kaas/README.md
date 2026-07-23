@@ -162,7 +162,7 @@ See `values.yaml` for the full set of tunables. Common overrides:
 | `broker.replicaCount` | 3 | Number of broker pods |
 | `storage.className` | ceph-filesystem | RWX StorageClass |
 | `storage.size` | 500Gi | PVC capacity |
-| `storage.controlPlane.enabled` | false | Dedicated control-plane volume (gh #221 phase 1): cluster-wide coordination state (`assignment.json`, txn slots, consumer offsets, credentials/ACLs) moves to its own PVC, mounted at `storage.controlPlane.mountPath` and exported as `KAAS_CLUSTER_DIR`. Enabling on an existing cluster is a migration — scale brokers+operator to 0, copy `/data/__cluster/*` to the new volume's root, upgrade. |
+| `storage.controlPlane.enabled` | false | Dedicated control-plane volume (gh #221 phase 1): cluster-wide coordination state (`assignment.json`, txn slots, consumer offsets, credentials/ACLs) moves to its own PVC, mounted at `storage.controlPlane.mountPath` and exported as `KAAS_CLUSTER_DIR`. Enabling on an existing cluster is a breaking change (pre-v1 policy: fresh deploy, or manually copy `/data/__cluster/*` while scaled down). |
 | `storage.controlPlane.size` | 1Gi | Control-plane PVC capacity |
 | `storage.controlPlane.className` | "" | "" → same as `storage.className` |
 | `storage.pool` | [] | Named pool log dirs (gh #221 phase 2): each entry `{name, size, className, accessMode, defaultEligible}` becomes its own RWX PVC mounted at `/vols/<name>` on brokers + operator and advertised via `KAAS_LOG_DIRS`. Topics bind with `KafkaTopic.spec.storage.volumes`; `defaultEligible: false` members only receive topics that name them explicitly. Placement is creation-sticky. |
