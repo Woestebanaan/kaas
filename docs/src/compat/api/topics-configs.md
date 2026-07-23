@@ -4,7 +4,7 @@ Per-API reference — see the [API support matrix](../api-matrix.md) for the gen
 
 The whole admin surface on this page is **CR-mediated**: kaas never mutates
 topic state directly off a wire request. Writes become creates/patches/deletes
-of `KafkaTopic` custom resources (`crates/kaas-broker/src/topic_cr_writer.rs`),
+of `KafkaTopic` custom resources,
 the operator reconciles the CR into on-disk state, and the broker observes the
 result through its topic watcher — see
 [Kubernetes integration](../../architecture/kubernetes.md). In dev mode

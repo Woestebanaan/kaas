@@ -340,8 +340,8 @@ is the correct outcome.
   staged here is never materialised — the group replays from its last
   committed offset, which breaks exactly-once (duplicates, not loss)
   for that group. Single-broker deployments and hash-coinciding cases
-  are complete; cross-broker completion is tracked as open follow-up in
-  the handler (gh #114).
+  are complete; cross-broker completion is an open follow-up (tracked
+  as gh #114).
 
 **Source**: `crates/kaas-broker/src/handlers/txn_offset_commit.rs`
 (handler), `crates/kaas-codec/src/api/txn_offset_commit.rs` (codec),

@@ -6,8 +6,7 @@ kaas has no ACL store of its own: ACLs live **inline on each principal's
 `KafkaUser` CR** (`spec.authorization.acls` — see
 [Kubernetes integration](../../architecture/kubernetes.md)). The three ACL
 admin APIs translate the AdminClient's int8-enum wire shape into that CR shape
-and delegate to the ACL CR writer
-(`crates/kaas-broker/src/acl_cr_writer.rs`); the operator's reconcile then
+and delegate to the ACL CR writer; the operator's reconcile then
 rebuilds `/data/__cluster/acls.json` and every broker's ACL engine hot-reloads
 it. Runtime edits to git-managed `KafkaUser` CRs will show up as ArgoCD drift
 until the next sync — the intentional trade for letting the admin protocol

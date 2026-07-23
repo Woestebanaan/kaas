@@ -27,7 +27,7 @@ Mechanics, all in `quota.rs`:
 - Refill is continuous at the configured rate, capped at one second's
   worth of tokens; a rate of 0 means unlimited; a brand-new principal's
   bucket is seeded full so first contact isn't throttled.
-- **Debt-carry** (gh #125): the deduction is unconditional and the bucket
+- **Debt-carry**: the deduction is unconditional and the bucket
   is allowed to go negative; `throttle_time_ms` is the time to refill back
   to zero. The earlier clamp-at-zero version let N concurrent clients
   sharing a principal each see a "full" bucket and burst at N×rate — the
@@ -54,7 +54,7 @@ throttle hint, which official clients do.
 ## How it's verified
 
 Unit tests in `crates/kaas-auth/src/quota.rs`:
-`multi_client_contention_carries_debt` (pins the gh #125 debt-carry —
+`multi_client_contention_carries_debt` (pins the debt-carry —
 back-to-back drains must yield strictly increasing throttle),
 `over_limit_throttles`, `zero_rate_means_unlimited`,
 `per_principal_isolation`, `refill_clears_debt_over_time`, and

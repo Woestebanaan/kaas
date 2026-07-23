@@ -62,6 +62,18 @@ page's `book/…` links resolve, so link breakage fails before deploy.
 
 ## Writing conventions
 
+- **Write for a reader who knows Kafka but not kaas.** Open pages by
+  locating kaas in the Kafka mental model ("in Apache Kafka, X…; kaas
+  instead…"), use Kafka ≤ 4.3 vocabulary for concepts Kafka already
+  names, and tie subsystems back to the book's through-line: the three
+  substitutions (quorum → Lease/CRs, replication → single writer on RWX,
+  internal topics → JSON files). `src/architecture/volume-pool.md` is
+  the exemplar.
+- **No `gh #NN` or `crates/…` paths in narrative prose.** Contributor
+  material goes in a closing `## Implementation notes (for contributors)`
+  section (Part I/IV) or the `**Source**:` / `**Verified by**:` trailers
+  (Part II). Open follow-ups may keep a trailing "(tracked as gh #NN)"
+  parenthetical. Part III (code tour) is contributor-facing and exempt.
 - **Code is the source of truth.** Where a doc and the source disagree, the
   source wins and the doc gets fixed — including when that means
   documenting a gap. Part II's partial-KIP pages lead with what's *missing*;

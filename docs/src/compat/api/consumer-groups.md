@@ -8,7 +8,7 @@ only by the group's coordinator broker; any other broker returns
 two-tier: an explicit `assignment.json.consumerGroups[]` entry wins, otherwise
 a deterministic FNV-1a 32-bit hash of the group ID mod the **full** broker set
 (not the alive count), with a deterministic fallback into the alive subset
-when the preferred slot is down (`crates/kaas-broker/src/group_hash.rs`).
+when the preferred slot is down.
 Apache answers the same question with `__consumer_offsets` partition
 leadership; kaas has no `__consumer_offsets` topic, so it hashes directly into
 the broker set — see [Consumer-group
@@ -16,13 +16,12 @@ coordination](../../architecture/consumer-groups.md) for the full routing
 story.
 
 Where the state lives: membership, generation, and rebalance state are
-**in-memory** on the coordinator (`crates/kaas-coordinator/src/group.rs`) —
-lost on coordinator failover, after which consumers rejoin and rebalance,
-which is exactly what an Apache coordinator move looks like to clients.
+**in-memory** on the coordinator — lost on coordinator failover, after
+which consumers rejoin and rebalance, which is exactly what an Apache
+coordinator move looks like to clients.
 Committed offsets are **durable** per-group JSON files at
-`/data/__cluster/__consumer_offsets/<groupID>.json` on the shared volume
-(`crates/kaas-coordinator/src/offset_store.rs`); the next coordinator reads
-the same file. The offsets file is lazily loaded into memory when a group
+`/data/__cluster/__consumer_offsets/<groupID>.json` on the shared volume;
+the next coordinator reads the same file. The offsets file is lazily loaded into memory when a group
 first joins on a broker (`Manager::get_or_create`) — a caveat for
 manual-assignment consumers is noted under [OffsetFetch](#offsetfetch).
 
@@ -42,7 +41,7 @@ both to `Manager::offset_commit`, which merges them into the group's in-memory
 cache and atomically rewrites `__consumer_offsets/<groupID>.json`
 (tmp + fsync + rename). The resulting group-level error code is stamped
 uniformly across every partition in the response. Per-partition
-`committed_metadata` strings round-trip (gh #21); empty strings clear the
+`committed_metadata` strings round-trip; empty strings clear the
 entry and come back as the wire null sentinel.
 
 **Deviations from Apache 3.7**:
@@ -50,9 +49,9 @@ entry and come back as the wire null sentinel.
 - The advertised floor is v2, not v0 — the v0/v1 shapes were never decoded
   correctly and are not offered. Additionally, v2–v4's `retention_time_ms`
   field is **not decoded**, so v2–v4 requests that carry it mis-parse; this is
-  an acknowledged divergence tracked as follow-up in
-  `crates/kaas-codec/src/api/offset_commit.rs`. In practice every modern
-  client negotiates v8 via ApiVersions and never hits it.
+  an acknowledged divergence tracked as follow-up in the codec module. In
+  practice every modern client negotiates v8 via ApiVersions and never hits
+  it.
 - `generation_id`, `member_id`, and `group.instance.id` are decoded but not
   validated against the group state machine — no `ILLEGAL_GENERATION`,
   `UNKNOWN_MEMBER_ID`, or `FENCED_INSTANCE_ID` fencing on the commit path. A
@@ -125,11 +124,10 @@ The one group API any broker answers.
 
 **Handling**: `key_type` 0 routes through the group-assignment source
 (explicit `assignment.json` entry, else the FNV-1a hash — see the preamble),
-`key_type` 1 through the transaction-assignment source (gh #91, same hash
+`key_type` 1 through the transaction-assignment source (same hash
 machinery); any other value gets `INVALID_REQUEST` (42). The resolved broker
 ID is mapped to `(node_id, host, port)` via the EndpointSlice-backed broker
-registry (`bins/kaas/src/cluster.rs`, `crates/kaas-k8s/src/endpoints.rs`); in
-dev mode the lookup resolves self only. No manager installed, no txn source
+registry; in dev mode the lookup resolves self only. No manager installed, no txn source
 yet, or no alive broker for the slot → `COORDINATOR_NOT_AVAILABLE` (15) and
 the client retries. v4+ batches multiple `coordinator_keys[]` into one
 request; v0–v3 use the legacy single-key shape (at v3 the legacy shape merely
@@ -140,13 +138,15 @@ gains flexible encoding — the array form is strictly v4+).
 - The response is **not listener-aware**: the advertised port is the broker's
   primary client port (the first configured listener / the headless Service's
   Kafka port), regardless of which listener the request arrived on. Metadata
-  got per-listener advertisement in gh #125; FindCoordinator has not, so on a
+  got per-listener advertisement; FindCoordinator has not, so on a
   multi-listener cluster a client that bootstrapped on a secondary listener is
   handed the first listener's port here.
 
 **Source**: `crates/kaas-broker/src/handlers/find_coordinator.rs`,
 `crates/kaas-codec/src/api/find_coordinator.rs`,
-`crates/kaas-coordinator/src/manager.rs`, `crates/kaas-broker/src/group_hash.rs`.
+`crates/kaas-coordinator/src/manager.rs`, `crates/kaas-broker/src/group_hash.rs`;
+the broker registry in `bins/kaas/src/cluster.rs` and
+`crates/kaas-k8s/src/endpoints.rs`.
 
 **Verified by**: `find_coordinator_resolves_self` /
 `find_coordinator_txn_with_no_source_is_unavailable` /
@@ -166,12 +166,12 @@ Enters a member into the group and drives the rebalance state machine
 `JoinRequest` and parks the connection on a oneshot until the rebalance round
 completes. Joining an `Empty` group starts the initial rebalance with Apache's
 3 s `group.initial.rebalance.delay.ms` (extended per new arrival, capped at
-the max member `rebalance_timeout_ms` — gh #111); joining a `Stable` group
+the max member `rebalance_timeout_ms`); joining a `Stable` group
 bounces it back to `PreparingRebalance` and cancels any in-flight sync round.
 The leader is the first joiner of the round; protocol selection is
 leader-first-mutual (first protocol the leader declares that every member also
 lists). Dynamic members that fail to rejoin within the rebalance timeout are
-evicted at round completion (gh #113); static members
+evicted at round completion; static members
 ([KIP-345](../kip/kip-345.md) `group.instance.id`) survive a missed rejoin.
 
 **Deviations from Apache 3.7**:
@@ -179,8 +179,8 @@ evicted at round completion (gh #113); static members
 - [KIP-394](../kip/kip-394.md)'s v4+ two-step handshake is **not
   implemented**: kaas never returns `MEMBER_ID_REQUIRED` (79). An empty
   `member_id` is assigned inline and the join proceeds in one round trip — the
-  legacy pre-v4 path, explicitly marked as a follow-up in
-  `crates/kaas-coordinator/src/group.rs`. Clients work fine (they simply skip
+  legacy pre-v4 path, explicitly marked as a follow-up in the group
+  coordinator's join path. Clients work fine (they simply skip
   a retry), but Apache's ghost-member protection is absent.
 - [KIP-345](../kip/kip-345.md) is partial: `group.instance.id` is plumbed
   through join/sync/heartbeat/leave and static members survive the non-rejoin
@@ -281,10 +281,10 @@ round. Key 14.
 current sync round, flips the group to `Stable`, and wakes every parked
 follower; followers park until the leader delivers (or a fresh JoinGroup
 cancels the round, in which case they wake with
-`REBALANCE_IN_PROGRESS` (27) instead of a bogus empty assignment — gh #111).
+`REBALANCE_IN_PROGRESS` (27) instead of a bogus empty assignment).
 Checks: unknown member → `UNKNOWN_MEMBER_ID` (25); generation mismatch →
 `ILLEGAL_GENERATION` (22). A follower's sync is valid in both
-`CompletingRebalance` *and* `Stable` (the leader may finish first — gh #111).
+`CompletingRebalance` *and* `Stable` (the leader may finish first).
 Members the leader omitted receive a zero-byte assignment.
 
 **Deviations from Apache 3.7**:
@@ -293,8 +293,8 @@ Members the leader omitted receive a zero-byte assignment.
   cross-checked against the group — kaas never returns
   `INCONSISTENT_GROUP_PROTOCOL` from SyncGroup.
 - Omitted members get raw empty bytes; encoding a *valid* empty
-  `ConsumerProtocolAssignment` struct instead is a tracked follow-up
-  (gh #111 layer 4).
+  `ConsumerProtocolAssignment` struct instead is a follow-up (tracked
+  as gh #111).
 - No `FENCED_INSTANCE_ID` for static members ([KIP-345](../kip/kip-345.md)),
   same as the rest of the group surface.
 
@@ -316,7 +316,7 @@ Snapshots named groups: state, protocol, members, assignments. Key 15.
 **Handling**: `Manager::describe_groups` answers per group and filters by
 ownership — a group coordinated elsewhere gets a per-group
 `NOT_COORDINATOR` (16) entry, which matters because the Java AdminClient
-unions results across brokers (gh #89: without the filter, one broker's stale
+unions results across brokers (without the filter, one broker's stale
 in-memory entry reappeared cluster-wide). Owned groups return their live
 snapshot; group-state strings match Apache's exactly (`Empty`,
 `PreparingRebalance`, `CompletingRebalance`, `Stable`, `Dead`).
@@ -348,7 +348,7 @@ Enumerates the groups a broker coordinates. Key 16.
 **Versions**: v0–v4 (flexible from v3)
 
 **Handling**: snapshots every in-memory group and filters by coordinator
-ownership — the same gh #89 filter as DescribeGroups, so the AdminClient's
+ownership — the same ownership filter as DescribeGroups, so the AdminClient's
 cross-broker union never shows a group twice or shows stale orphans. The v4+
 `states_filter` is applied broker-side by exact state-string match. With no
 coordinator manager installed (boot window) the response is an empty list
@@ -374,7 +374,7 @@ the group must appear and then actually vanish).
 
 ## DeleteGroups
 
-Drops a group's coordinator state and committed offsets. Key 42, gh #89.
+Drops a group's coordinator state and committed offsets. Key 42.
 
 **Versions**: v0–v2 (flexible from v2)
 
@@ -402,7 +402,7 @@ the group must vanish from a subsequent `--list`).
 ## OffsetDelete
 
 Drops specific `(topic, partition)` committed offsets without deleting the
-group. Key 47, gh #100. Drives
+group. Key 47. Drives
 `kafka-consumer-groups.sh --delete-offsets` and
 `AdminClient.deleteConsumerGroupOffsets()`.
 

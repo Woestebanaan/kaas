@@ -18,7 +18,22 @@ path entirely ([runtime
 independence](../architecture/runtime-independence.md)).
 
 Each crate has its own short chapter in this part — what it owns, the
-invariants callers must hold, and where to start reading.
+invariants callers must hold, and where to start reading. If you've
+arrived from Parts I–II you already know what the system does and what
+it speaks on the wire; these chapters assume that and point back to the
+architecture pages instead of re-explaining semantics. The chapter order
+is a deliberate reading order, following the wire inward:
+[kaas-codec](kaas-codec.md) → [kaas-protocol](kaas-protocol.md) →
+[kaas-storage](kaas-storage.md) →
+[kaas-coordinator](kaas-coordinator.md) → [kaas-broker](kaas-broker.md)
+→ [kaas-controller](kaas-controller.md), then the supporting crates
+([kaas-auth](kaas-auth.md), [kaas-k8s](kaas-k8s.md),
+[kaas-observability](kaas-observability.md)), the operator pair
+([kaas-operator-api](kaas-operator-api.md),
+[kaas-operator-controllers](kaas-operator-controllers.md)),
+[kaas-test-harness](kaas-test-harness.md), and finally the two binaries
+that plug every seam together ([kaas](bin-kaas.md) and
+[kaas-operator](bin-kaas-operator.md)).
 
 ## Crate dependency graph
 

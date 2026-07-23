@@ -30,8 +30,9 @@ What exists today is the **configuration plumbing**, end to end:
 What does **not** exist yet is the compactor that would honour the gate.
 `crates/kaas-storage/src/cleaner.rs` implements size-based retention
 only, and its module doc says so plainly: time-based retention and the
-compactor carrying the gh #116 knobs (`min.compaction.lag.ms`,
-`delete.retention.ms`) are follow-up work on gh #158. The compaction
+compactor honouring these knobs (`min.compaction.lag.ms`,
+`delete.retention.ms`) are follow-up work (tracked as gh #158). The
+compaction
 metrics in `crates/kaas-observability/src/metrics.rs`
 (`kaas.compaction.*`) are declared ahead of that work and nothing records
 them today. So the knob round-trips through every admin surface but gates
@@ -41,7 +42,7 @@ which is the degenerate-but-safe reading of an infinite lag.
 The intended enforcement semantics (per-segment `maxTimestamp` inside the
 lag window ⇒ segment skipped) are described with the storage engine in
 [Storage hot path](../../architecture/storage-hot-path.md); treat that
-section as design intent until gh #158 lands.
+section as design intent until the compactor lands.
 
 ## How it's verified
 

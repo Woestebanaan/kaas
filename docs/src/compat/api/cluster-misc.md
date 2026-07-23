@@ -59,8 +59,9 @@ Reports log directories and per-partition sizes — `kafka-log-dirs.sh
 **Versions**: v0–v4 (flexible from v2; matches Apache 3.7's range).
 
 **Handling**: kaas reports **one log directory per pool member** — the
-default data dir plus every `storage.pool[]` volume (the gh #221 volume
-pool; single-volume deployments report exactly one dir, as before).
+default data dir plus every `storage.pool[]` volume (the
+[volume pool](../../architecture/volume-pool.md); single-volume
+deployments report exactly one dir, as before).
 Partitions group under the dir the placement record assigns them to. A
 null topics filter expands to every topic in the broker's registry with
 all partitions; a named topic with an empty partition list expands to
@@ -97,8 +98,8 @@ module.
 ## AlterReplicaLogDirs
 
 Moves a partition between log dirs on the same broker (KIP-113) — in
-kaas, the volume-pool migration verb (gh #221 phase 3): the drain path
-for cordoned pool members.
+kaas, the volume-pool migration verb: the drain path for cordoned pool
+members.
 
 **Versions**: v0–v2 (flexible from v2; matches Apache 3.7's range).
 

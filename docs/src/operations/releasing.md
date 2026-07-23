@@ -28,6 +28,23 @@ images that exist.
    one historical exception: the `v0.1.190-preview` → `v0.2.0-preview`
    jump at the Go→Rust cutover.)
 
+## Upgrades before v1
+
+Pre-v1, kaas makes no general backwards-compatibility promises between
+previews, with exactly one carve-out:
+
+- **A release that leaves the CRD schemas unchanged** supports an
+  in-place rolling upgrade (`helm upgrade`) from the immediately
+  preceding preview — adjacent-version heartbeat, state, and wire
+  contracts keep working during the roll. Upgrade one release at a
+  time; skipping previews is not covered.
+- **A release that changes the CRDs** may break anything — on-disk
+  layout, wire contracts, chart values. Its supported upgrade path is
+  delete-and-redeploy, and the tag message says so explicitly.
+
+Check the tag message before upgrading; it states which case a release
+is.
+
 ## Before tagging
 
 `cargo xtask ci` green locally, CRDs regenerated if the operator API

@@ -13,12 +13,12 @@ mechanics end to end; this section covers the wire contract.
 Four gates run before any byte reaches the engine, per partition: the topic
 must exist in the registry (else `UNKNOWN_TOPIC_OR_PARTITION`, 3), the broker
 `Coordinator` must own the partition per the applied `assignment.json` (else
-`NOT_LEADER_FOR_PARTITION`, 6), the gh #62 self-fence must see a fresh
-controller heartbeat — a broker cut off from the controller stops acking
-within 3 s (also 6) — and the cluster-wide authorizer must grant topic Write
-(else `TOPIC_AUTHORIZATION_FAILED`, 29). A batch larger than Apache's
-`message.max.bytes` default (1 MiB + 12 bytes batch overhead) is rejected with
-`MESSAGE_TOO_LARGE` (18) before it hits storage.
+`NOT_LEADER_FOR_PARTITION`, 6), the controller-connectivity self-fence must
+see a fresh controller heartbeat — a broker cut off from the controller
+stops acking within 3 s (also 6) — and the cluster-wide authorizer must
+grant topic Write (else `TOPIC_AUTHORIZATION_FAILED`, 29). A batch larger
+than Apache's `message.max.bytes` default (1 MiB + 12 bytes batch overhead)
+is rejected with `MESSAGE_TOO_LARGE` (18) before it hits storage.
 
 Inside the engine, under the partition mutex: idempotent-producer
 classification runs first — a duplicate (PID/epoch/sequence already in the
@@ -71,14 +71,14 @@ contract: batch bytes come back off disk undecoded (see the
 The front door mirrors Produce: topic-exists, `Coordinator::owns`, and a
 cluster-wide topic Read ACL check, per partition (there is no self-fence gate
 on reads). The handler then picks the read cap: the high watermark for
-`read_uncommitted`, the last stable offset for `read_committed` (gh #176 —
-the LSO is the highest offset with no in-flight transaction extending past
-it). The engine copies batch bytes from the segment files into memory; for
+`read_uncommitted`, the last stable offset for `read_committed` (the LSO is
+the highest offset with no in-flight transaction extending past it). The
+engine copies batch bytes from the segment files into memory; for
 `read_committed` the result is trimmed to whole batches strictly below the
 LSO — a batch that straddles the cap is dropped along with everything after
 it, since batches are atomic — and `aborted_transactions` is populated from
 the partition's aborted-txn index over the returned range, so the client can
-filter aborted records (gh #31). A reader already at or past the cap gets an
+filter aborted records. A reader already at or past the cap gets an
 empty response. Out-of-range offsets map to `OFFSET_OUT_OF_RANGE` (1). The
 fetch quota is checked once over the summed response bytes and feeds
 `throttle_time_ms`.
@@ -136,7 +136,7 @@ timestamp is passed to the engine's `offset_for_timestamp`.
 **Deviations from Apache 3.7**:
 
 - **Timestamp→offset lookup is not implemented.** Segments track their
-  `max_timestamp` (gh #5), but the engine-level index that maps a timestamp to
+  `max_timestamp`, but the engine-level index that maps a timestamp to
   an offset is a follow-up: `offset_for_timestamp` returns the `(-1, -1)`
   "no matching offset" sentinel unconditionally, in both the disk and
   in-memory engines. Every non-sentinel timestamp query — including
@@ -174,7 +174,7 @@ where to connect — the response every client bootstraps from.
 
 **Versions**: v1–v10 (flexible from v9)
 
-**Per-listener advertisement** (gh #125): the handler precomputes one
+**Per-listener advertisement**: the handler precomputes one
 advertised `(host, port)` per configured listener from the `KAAS_LISTENERS`
 env, and each connection carries its listener name, so a client that
 bootstrapped on `:9095` gets `:9095` back — not the anonymous listener's port.
@@ -199,9 +199,9 @@ replication ([non-goals](../non-goals.md)).
 
 - **Topic IDs serve the all-zero sentinel on the wire.** The v10 `topic_id`
   field is encoded, but the value is always the null UUID: the operator mints
-  a real v4 UUID into each `KafkaTopic`'s `Status.TopicID` (gh #105), and the
+  a real v4 UUID into each `KafkaTopic`'s `Status.TopicID`, and the
   broker-side observation plumbing exists, yet the watcher callback that
-  feeds the topic registry (`bins/kaas/src/main.rs`) inserts `[0; 16]`.
+  feeds the topic registry inserts `[0; 16]`.
   [KIP-516](../kip/kip-516.md) is partial: minted operator-side, not yet
   propagated to the Metadata response.
 - `leader_epoch` is always `0` (v7+ field) — clients that cache epochs for
@@ -217,7 +217,8 @@ replication ([non-goals](../non-goals.md)).
 - v11+ is not registered; clients negotiate down to v10 via ApiVersions.
 
 **Source**: `crates/kaas-broker/src/handlers/metadata.rs`,
-`crates/kaas-codec/src/api/metadata.rs`.
+`crates/kaas-codec/src/api/metadata.rs`; the registry-feeding watcher
+callback in `bins/kaas/src/main.rs`.
 
 **Verified by**: handler unit tests `per_listener_port_echoed_back`,
 `returns_self_as_only_broker_and_leader`, `empty_topic_list_returns_all_known`,
