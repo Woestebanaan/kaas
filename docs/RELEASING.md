@@ -30,6 +30,29 @@ History so far:
 | `v0.1.2-preview`   | Broker shares one `FlockLock` between engine and produce path.   |
 | `v0.1.3-preview`   | Coordinator caps initial rebalance delay for new groups.         |
 
+## Compatibility policy (pre-v1)
+
+**kaas makes no backwards-compatibility promises before a v1 release.**
+Preview releases (`v0.x`) may freely break:
+
+- the on-disk layout (segment/manifest/snapshot formats, directory
+  structure, `__cluster/` state files),
+- CRD schemas and their semantics,
+- env-var and chart-values contracts,
+- rolling-upgrade behavior between adjacent previews.
+
+Backwards compatibility at this stage adds complexity that is not worth
+carrying. Migration shims, legacy-layout adoption paths, and
+mixed-version guards are **optional** — add one only when it is
+near-free, and feel free to drop existing ones when they get in the way.
+The supported upgrade path for a breaking preview release is:
+**delete the deployment and start fresh.** Call the break out in the
+release notes / tag message so the operator knows a fresh deploy is
+required; that is the entire obligation.
+
+This policy flips at v1: from then on, on-disk formats and CR schemas
+version properly and upgrades are supported.
+
 ## What gets published
 
 The workflow strips the leading `v` and uses the remainder as both the image

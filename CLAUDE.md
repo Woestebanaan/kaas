@@ -45,7 +45,7 @@ cargo xtask docs                                         # mdbook build docs (--
 
 **CRD drift** — if you edit anything under `crates/kaas-operator-api/`, run `cargo xtask gen-crds` and commit both `deploy/crds/` and `deploy/helm/kaas/crds/`. The `rust` CI job fails on drift.
 
-Releases are tag-driven; see [`docs/RELEASING.md`](./docs/RELEASING.md). **Always bump the patch (`v0.2.N-preview` → `v0.2.N+1-preview`), never re-cut a tag.**
+Releases are tag-driven; see [`docs/RELEASING.md`](./docs/RELEASING.md). **Always bump the patch (`v0.2.N-preview` → `v0.2.N+1-preview`), never re-cut a tag.** **No backwards compatibility before v1** (owner decision, 2026-07-23): preview releases may break on-disk layout, CRD schemas, and env/chart contracts; delete-and-redeploy is the supported upgrade path for a breaking change. Don't spend effort on migration shims, legacy-layout adoption, or rolling-upgrade dual-paths — note the break in the tag message instead. (Existing shims — e.g. the gh #223 legacy-offsets adoption — may be dropped when they get in the way.)
 
 `scripts/kafka-*.sh` (at the repo root) is a per-tool integration suite that runs the Apache Kafka shell tools (`kafka-topics`, `kafka-{producer,consumer}-perf-test`, `kafka-acls`, etc.) against a live broker — *not* invoked by `cargo test`. Each script sources `scripts/_common.sh` for shared `BOOTSTRAP` / `KAFKA_BIN` / `skip` helpers; defaults target the in-cluster Service DNS and `/opt/kafka/bin`. Scripts that target features that are non-goals or post-3.7 (KRaft tools, share-groups, etc.) print a one-line reason and `exit 77` (the autoconf "skipped" code) so they're discoverable without pretending to test something that can't work.
 
