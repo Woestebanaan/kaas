@@ -45,10 +45,20 @@ Backwards compatibility at this stage adds complexity that is not worth
 carrying. Migration shims, legacy-layout adoption paths, and
 mixed-version guards are **optional** — add one only when it is
 near-free, and feel free to drop existing ones when they get in the way.
-The supported upgrade path for a breaking preview release is:
+
+**One promise is kept: a release that leaves the CRD schemas unchanged
+supports an in-place rolling update from the immediately preceding
+preview release.** The transient mixed-version window of a normal
+rolling restart (heartbeats, assignment/state file formats, wire
+surface between adjacent versions) must keep working in that case — a
+routine version bump must not require touching the deployment. CRD
+schema changes are the breaking-release signal: a release that changes
+them may break anything, and its supported upgrade path is
 **delete the deployment and start fresh.** Call the break out in the
 release notes / tag message so the operator knows a fresh deploy is
-required; that is the entire obligation.
+required; that is the entire obligation. (In practice purely *additive*
+CRD changes have rolled fine too, but the promise only covers
+CRD-unchanged releases.)
 
 This policy flips at v1: from then on, on-disk formats and CR schemas
 version properly and upgrades are supported.
