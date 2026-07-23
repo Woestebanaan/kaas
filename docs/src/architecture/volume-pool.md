@@ -1,136 +1,198 @@
 # The volume pool: log dirs & placement
 
-A single RWX volume gives the whole cluster exactly one provisioned I/O
-budget. Brokers scale compute, egress, cache, and coordination — never
-durable-write throughput, because underneath every broker is the same
-filesystem. On the cloud filers kaas targets (FSx for NetApp ONTAP, Azure
-NetApp Files, Azure Files provisioned), throughput is provisioned **per
-volume** — so a *pool* of volumes is the substrate scaling axis, and
-per-topic volume choice is how load is spread and tiered.
+If you know Apache Kafka, you know its storage model: every broker owns
+local disks, listed in `log.dirs`, and a partition's replicas live on
+the specific brokers that host them. kaas keeps the Kafka protocol but
+inverts that model. kaas brokers are (nearly) stateless processes on
+Kubernetes: partition data lives on **shared `ReadWriteMany` volumes**
+that every broker mounts, any broker can serve any partition, and
+durability comes from the storage layer instead of replication (there
+are no followers — see [the RWX substrate contract](./nfs-substrate.md)
+for the ground rules that makes this safe).
 
-kaas expresses this in Apache Kafka's own vocabulary: **one pool volume =
-one log dir** (KIP-113). `DescribeLogDirs` reports every member;
-`kafka-log-dirs.sh` works unmodified.
+Out of the box, all of that shared storage is **one** volume. The
+volume pool lets you mount **several named volumes** and control, per
+topic, which one holds its data. kaas deliberately describes this in
+Kafka's own vocabulary: **one pool volume = one log dir** (the KIP-113
+concept). `kafka-log-dirs.sh --describe` against a kaas cluster lists
+every pool member, exactly as it would list a JBOD broker's disks.
 
-## Pool membership
+## Why you would want more than one volume
 
-Members are **named** RWX volumes declared in the chart
-(`storage.pool[]`), mounted on every broker and on the operator at
-`/vols/<name>`, and advertised through the `KAAS_LOG_DIRS` env JSON. The
-data volume is always a member under the reserved name `default`. Names —
-not indices — go into placement records, so removing a member never
-renumbers the rest.
+- **Throughput, on cloud filers.** On the storage kaas targets in the
+  cloud (FSx for NetApp ONTAP, Azure NetApp Files, Azure Files
+  provisioned tiers), I/O budget is provisioned **per volume**. Brokers
+  add CPU and network, never disk bandwidth — the pool is how the
+  substrate itself scales.
+- **Tiering.** Put source-of-truth topics on a premium volume and
+  recreatable ones (Kafka Streams changelog/repartition topics) on a
+  cheap one — the same reason Kafka users mix disk classes, expressed
+  per topic instead of per broker.
+- **Blast radius.** A volume that fills up or fails takes down the
+  topics placed on it, not the cluster.
 
-Growing the pool is a chart edit + rolling restart: a capacity operation,
-same cadence as adding brokers. `CreateTopics` never waits on
-provisioning — new partitions land on volumes that already exist. Every
-member must pass the same [RWX substrate contract](./nfs-substrate.md);
-a pool mixing NFS and CephFS members is legal, a pool member with weaker
-semantics is not.
+One property has no Apache Kafka equivalent: because every volume is
+mounted by every broker, **placement and leadership are independent**.
+Pinning a topic to one volume constrains where its *bytes* live, never
+which broker leads it. JBOD on local disks can't do that.
 
-## Per-topic binding: the eligible-set
+## Declaring a pool
 
-`KafkaTopic.spec.storage.volumes` names the log dirs a topic's
-partitions may land on. One field, three cases:
+The pool is Helm chart configuration (`storage.pool[]`). Each member
+becomes its own PVC, mounted on every broker and on the operator at
+`/vols/<name>`:
 
-- `volumes: [premium]` — pinning: hard isolation, one volume's budget.
-- `volumes: [bulk-1, bulk-2]` — partitions stripe round-robin across
-  the set.
-- unset — the **default set**: `default` plus every member with
-  `defaultEligible: true`. A member with `defaultEligible: false` is
-  **reserved**: it only receives topics that name it explicitly, which
-  keeps auto-created topics (Streams repartition/changelog arrive
-  casually) off premium substrate.
-
-Unknown names fail the reconcile loudly (`Ready=False`,
-`InvalidVolumeBinding`) — a typo must not silently place data.
-
-Alternatively, `spec.storage.volumeSelector` (mutually exclusive with
-`volumes`) selects members by their `storage.pool[].labels` —
-nodeSelector vocabulary, resolved to a set at reconcile time, so topic
-CRs stay decoupled from infrastructure names. A selector that matches
-no uncordoned member fails the reconcile the same loud way; the
-label-less `default` dir never matches a selector.
-
-## Placement is creation-sticky; drift is surfaced, never auto-fixed
-
-The operator's `KafkaTopic` reconciler
-(`crates/kaas-operator-controllers/src/kafkatopic_controller.rs`)
-assigns a log dir to each partition **once**, when the partition first
-exists, and records it in `status.volumeAssignments`. Editing
-`spec.storage.volumes` never moves existing partitions: new partitions
-(from expansion) follow the new set, and partitions sitting outside it
-keep serving where they are, counted in `status.partitionsOutsideSpec`.
-There is no reconciler-driven data movement — an inter-volume move is a
-raw copy on a substrate with no replication layer, so it only ever
-happens through an explicit migration (the `AlterReplicaLogDirs` path,
-phase 3).
-
-The flow of placement truth:
-
-```text
-reconciler (round-robin over eligible set)
-  → KafkaTopic.status.volumeAssignments
-    → broker topic watch (kube_watchers)
-      → TopicRegistry (the engine's PlacementResolver)
-        → DiskStorageEngine partition path resolution
+```yaml
+storage:
+  className: nfs          # the default data volume (log dir "default")
+  size: 100Gi
+  pool:
+    - name: bulk
+      size: 500Gi
+      className: standard-files   # per-member class = per-member substrate/QoS
+      defaultEligible: true       # may receive topics with no explicit binding
+      labels:
+        class: standard           # matched by volumeSelector (below)
+    - name: premium
+      size: 100Gi
+      className: premium-files
+      defaultEligible: false      # reserved: only topics that ask for it
+      labels:
+        class: premium
+      # cordoned: true            # drain mode: accepts no NEW placements
 ```
 
-The engine's fallback is deliberately safe: an unplaced partition, an
-unknown log-dir name, or a not-yet-stashed assignment all resolve to the
-`default` log dir — resolution can never make a partition unopenable
-(`crates/kaas-storage/src/disk.rs`).
+Things to know:
 
-## What follows the partition, what doesn't
+- The data volume is always a member, under the reserved name
+  `default`. An empty `pool: []` is exactly the classic single-volume
+  layout.
+- Members are addressed by **name**, never by position — removing one
+  never renumbers the rest.
+- `defaultEligible: false` makes a member **reserved**: topics land on
+  it only by naming or selecting it. This is what keeps auto-created
+  topics (Streams creates repartition topics without asking you) off
+  premium storage.
+- Adding or changing members is a chart upgrade and therefore a rolling
+  restart — a capacity operation, the same cadence as adding brokers.
+  Creating a *topic* never waits on volume provisioning.
+- Every member must satisfy the same
+  [substrate contract](./nfs-substrate.md) (NFSv4-class semantics).
+  Mixing, say, NFS and CephFS members is fine; a member that lies about
+  fsync is not a slower tier, it is a correctness bug.
 
-Segment files, manifest, producer-state snapshot, and the recovery
-checkpoint live inside the partition dir and follow it to its volume.
-Topic-level files (`.config.json`, `.topic-id.json`) are written to
-**every root hosting the topic's partitions** — the gh #219 incarnation
-check and the orphan sweep run per root, so a deleted topic is reclaimed
-wherever its partitions were placed.
+## Binding topics to volumes
 
-Leadership and placement are independent axes: every broker reaches
-every volume (they're all RWX mounts), so binding a topic to one volume
-constrains where its *data* lives, never which broker leads it. This is
-a property JBOD-on-local-disk Kafka cannot have.
+kaas manages topics as Kubernetes custom resources (`KafkaTopic`) — the
+Strimzi-style pattern; topics created over the Kafka Admin API get a CR
+created for them. The binding is one optional field on the topic:
 
-## Cordon & migration (the drain runbook)
+```yaml
+apiVersion: kaas.rs/v1alpha1
+kind: KafkaTopic
+metadata:
+  name: orders
+spec:
+  partitions: 12
+  storage:
+    volumes: [premium]        # pin: every partition on `premium`
+```
 
-Removing a pool member (or moving a hot topic off a shared volume) is a
-three-step, explicitly operator-driven flow — nothing here happens
-automatically:
+Three shapes, one field:
 
-1. **Cordon the member**: set `cordoned: true` on its `storage.pool[]`
-   entry and upgrade. KIP-1066 semantics — the member stops receiving
-   *new* partition placements (even from topics that name it
-   explicitly); every existing partition keeps serving in place.
-2. **Move the partitions off** — either annotate the topic with
-   `kaas.rs/migrate-to-volume: <member>` (each broker drives its own
-   partitions through the move path, one every few seconds; the
-   annotation is level-triggered and idempotent — remove it once
-   `status.volumeAssignments` shows the move complete), or call
-   `AlterReplicaLogDirs` (API 34) directly —
-   the destination is the target log dir's *path* as reported by
-   `kafka-log-dirs.sh --describe`. Per partition, the leader closes it,
-   fresh-copies the directory to the target volume, flips
-   `status.volumeAssignments` (the durable placement record), and
-   reclaims the source. Producers see a brief retriable
-   `LEADER_NOT_AVAILABLE` window during the copy; a failed flip rolls
-   the copy back, so data location and placement record never diverge.
-   Watch progress in `DescribeLogDirs` output — the cordoned dir's
-   partition list shrinks to empty — and in the per-log-dir capacity
-   gauges (`kaas.log.dir.usable.bytes`).
+- **Pin** — `volumes: [premium]`: hard isolation, one volume's budget.
+- **Stripe** — `volumes: [bulk-1, bulk-2]`: partitions are spread
+  round-robin across the set.
+- **Unset** — the topic uses the *default set*: `default` plus every
+  member with `defaultEligible: true`.
+
+If you'd rather not hard-code infrastructure names into topic
+definitions, select members by label instead (the `nodeSelector` idea,
+applied to storage):
+
+```yaml
+spec:
+  storage:
+    volumeSelector:
+      class: premium          # every key/value must match the member's labels
+```
+
+`volumes` and `volumeSelector` are mutually exclusive. A binding that
+names an unknown member, or a selector that matches nothing, fails the
+topic's reconcile loudly — `Ready=False` with reason
+`InvalidVolumeBinding` — rather than silently placing data somewhere
+you didn't intend.
+
+## How placement behaves
+
+Placement is decided **once, when a partition is created**, and
+recorded in the topic's status:
+
+```yaml
+status:
+  volumeAssignments:
+    "0": premium
+    "1": premium
+    "2": premium
+  partitionsOutsideSpec: 0
+```
+
+Editing the binding later **never moves data**. New partitions (from
+expansion) follow the new set; existing partitions keep serving where
+they are and are counted in `status.partitionsOutsideSpec` — visible
+drift instead of surprise I/O. This is deliberate: kaas has no
+replication layer to move data behind your back, so an inter-volume
+move is a raw copy, and raw copies only happen when you ask for one
+(next section).
+
+If a placement record ever points at a member that no longer exists,
+brokers fall back to the `default` volume rather than failing the
+partition — resolution can never make a partition unopenable.
+
+## Moving data: cordon & drain
+
+Draining a member (to decommission it, or to move a hot topic) is a
+three-step, explicitly operator-driven flow:
+
+1. **Cordon** it (`cordoned: true` on the member, chart upgrade).
+   From Kafka 4.3's vocabulary (KIP-1066): a cordoned log dir accepts
+   no *new* partition placements — even from topics that name it —
+   while existing partitions keep serving in place.
+2. **Move the partitions off.** The convenient path is an annotation
+   on each affected topic:
+
+   ```bash
+   kubectl annotate kafkatopic orders kaas.rs/migrate-to-volume=bulk
+   ```
+
+   Each broker then walks the partitions it leads through the move —
+   close, copy to the target volume, flip the placement record, reclaim
+   the source — one partition every few seconds. The annotation is
+   level-triggered and idempotent: partitions already on the target are
+   skipped, and you remove the annotation once
+   `status.volumeAssignments` shows the move complete. (The underlying
+   Kafka API is `AlterReplicaLogDirs`, which you can also drive
+   directly; the destination is the log-dir *path* as shown by
+   `kafka-log-dirs.sh --describe`.)
+
+   What clients see: producers and consumers of a partition get a brief
+   retriable `LEADER_NOT_AVAILABLE` window while its files are copied —
+   standard client retries absorb it. If the record flip fails, the
+   copy is rolled back; data location and placement record never
+   disagree.
 3. **Remove the member** from `storage.pool[]` once it hosts nothing,
    and delete its PVC.
 
-A topic whose `spec.storage.volumes` still names the removed member
-keeps its `Ready=False InvalidVolumeBinding` status until the spec is
-updated — placement records pointing at a vanished member resolve to
-the `default` dir (the engine's fail-safe), which is why draining
-*before* removal matters.
+## Observing the pool
 
-## Backend guidance
+- `kafka-log-dirs.sh --describe` — every member with its partitions,
+  and (v4 of the API, KIP-827) per-dir `TotalBytes` / `UsableBytes`.
+- Metrics: `kaas.log.dir.total.bytes` and `kaas.log.dir.usable.bytes`,
+  labelled per log dir — the pool's headroom on a dashboard.
+- `kubectl get kafkatopics.kaas.rs -o wide` plus the status fields
+  above for placement and drift.
+
+## Choosing backends
 
 - **FSx ONTAP / ANF** (incl. manual-QoS capacity pools): each member is
   an independently provisioned throughput budget — the pool multiplies
@@ -142,3 +204,25 @@ the `default` dir (the engine's fail-safe), which is why draining
   OSD-journal latency before promoting a member to a hot tier.
 - **Single-filer homelab NFS**: members share one filer's budget; the
   pool is for layout/tier testing only.
+
+## Implementation notes (for contributors)
+
+The flow of placement truth, and where it lives in the source:
+
+```text
+operator reconciler: round-robin over the eligible set
+  (crates/kaas-operator-controllers/src/kafkatopic_controller.rs)
+  → KafkaTopic.status.volumeAssignments
+    → broker topic watch (crates/kaas-k8s/src/kube_watchers.rs)
+      → TopicRegistry, the engine's PlacementResolver
+        (crates/kaas-broker/src/topic_registry.rs)
+        → partition path resolution in the storage engine
+          (crates/kaas-storage/src/disk.rs)
+```
+
+Segment files, the manifest, the producer-state snapshot, and the
+recovery checkpoint live inside the partition directory and follow it
+between volumes. Topic-level files (`.config.json`, the topic-identity
+stamp) are written to every root hosting the topic's partitions, and
+the topic-incarnation check and orphan sweep run per root — a deleted
+topic is reclaimed wherever its partitions were placed.
